@@ -1,0 +1,4 @@
+- insert:
+    - id: envdock
+      name: dsh-envdock
+      config: {}

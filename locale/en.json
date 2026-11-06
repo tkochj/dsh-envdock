@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "EnvDock",
+    "description": "Detects installed Node, Python, Git and terminals, lets you pick the default version and shell, and hands the agent a ready-made environment brief."
+  }
+}

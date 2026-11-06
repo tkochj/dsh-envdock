@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "EnvDock · 环境码头",
+    "description": "自动探测 Node、Python、Git 与终端，选默认版本和默认终端，并把一份现成的环境简报交给 AI。"
+  }
+}

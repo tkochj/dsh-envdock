@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+
+# runtime leftovers
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# local state and audit output
+.envdock-audit/
+
+# test artifacts
+coverage/
