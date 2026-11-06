@@ -56,7 +56,7 @@ dsh plugin --profile web add dsh-envdock
 1. 打开 dsh 侧边栏的 **插件** 页。
 2. 选择「安装」，填入插件来源，二选一：
    - 本地目录：`link:D:\plugins\envdock`（换成你的实际路径）
-   - Git 地址：仓库的 git URL（需可访问）
+   - Git 地址：本仓库的 git URL
 3. 确认 **EnvDock** 处于开启状态，然后重启 dsh。
 
 ### 方式三：命令行（本地目录）
