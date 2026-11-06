@@ -2,13 +2,14 @@
 
 # EnvDock · Environment Dock
 
+[![npm](https://img.shields.io/npm/v/dsh-envdock?logo=npm)](https://www.npmjs.com/package/dsh-envdock)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6)
 ![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek%20Harness-plugin-4B32C3)
 
 > Tell the agent, before it asks: where Node / Python / Git live on this Windows machine, which version to use, and how commands must be written in this terminal.
 
-![EnvDock panel: default terminal and toolchain](docs/panel.png)
+![EnvDock panel: default terminal and toolchain](https://raw.githubusercontent.com/tkochj/dsh-envdock/main/docs/panel.png)
 
 On Windows it is common to have several Node / Python / Git installations side by side, while cmd, PowerShell and Git Bash all disagree on syntax. Without EnvDock the agent has to probe with `where node`, guess paths, write the wrong command and retry. **EnvDock is a DeepSeek Harness (dsh) plugin** that detects your toolchain at startup, injects a ready-made environment brief into the agent's context, and optionally takes over the command tool so the agent always speaks the right shell dialect. No configuration required.
 
@@ -40,7 +41,15 @@ On Windows it is common to have several Node / Python / Git installations side b
 
 **Requirements:** Windows and an installed DeepSeek Harness (dsh). Plugins are installed per profile; the commands below use `web`.
 
-### Option 1 — Web plugin page (recommended)
+### Option 1 — npm (recommended)
+
+```powershell
+dsh plugin --profile web add dsh-envdock
+```
+
+Enable EnvDock in the plugin page if needed, then restart dsh. Replace `web` with `tui`, `headless`, etc. for other profiles.
+
+### Option 2 — Web plugin page (local directory / Git)
 
 1. Open **Plugins** in the dsh sidebar.
 2. Choose install and provide the source:
@@ -48,7 +57,7 @@ On Windows it is common to have several Node / Python / Git installations side b
    - or a Git URL
 3. Make sure **EnvDock** is enabled, then restart dsh.
 
-### Option 2 — Command line
+### Option 3 — Command line (local directory)
 
 ```powershell
 # Install into the web profile; link: takes the plugin directory
@@ -75,7 +84,7 @@ Enable EnvDock in the plugin page if it was not enabled automatically. Replace `
 3. Pick default versions and a default terminal where needed.
 4. Return to the session — the agent already has the updated brief.
 
-![Health checks, brief and options](docs/health.png)
+![Health checks, brief and options](https://raw.githubusercontent.com/tkochj/dsh-envdock/main/docs/health.png)
 
 ## What the agent sees
 
@@ -149,7 +158,7 @@ Uninstall from the plugin page, then restart dsh.
 - Working directory is the current session's, not the dsh process cwd.
 - Windows-first; cross-platform details are handled but non-Windows detection is weaker.
 
-Deep implementation notes and design trade-offs: [docs/DESIGN.md](docs/DESIGN.md) (Chinese).
+Deep implementation notes and design trade-offs: [docs/DESIGN.md](https://github.com/tkochj/dsh-envdock/blob/main/docs/DESIGN.md) (Chinese).
 
 ## Development
 

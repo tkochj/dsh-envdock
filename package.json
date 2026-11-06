@@ -11,6 +11,7 @@
     "environment"
   ],
   "type": "module",
+  "main": "index.js",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -2,13 +2,14 @@
 
 # EnvDock · 环境码头
 
+[![npm](https://img.shields.io/npm/v/dsh-envdock?logo=npm)](https://www.npmjs.com/package/dsh-envdock)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6)
 ![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek%20Harness-plugin-4B32C3)
 
 > 让 AI 开口之前就知道：你的 Windows 上 Node / Python / Git 装在哪、该用哪个版本、这个终端里命令该怎么写。
 
-![EnvDock 面板：默认终端与工具链](docs/panel.png)
+![EnvDock 面板：默认终端与工具链](https://raw.githubusercontent.com/tkochj/dsh-envdock/main/docs/panel.png)
 
 Windows 上做开发，机器里常常并排放着好几套 Node / Python / Git，cmd、PowerShell、Git Bash 又各有各的语法。没有 EnvDock 时，AI 要先 `where node` 试探、猜路径、写错命令再重试——慢，而且容易在版本和语法上踩坑。
 
@@ -42,7 +43,15 @@ Windows 上做开发，机器里常常并排放着好几套 Node / Python / Git�
 
 **前置条件**：Windows + 已安装 DeepSeek Harness（dsh）。插件以当前 profile 为单位安装，下面以 `web` 为例。
 
-### 方式一：在 dsh 插件页安装（推荐）
+### 方式一：从 npm 安装（推荐）
+
+```powershell
+dsh plugin --profile web add dsh-envdock
+```
+
+安装后在插件页确认 EnvDock 已启用，然后重启 dsh。其他 profile 把 `web` 换成对应名字。
+
+### 方式二：在 dsh 插件页安装（本地目录 / Git）
 
 1. 打开 dsh 侧边栏的 **插件** 页。
 2. 选择「安装」，填入插件来源，二选一：
@@ -50,7 +59,7 @@ Windows 上做开发，机器里常常并排放着好几套 Node / Python / Git�
    - Git 地址：仓库的 git URL（需可访问）
 3. 确认 **EnvDock** 处于开启状态，然后重启 dsh。
 
-### 方式二：命令行
+### 方式三：命令行（本地目录）
 
 ```powershell
 # 把插件装进 web profile；link: 后面是插件目录的绝对路径
@@ -77,7 +86,7 @@ dsh web
 3. **按需调整**：点「设为默认」选版本；点默认终端切 PowerShell / cmd / Git Bash。
 4. **回到会话**：AI 已经拿到新的环境简报，直接干活。
 
-![健康检查、环境简报与选项](docs/health.png)
+![健康检查、环境简报与选项](https://raw.githubusercontent.com/tkochj/dsh-envdock/main/docs/health.png)
 
 ## 面板导览
 
@@ -189,7 +198,7 @@ dsh 的宿主 shell 公布了沙箱模式（如 `workspace-write`）时，EnvDoc
 - 定位以 Windows 为主；PATH 分隔符、`PATHEXT`、`.cmd/.bat` 垫片、POSIX 终端目录等跨平台细节已处理，但 Windows 之外的探测能力弱于 Windows。
 - 版本探测结果在内存中缓存 10 分钟（key 含 mtime + size）；升级二进制或切换版本会自然重测，「重新探测」会清空缓存。
 
-更深的实现细节、设计取舍与自测说明见 [docs/DESIGN.md](docs/DESIGN.md)。
+更深的实现细节、设计取舍与自测说明见 [docs/DESIGN.md](https://github.com/tkochj/dsh-envdock/blob/main/docs/DESIGN.md)。
 
 ## 开发
 
