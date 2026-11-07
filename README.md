@@ -35,7 +35,7 @@ Windows 上做开发，机器里常常并排放着好几套 Node / Python / Git�
 - **版本管理器探测**：nvm-windows、pyenv-win、conda、fnm、mise 会解析已装版本（前四还解析当前激活项）；Volta、asdf 只报「在场」，不猜输出格式。只有命令在 PATH 上或根目录真实存在才算在场。
 - **默认版本一键切换**：多版本并存时，在面板里把某个绝对路径设为默认，AI 下一轮就按它来。
 - **环境简报注入**：系统、默认终端、各工具绝对路径与版本、终端语法要点，一次写进运行上下文。
-- **终端接管（可选）**：默认终端与宿主自带的命令工具不同族时，注册一个固定名字的 `envd_shell` 并隐藏宿主 shell；切换终端立即生效，不出现「没有命令工具」的空窗。
+- **终端接管（可选）**：默认终端与宿主自带的命令工具不同族时，注册一个固定名字的 `envd_shell` 并隐藏宿主 shell；切换终端立即生效，不出现「没有命令工具」的空窗；宿主 shell 挡不掉的会话反过来让路，仍然只留一个命令工具。
 - **健康检查**：应用商店占位符、失效的 PATH 目录、旧版本、npm/Node 不配套、版本管理器激活版本与 PATH 不一致等。
 - **`envd` 工具**：让 AI 随时按名字解析工具（`resolve`）、取简报（`summary`）、查健康（`check`）、切换默认版本（`set_default`）。
 
@@ -93,7 +93,7 @@ dsh web
 | 区域 | 作用 |
 |---|---|
 | **默认终端** | 在 PowerShell 7、Windows PowerShell、cmd、Git Bash 中选择，也可自定义终端（路径 + 名称 + 参数模板）。 |
-| **命令工具** | 显示模型**实际拿到**的那个命令工具：宿主自带，或 EnvDock 已接管（并注明隐藏了哪些宿主 shell）。 |
+| **命令工具** | 显示模型**实际拿到**的那个命令工具：宿主自带，或 EnvDock 已接管（并注明隐藏了哪些宿主 shell）。混合状态按会话汇总：「N 个会话用宿主工具」，悬停看逐会话终局。 |
 | **宿主 PTY** | 仅作参考；它不是模型拿到的命令工具。 |
 | **工具链** | 每个工具的当前默认路径与全部版本，可复制路径、设为默认。 |
 | **版本管理器** | 在场才出现，含已装版本与激活项；一个都没有就明说没有。 |
@@ -142,8 +142,9 @@ dsh web
 - 与宿主同族时**什么都不做**，不会重复造工具。
 - **沙箱按会话判，不按部署默认档判**：dsh 的执行器公布 `sandboxMode`（那是**部署默认档**），真实策略要逐会话 `sandboxPolicy.resolve({ session })`。只有本会话解析出 `danger-full-access` 时 EnvDock 才直接接管；一个会话被围栏不影响别的会话（`read-only` / `workspace-write` 的会话保留宿主命令工具）。
 - **认得出 dsh-ops 的 `ops_bash`**（cordis 模式下顶替官方 shell）：它按 bash 家族参与接管判定，不会被漏认成「两个命令工具并列」。
+- **宿主 shell 挡不掉的会话自动让路**：宿主把 `ops_bash` 这类工具注册在作用域私有层时，`restrict` 实测挡不掉它；EnvDock 反过来藏自己的 `envd_shell`，该会话只留宿主那一个命令工具。三种计划（遮挡宿主 / 让路 / 沙箱让路）互斥，任何会话都不会零工具。
 - **工具表一变就立刻对账**（监听 `tools/change`，同一轮变更合并成一次）：别的插件晚一步注册或撤销 shell 时，遮挡是立即收敛，不用等 5 秒轮询。
-- **被藏掉的宿主 shell 直呼时给可操作拒绝**（`tools.guard`）：告诉你「已由 EnvDock 接管，改用 `envd_shell`，语法见简报」，而不是一个没头没尾的 `UNKNOWN_TOOL`；我们的工具在那个作用域不可见时守卫放行，绝不制造两个都调不到。
+- **被藏掉的命令工具直呼时给可操作拒绝**（`tools.guard`）：宿主 shell 被藏时告诉你「已由 EnvDock 接管，改用 `envd_shell`」；反过来，让路 / 沙箱会话里 `envd_shell` 被藏后仍被直呼时，会告诉你「改用宿主自带的那个 shell」。都不是没头没尾的 `UNKNOWN_TOOL`；替代工具在那个作用域不可见时守卫放行，绝不制造两个都调不到。
 - 注册失败或被同名工具占用时，EnvDock 放弃接管并保留宿主工具，不会让你一个命令工具都没有。
 
 ## 设置与状态
@@ -154,7 +155,7 @@ dsh web
 |---|---|---|
 | 简报注入 | 开 | 是否把环境简报写进 AI 上下文 |
 | 终端接管 | 自动 | `自动`：不同族才接管；`总是接管`：强制接管；`只给简报`：不注册命令工具 |
-| 沙箱下接管 | 委托执行 | 本会话被围栏时：`委托执行` 把命令交给带围栏的宿主执行器跑（终端选择仍生效）；`直接拒绝` 保留宿主命令工具、EnvDock 不接管 |
+| 沙箱下接管 | 委托执行 | 围栏会话里 EnvDock 自己的工具还没被摘掉时：`委托执行` 把命令经带围栏的宿主执行器转发（不绕过沙箱，这次调用的终端选择仍生效）；`直接拒绝` 一律报错。稳态围栏会话用的是宿主命令工具 |
 | 允许局域网访问 | 关 | 面板 API 默认只放行本机 loopback；打开后局域网可读面板数据 |
 | 自定义工具 | 空 | 补充 PATH 之外的工具 |
 
@@ -171,6 +172,44 @@ Remove-Item ~/.dsh/envdock.json
 
 ## 常见问题
 
+**为什么模型看到的是 `ops_bash` 而不是 `envd_shell`？**
+
+命令工具是**逐会话**定终局的：同一台 dsh 里，不同会话的模型可能拿到不同的命令工具。看到 `ops_bash` 通常意味着 EnvDock 在这个会话里**让路**了，不是接管坏了。三种终局在面板上分别长这样：
+
+| 终局 | 什么时候出现 | 模型手里 | 面板 |
+|---|---|---|---|
+| 直连接管（takeover） | 本会话无围栏，且宿主 shell 已被成功遮挡 | `envd_shell`（只能写默认终端的语法） | 全部会话都直连接管时挂「模型可见」；有其它终局时头部按会话汇总 |
+| 让路（yield） | 宿主 shell 挂在作用域私有层，`restrict` 实测挡不掉（dsh-ops 的 cordis 模式就把 `ops_bash` 按会话挂） | 宿主那个工具（如 `ops_bash`） | 「N 个会话用宿主工具」 |
+| 沙箱让路（sandbox-host） | 本会话的有效策略不是 `danger-full-access`（如 `workspace-write`） | 宿主带围栏的命令工具 | 「N 个会话用宿主工具」 |
+
+让路时 EnvDock 反过来藏自己的 `envd_shell`，保证这个会话里只有一个命令工具；简报会直说：
+
+```text
+· 命令工具: `ops_bash`(宿主自带,用 bash / sh 语法);宿主 shell 在这个会话里挡不掉(作用域私有),EnvDock 的 `envd_shell` 已让路,直接用这个
+```
+
+三种计划互斥，任何会话都不会出现「两个都藏」（零命令工具）。另外两种情况同样不遮挡宿主工具：接管开关切到 **只给简报**，或 `envd_shell` 注册失败 / 被同名工具占用——宿主工具照常干活。
+
+**面板头部说「N 个会话用宿主工具」是什么意思？**
+
+EnvDock 逐会话对账，不搞「全局接管成功 / 失败」一刀切。N 是当前**没有走直连接管**的会话数——这些会话的模型拿到的是宿主自带的命令工具（原因见上一条：让路，或沙箱让路）。所以同一台机器上一部分会话用 `envd_shell`、一部分会话用宿主工具是正常状态，面板按会话说，才不会替这些会话说谎。
+
+- 悬停这个 badge 能看到逐会话明细：会话 id 前 8 位 · 终局（直连接管 / 未接管 / 让路 / 沙箱让路）· 实际生效的工具名，以及接管诊断（注册 / 拆除 / 遮挡，委托 / 守卫拒绝 / 让路轮次等计数）。
+- `/envdock-api` 的 `commandTool.scopes` 就是面板读的那份事实：`kind`、`tool`、`hidden`（实际生效的遮挡）、`hidesOwn`、`confined`、`mode`。
+- 没有这种会话时头部只挂「模型可见」的 ok badge（全是直连接管）。
+
+**沙箱会话为什么没有 `envd_shell`？**
+
+因为本会话解析出的有效策略不是 `danger-full-access`（例如 `workspace-write`）。EnvDock 自己的执行走 `ctx.subprocess`，那条路没有 `sandboxPolicy` 入口——自己 spawn 就等于绕过沙箱，所以围栏会话它不接管：藏掉 `envd_shell`，让模型用宿主自带、带围栏的命令工具。简报里的原话是：
+
+```text
+· 命令工具: `ops_bash`(宿主自带,用 bash / sh 语法);本会话被沙箱围栏(workspace-write):EnvDock 不接管(接管会绕过沙箱)
+```
+
+注意 `sandboxMode` 只是**部署默认档**：能力位（执行器会不会围栏）/ 部署默认 / 本会话有效策略是三层事实，最后一层逐会话问 `sandboxPolicy.resolve({ session })`。想在这个会话里也用 EnvDock 的终端，把会话权限切到 `danger-full-access`，下一次对账就接管（工具表变更时更快）；但如果宿主 shell 是作用域私有、`restrict` 挡不掉，即使无围栏也还是走让路，模型仍用宿主工具。
+
+「沙箱下接管 → 委托执行」不是「围栏下也能用 EnvDock 终端」的开关：委托把命令经带围栏的宿主执行器转发（`resolve` + `execute`，命令走 `ENVD_CMD`，围栏挂在宿主进程上、子进程继承），它只在 `envd_shell` 还没从该会话工具表里摘掉的极短窗口（策略刚变严、对账还没跑到）才有意义——稳态下这个会话根本没有 `envd_shell`。
+
 **装了但侧边栏没有 EnvDock？**
 去插件页确认 EnvDock 已启用，并重启 dsh。用命令行安装时，确认 `add` 的是正确的 profile。
 
@@ -178,9 +217,7 @@ Remove-Item ~/.dsh/envdock.json
 这是精简执行器的取舍：单次前台、输出截断、支持 `cwd` / `timeoutMs`，没有后台作业、tail 文件、`sandbox_permissions` 升级。把这些能力看得更重要时，在面板把「终端接管」切到 **只给简报**，宿主工具立刻回来。
 
 **为什么面板说「本会话被沙箱围栏，EnvDock 不接管」？**
-因为本会话的有效策略不是 `danger-full-access`。注意 dsh 执行器公布的 `sandboxMode` 只是**部署默认档**，不代表你的会话真的被围栏——面板会把「能力位 / 部署默认 / 本会话有效策略」三层分开写。想在这个会话里也用 EnvDock 的终端，有两个办法：
-1. 把会话权限切到 `danger-full-access`，EnvDock 立刻照常接管；
-2. 保留围栏：面板 →「沙箱下接管」选 **委托执行**（默认值）。命令会经带围栏的宿主执行器跑（围栏挂在宿主进程上，子终端继承），终端选择照样生效；选 **直接拒绝** 则保持旧行为，用宿主自带的命令工具。
+因为本会话的有效策略不是 `danger-full-access`（降级行为见上文「沙箱会话为什么没有 `envd_shell`」）。dsh 执行器公布的 `sandboxMode` 只是**部署默认档**，不代表你的会话真的被围栏——面板把「能力位 / 部署默认 / 本会话有效策略」三层分开写，逐会话策略在 `/envdock-api` 的 `sandbox.scopes` 里逐个给出。想让这个会话也用 EnvDock 的终端：把会话权限切到 `danger-full-access`，下一次对账就接管（工具表变更时更快）。
 
 **健康检查说「版本管理器激活的版本和 PATH 不一致」？**
 典型场景：`fnm` 激活了 v20，但 PATH 上的 `node` 仍解析到系统安装的 v24。按提示在命令里用绝对路径，或先 `fnm use` / `pyenv shell` 让 PATH 跟上。
@@ -200,11 +237,12 @@ Remove-Item ~/.dsh/envdock.json
 - 版本探测依赖宿主的 `subprocess` 服务；没有它时只做 PATH 扫描，版本列显示「版本未知」。
 - Volta / asdf 只报「在场」，不解析版本列表（输出格式随平台变，宁可不猜）。
 - 接管后的命令工具是精简执行器（见上文），不提供后台作业等宿主 shell 的高级能力。
+- 宿主把命令工具注册在作用域私有层时，`restrict` 挡不掉它：EnvDock 只能让路，该会话不出现 `envd_shell`（这不是配置项）。
 - 工作目录取**当前会话的工作目录**，不是 dsh 进程的 cwd。
 - 定位以 Windows 为主；PATH 分隔符、`PATHEXT`、`.cmd/.bat` 垫片、POSIX 终端目录等跨平台细节已处理，但 Windows 之外的探测能力弱于 Windows。
 - 版本探测结果在内存中缓存 10 分钟（key 含 mtime + size）；升级二进制或切换版本会自然重测，「重新探测」会清空缓存。
 
-更深的实现细节、设计取舍与自测说明见 [docs/DESIGN.md](https://github.com/tkochj/dsh-envdock/blob/main/docs/DESIGN.md)。
+更深的实现细节、设计取舍与自测说明见 [docs/DESIGN.md](https://github.com/tkochj/dsh-envdock/blob/main/docs/DESIGN.md)；各版本改了什么见 [CHANGELOG.md](https://github.com/tkochj/dsh-envdock/blob/main/CHANGELOG.md)。
 
 ## 开发
 
@@ -214,6 +252,7 @@ client.js         Client：侧边栏图标 + 中央面板
 cordis.patch.yml  bundle patch（insert id: envdock）
 locale/           meta.title / meta.description（中英）
 icon.svg          插件图标
+CHANGELOG.md      版本变更记录
 test/parsers.mjs        版本管理器输出解析自测
 test/i18n-check.mjs     client.js 静态自检（词条/占位符/slot）
 test/host-harness.mjs   Host 运行时夹具（替身服务，全链路）

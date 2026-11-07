@@ -33,7 +33,7 @@ On Windows it is common to have several Node / Python / Git installations side b
 - **Version managers** — nvm-windows, pyenv-win, conda, fnm, mise are parsed (including the active version where available); Volta and asdf are reported only as present. A manager counts as present only if its command is on PATH or its root really exists.
 - **One-click default version** — choose any absolute path in the panel; the agent sees it on the next turn.
 - **Environment brief injection** — system, default terminal, absolute tool paths and versions, and syntax notes, written into the run context.
-- **Optional shell takeover** — when the default terminal and the host command tool belong to different families, EnvDock registers a stable `envd_shell`, hides the host shells, and switches terminals without an empty tool window.
+- **Optional shell takeover** — when the default terminal and the host command tool belong to different families, EnvDock registers a stable `envd_shell`, hides the host shells, and switches terminals without an empty tool window. A session whose host shell cannot be masked gets EnvDock's tool hidden instead (yield), so it still has exactly one command tool.
 - **Health checks** — Store stubs, dead PATH entries, EOL versions, npm/Node mismatch, active version manager vs. PATH drift.
 - **The `envd` tool** — `summary` / `resolve` / `check` / `set_default` for the agent.
 
@@ -117,6 +117,8 @@ The `envd` tool:
 - The host command tool is `pwsh` / `bash` etc. When your default terminal is a different family, EnvDock registers a stable `envd_shell` and hides the host shells.
 - Same family: EnvDock does nothing and adds no duplicate tool.
 - Sandbox is judged **per session**, not by the deployment default: the executor's `sandboxMode` is only the deployment default; the effective policy comes from `sandboxPolicy.resolve({ session })`. EnvDock takes over directly only when this session resolves to `danger-full-access`; a confined session does not disable takeover for other sessions (confined sessions keep the host command tool).
+- **A scope-private host shell cannot be masked** — when the host tool is mounted in a scope-private layer (dsh-ops mounts `ops_bash` per session), `restrict` cannot hide it, so EnvDock hides its own `envd_shell` instead. The three plans (mask the host shell / yield / sandbox-host) are mutually exclusive, so no session ever ends up with zero command tools.
+- **A hidden command tool gives an actionable refusal** (`tools.guard`): a hidden host shell says "EnvDock took over, use `envd_shell`"; conversely, a hidden `envd_shell` in a yield / sandbox session says "use the host's own shell". Neither degrades into a bare `UNKNOWN_TOOL`; if the replacement is not visible in that scope the guard stays silent, so you never end up with two dead ends.
 - If registration fails or the name is taken, EnvDock keeps the host tool instead of leaving you without any command tool.
 
 ## Settings and reset
@@ -127,7 +129,7 @@ State lives in `~/.dsh/envdock.json` (atomic writes; a corrupt file is backed up
 |---|---|---|
 | Inject brief | on | Write the environment brief into the agent context |
 | Shell takeover | auto | `auto`: only for different families; `always`; `brief only` |
-| Sandbox takeover | delegate | When this session is confined: `delegate` runs commands through the confining host executor (terminal choice still works); `refuse` keeps the host command tool and does not take over |
+| Sandbox takeover | delegate | While EnvDock's own tool is still in a confined session's tool table: `delegate` forwards the command through the confining host executor (no sandbox bypass; the terminal choice still applies to that call); `refuse` always errors. In steady state a confined session uses the host command tool |
 | Allow LAN | off | Panel API is loopback-only unless enabled |
 | Custom tools | empty | Add tools outside PATH |
 
@@ -140,11 +142,49 @@ Uninstall from the plugin page, then restart dsh.
 
 ## FAQ
 
+**Why does the model see `ops_bash` instead of `envd_shell`?**
+
+The command tool is decided **per session**: in one dsh process, different sessions can hand the model different tools. Seeing `ops_bash` usually means EnvDock **yielded** in that session — takeover is not broken. The three outcomes:
+
+| Outcome | When | What the model has | Panel |
+|---|---|---|---|
+| Takeover | unconfined session, host shell masked successfully | `envd_shell` (default terminal syntax only) | "model can see it" when every session is on direct takeover; otherwise the header summarises per session |
+| Yield | the host shell lives in a scope-private layer and `restrict` cannot hide it (dsh-ops mounts `ops_bash` per session) | that host tool (`ops_bash`) | "N session(s) use the host tool" |
+| Sandbox-host | this session's effective policy is not `danger-full-access` (e.g. `workspace-write`) | the host's confined command tool | same summary |
+
+When yielding, EnvDock hides its own `envd_shell` instead, so the session still has exactly one command tool; the brief says so directly:
+
+```text
+· 命令工具: `ops_bash`(宿主自带,用 bash / sh 语法);宿主 shell 在这个会话里挡不掉(作用域私有),EnvDock 的 `envd_shell` 已让路,直接用这个
+```
+
+The three plans are mutually exclusive, so no session ever has both tools hidden (zero command tools). Two more cases keep the host tool untouched: takeover set to **brief only**, or `envd_shell` registration failing / the name being taken by another plugin.
+
+**What does "N session(s) use the host tool" mean?**
+
+EnvDock reconciles per session rather than declaring one global takeover state. N counts the sessions that are **not** on direct takeover — their model runs the host's own command tool (the reasons above: yield, or sandbox-host). So a machine with some sessions on `envd_shell` and others on the host tool is normal; the panel says it per session instead of overstating for them.
+
+- Hovering the badge shows the per-session detail: the first 8 characters of the session id · outcome (takeover / no takeover / yield / sandbox-host) · the tool actually in effect, plus takeover diagnostics (register / dispose / deny, delegate / guard-refusal / yield-tick counters).
+- `/envdock-api` exposes the same facts as `commandTool.scopes`: `kind`, `tool`, `hidden` (masks actually in effect), `hidesOwn`, `confined`, `mode`.
+- With no such sessions the header keeps the plain "model can see it" OK badge (all sessions on direct takeover).
+
+**Why is there no `envd_shell` in a sandbox-confined session?**
+
+Because this session's effective policy is not `danger-full-access` (e.g. `workspace-write`). EnvDock executes through `ctx.subprocess`, which has no `sandboxPolicy` entry — spawning directly would bypass the sandbox. So it does not take over in a confined session: it hides `envd_shell` and lets the model use the host's own confined command tool. The brief says:
+
+```text
+· 命令工具: `ops_bash`(宿主自带,用 bash / sh 语法);本会话被沙箱围栏(workspace-write):EnvDock 不接管(接管会绕过沙箱)
+```
+
+`sandboxMode` is only the **deployment default**: capability (whether the executor confines at all) / deployment default / this session's effective policy are three separate facts, and the last one is resolved per session via `sandboxPolicy.resolve({ session })`. To use EnvDock's terminal here, switch the session policy to `danger-full-access`; takeover applies on the next reconcile (sooner when the tool table changes). But if the host shell is scope-private and cannot be masked, the session still yields even without confinement — the model keeps using the host tool.
+
+"Sandbox takeover → Delegate" is not a switch that keeps EnvDock's terminal in a confined session: delegate forwards the command through the confining host executor (`resolve` + `execute`, the command travels in `ENVD_CMD`, the confinement rides the host process and is inherited), and it only matters during the short window before `envd_shell` is removed from that session's tool table. In steady state the session has no `envd_shell` at all.
+
 **No EnvDock in the sidebar?** Check that it is enabled in the plugin page and restart dsh; confirm you installed it into the profile you boot.
 
 **The agent now has only `envd_shell` and fewer capabilities?** The takeover tool is a minimal executor: one foreground command, truncated output, `cwd` / `timeoutMs` — no background jobs, tail files or `sandbox_permissions`. Switch takeover to **brief only** to get the host tool back.
 
-**"This session is sandbox-confined, EnvDock will not take over"?** Because this session's effective policy is not `danger-full-access`. The executor's `sandboxMode` is only the deployment default — the panel keeps three facts apart: capability, deployment default, and this session's effective policy. To keep using EnvDock's terminal here: (1) switch the session policy to `danger-full-access` and takeover applies immediately, or (2) keep the confinement and set **Sandbox takeover → Delegate** (the default): commands run through the confining host executor (the confinement rides the host process and is inherited by the child terminal), so the terminal choice still works. **Refuse** keeps the old behaviour and uses the host command tool.
+**"This session is sandbox-confined, EnvDock will not take over"?** Because this session's effective policy is not `danger-full-access` (see "Why is there no `envd_shell` in a sandbox-confined session?" above for what happens instead). The executor's `sandboxMode` is only the deployment default — the panel keeps three facts apart: capability, deployment default, and this session's effective policy, and `/envdock-api` lists the per-session policies under `sandbox.scopes`. To use EnvDock's terminal here, switch the session policy to `danger-full-access`; takeover applies on the next reconcile (sooner when the tool table changes).
 
 **Health check says the active version manager differs from PATH?** e.g. fnm is on Node 20 while PATH resolves the system Node 24. Use absolute paths or run `fnm use` first.
 
@@ -156,10 +196,11 @@ Uninstall from the plugin page, then restart dsh.
 - Version detection needs the host `subprocess` service; without it only PATH scanning is done.
 - Volta / asdf are presence-only.
 - The takeover executor is deliberately minimal.
+- A scope-private host command tool cannot be masked; EnvDock yields and that session keeps the host tool.
 - Working directory is the current session's, not the dsh process cwd.
 - Windows-first; cross-platform details are handled but non-Windows detection is weaker.
 
-Deep implementation notes and design trade-offs: [docs/DESIGN.md](https://github.com/tkochj/dsh-envdock/blob/main/docs/DESIGN.md) (Chinese).
+Deep implementation notes and design trade-offs: [docs/DESIGN.md](https://github.com/tkochj/dsh-envdock/blob/main/docs/DESIGN.md) (Chinese). What changed in each version: [CHANGELOG.md](https://github.com/tkochj/dsh-envdock/blob/main/CHANGELOG.md).
 
 ## Development
 
@@ -169,6 +210,7 @@ client.js         Client: sidebar icon + panel
 cordis.patch.yml  bundle patch (insert id: envdock)
 locale/           meta.title / meta.description
 icon.svg          Plugin icon
+CHANGELOG.md      Release notes
 test/             parsers, i18n check, host harness
 docs/             Design notes and screenshots
 ```
