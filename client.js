@@ -159,6 +159,26 @@ window.__ModuleLoader__.load({
         syncExecutorFamily: '执行器',
         syncScopeAnomalies: '命令工具异常会话',
         syncGuardMissing: '拒绝守卫未注册',
+        // 简洁版:头部只有一行 + 1 个 badge;卡片负责「命令工具 / 接管」的可视化。
+        statusTakeover: '接管中',
+        statusYield: '让路',
+        statusSandbox: '沙箱',
+        statusHost: '未接管',
+        statusAnomaly: '异常',
+        cmdNotTakenOver: '未接管',
+        takeoverCard: '命令工具 / 接管',
+        perSession: '逐会话',
+        sessionsMore: '还有 {n} 个',
+        runtimeShellTools: '已识别宿主命令工具',
+        runtimeShellToolsNone: '未识别到',
+        learnedTag: '自动识别',
+        executorPlatform: '平台默认',
+        modeLabel: '接管模式',
+        diagHealthy: '接管正常',
+        diagAutoHint: '有问题时自动展开',
+        versionChip: '{n} 个版本',
+        copyPathHint: '点击复制路径',
+        scopeAnomalyFlagged: '⚠ 对账判定异常',
       },
       en: {
         title: 'EnvDock',
@@ -290,6 +310,25 @@ window.__ModuleLoader__.load({
         syncExecutorFamily: 'executor',
         syncScopeAnomalies: 'broken command-tool sessions',
         syncGuardMissing: 'refusal guard missing',
+        statusTakeover: 'takeover',
+        statusYield: 'stepped aside',
+        statusSandbox: 'sandboxed',
+        statusHost: 'not taken over',
+        statusAnomaly: 'broken',
+        cmdNotTakenOver: 'not taken over',
+        takeoverCard: 'Command tool / takeover',
+        perSession: 'per session',
+        sessionsMore: '{n} more',
+        runtimeShellTools: 'recognized host command tools',
+        runtimeShellToolsNone: 'none detected',
+        learnedTag: 'auto-detected',
+        executorPlatform: 'platform default',
+        modeLabel: 'takeover mode',
+        diagHealthy: 'takeover healthy',
+        diagAutoHint: 'expands automatically on problems',
+        versionChip: '{n} versions',
+        copyPathHint: 'click to copy path',
+        scopeAnomalyFlagged: '⚠ flagged by reconcile',
       },
     }
 
@@ -299,12 +338,11 @@ window.__ModuleLoader__.load({
 .envd-scroll{overflow:auto;display:flex;flex-direction:column;gap:26px;padding:22px 28px 64px;max-width:860px;width:100%;margin:0 auto;box-sizing:border-box;min-height:0}
 .envd-scroll>*{flex:none}
 
-/* 头部 */
-.envd-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
-.envd-h1{margin:0;font-size:19px;font-weight:650;display:flex;align-items:center;gap:8px;letter-spacing:.1px}
-.envd-sub{margin:7px 0 0;font-size:12px;color:var(--dsw-alias-label-secondary);display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px}
-.envd-sub b{color:var(--dsw-alias-label-primary);font-weight:600}
-.envd-sep{opacity:.4}
+/* 头部:压缩成一行(标题 + 终端/状态短语 + 1 个 badge + 问题数 + 刷新) */
+.envd-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.envd-h1{margin:0;font-size:19px;font-weight:650;display:flex;align-items:center;gap:8px;letter-spacing:.1px;flex:none}
+.envd-headline{font-size:12.5px;color:var(--dsw-alias-label-secondary);white-space:nowrap;min-width:0}
+.envd-headline b{color:var(--dsw-alias-label-primary);font-weight:600}
 .envd-attn{color:var(--dsw-alias-state-warn-primary);font-weight:600}
 
 /* 分节:没有卡片框,只有标题 + 一条细线 */
@@ -322,6 +360,8 @@ window.__ModuleLoader__.load({
 .envd-badge.bad{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 14%,transparent)}
 /* warn:有会话没走 EnvDock 的命令工具 —— 不是错误(设计如此),但也不是「全绿」 */
 .envd-badge.warn{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 14%,transparent)}
+/* muted:EnvDock 没接管,模型用的是宿主自带的工具(事实,不是故障) */
+.envd-badge.muted{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2)}
 
 /* 按钮:只有「有边框」和「无边框」两种,行内动作用 ghost */
 .envd-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;height:28px;padding:0 11px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:transparent;color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;white-space:nowrap;flex:none;transition:background .12s ease,border-color .12s ease,color .12s ease}
@@ -379,15 +419,11 @@ window.__ModuleLoader__.load({
 .envd-input::placeholder{color:var(--dsw-alias-label-secondary);opacity:.65}
 .envd-input:focus{border-color:var(--dsw-alias-brand-primary);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-brand-primary) 16%,transparent)}
 
-/* 开关 / 选项 */
 .envd-switch{position:relative;width:34px;height:19px;border-radius:999px;background:var(--dsw-alias-border-l2);cursor:pointer;transition:background .15s ease;flex:none;border:none;padding:0}
 .envd-switch::after{content:"";position:absolute;top:3px;left:3px;width:13px;height:13px;border-radius:50%;background:var(--dsw-alias-label-primary);transition:transform .15s ease}
 .envd-switch.on{background:var(--dsw-alias-brand-primary)}
 .envd-switch.on::after{transform:translateX(15px);background:var(--dsw-alias-bg-base)}
 .envd-switch:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
-.envd-opt{display:flex;align-items:center;justify-content:space-between;gap:14px;font-size:12.5px;min-height:26px}
-.envd-opt-text{display:flex;flex-direction:column;gap:1px;min-width:0}
-.envd-hint{font-size:11px;color:var(--dsw-alias-label-secondary)}
 
 /* 诊断:只在有问题时出现 */
 .envd-diag{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11.5px;color:var(--dsw-alias-label-secondary);align-items:center}
@@ -416,6 +452,66 @@ window.__ModuleLoader__.load({
 .envd-skel{height:13px;border-radius:6px;background:var(--dsw-alias-bg-layer-2);animation:envd-pulse 1.4s ease-in-out infinite}
 @keyframes envd-pulse{0%,100%{opacity:.55}50%{opacity:1}}
 @media (prefers-reduced-motion:reduce){.envd-skel{animation:none}}
+
+/* ── 接管卡片:整个面板唯一带边框的块(置顶主信息,值得一个框) ── */
+.envd-card{display:flex;flex-direction:column;gap:11px;border:1px solid var(--dsw-alias-border-l1);border-radius:12px;background:var(--dsw-alias-bg-layer-1);padding:13px 15px}
+.envd-card-h{display:flex;align-items:center;gap:8px;min-width:0}
+.envd-card-h h2{margin:0;font-size:12.5px;font-weight:650}
+.envd-card-b{display:flex;flex-direction:column;gap:10px;min-width:0}
+.envd-statusline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.envd-statuschip{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:650;white-space:nowrap;flex:none;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
+.envd-statuschip .dot{width:5px;height:5px;border-radius:50%;background:currentColor;flex:none}
+.envd-statuschip.ok{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 14%,transparent)}
+.envd-statuschip.warn{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 14%,transparent)}
+.envd-statuschip.bad{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 14%,transparent)}
+.envd-muted{color:var(--dsw-alias-label-secondary)}
+.envd-tool{font-size:12px;font-weight:600}
+.envd-mini-label{font-size:11px;color:var(--dsw-alias-label-secondary);font-weight:500;flex:none}
+.envd-chips-sm .envd-chip{height:22px;padding:0 8px;font-size:11px;border-radius:6px}
+
+/* 逐会话:一行一个会话,异常行整体红 */
+.envd-sessions{display:flex;flex-direction:column;gap:2px;min-width:0}
+.envd-srow{display:flex;align-items:center;gap:8px;font-size:11.5px;min-width:0;padding:1px 0}
+.envd-srow.bad{color:var(--dsw-alias-state-error-primary)}
+.envd-sdot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--dsw-alias-label-secondary)}
+.envd-sdot.ok{background:var(--dsw-alias-state-success-primary)}
+.envd-sdot.warn{background:var(--dsw-alias-state-warn-primary)}
+.envd-sdot.idle{background:var(--dsw-alias-state-idle-primary)}
+.envd-sdot.bad{background:var(--dsw-alias-state-error-primary)}
+.envd-sid{font-weight:600}
+.envd-skind{color:var(--dsw-alias-label-secondary)}
+.envd-stool{color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.envd-srow.bad .envd-skind,.envd-srow.bad .envd-stool{color:inherit}
+.envd-sreason{margin-left:auto;font-size:11px;font-weight:600;white-space:nowrap;flex:none}
+
+/* 已识别宿主命令工具 chips */
+.envd-shelltools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.envd-shellchip{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-2);font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap}
+.envd-shellchip .envd-mono{color:var(--dsw-alias-label-primary)}
+.envd-learned{color:var(--dsw-alias-brand-primary);font-weight:700}
+
+/* 诊断:默认折叠,有问题自动展开一行红摘要 */
+.envd-diagbox{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--dsw-alias-border-l1);padding-top:10px;min-width:0}
+.envd-diagrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.envd-diag-sum{font-size:11.5px;color:var(--dsw-alias-label-secondary);min-width:0;word-break:break-word}
+.envd-diag-sum.danger{color:var(--dsw-alias-state-error-primary);font-weight:600}
+.envd-diag-detail{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--dsw-alias-label-secondary);align-items:center;min-width:0}
+.envd-diag-detail .w{color:var(--dsw-alias-state-warn-primary);min-width:0;word-break:break-word}
+.envd-diag-detail .e{color:var(--dsw-alias-state-error-primary);min-width:0;word-break:break-word}
+.envd-legacy{font-size:11.5px;color:var(--dsw-alias-state-warn-primary);line-height:1.5}
+
+/* 工具链:路径本身可点(复制),不再单占一个按钮 */
+.envd-pathbtn{display:block;max-width:100%;text-align:left;background:transparent;border:none;padding:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;font-size:11.5px;color:var(--dsw-alias-label-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;min-width:0}
+.envd-pathbtn:hover{color:var(--dsw-alias-brand-primary);text-decoration:underline}
+.envd-pathbtn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:4px}
+
+/* 折叠行(健康检查 / 简报):一行就够 */
+.envd-foldrow{display:flex;align-items:center;gap:8px;width:100%;background:transparent;border:none;padding:0;font-size:12px;font-family:inherit;color:var(--dsw-alias-label-primary);cursor:pointer;min-width:0;text-align:left}
+.envd-foldrow:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:6px}
+
+/* 底部一行紧凑开关 */
+.envd-foot{display:flex;align-items:center;gap:18px;flex-wrap:wrap;border-top:1px solid var(--dsw-alias-border-l1);padding-top:12px;font-size:12px}
+.envd-foot-item{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary)}
 `
 
     // ───────────────────────────────────── 数据 ──
@@ -423,6 +519,8 @@ window.__ModuleLoader__.load({
 
     // 宿主探测本机环境偶尔会卡住:没有上限的话面板会一直转圈,请求永远不回来。
     const API_TIMEOUT_MS = 15000
+    // 面板静默轮询间隔:宿主会在会话/工具表变化后自己重算,面板跟着拉一份就够。
+    const POLL_MS = 15000
 
     // 优先 AbortSignal.timeout(原生、不用自己清定时器);老环境退到 AbortController + setTimeout。
     function abortPlan() {
@@ -505,12 +603,18 @@ window.__ModuleLoader__.load({
       const [shellArgs, setShellArgs] = useState('')
       const [shellFormOpen, setShellFormOpen] = useState(false)
       const [briefOpen, setBriefOpen] = useState(false)
+      const [healthOpen, setHealthOpen] = useState(false)
+      const [sessionsOpen, setSessionsOpen] = useState(false)
+      const [diagOpen, setDiagOpen] = useState(false)
+      const [openVersions, setOpenVersions] = useState({})
       const [toolPath, setToolPath] = useState('')
       const [toolName, setToolName] = useState('')
       const [toolFormOpen, setToolFormOpen] = useState(false)
       const [draftError, setDraftError] = useState('')
       const mounted = useRef(true)
       const seqRef = useRef(0)
+      // 上一次成功写入的 payload:轮询拿回同一份事实时跳过 setData,避免无意义重渲染。
+      const lastJson = useRef('')
       const busy = busyCount > 0
 
       // busy 用计数不用布尔:并发请求各持一份,谁先结束都不会把别人的状态放掉,也不会掉成负数。
@@ -560,29 +664,55 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      const load = useCallback(async () => {
-        const seq = nextSeq()
-        begin()
-        try {
-          const next = await callApi(null)
-          // 过期响应(期间又发起了别的请求)不许写 state,否则慢的那份会把新的盖回去
-          if (!mounted.current || !isCurrent(seq)) return
-          if (!next || next.ok !== true) {
-            setError((next && next.error) || t.loadFailed)
-          } else {
-            setData(next)
+      const fetchState = useCallback(
+        async (silent) => {
+          const seq = nextSeq()
+          if (!silent) begin()
+          try {
+            const next = await callApi(null)
+            // 过期响应(期间又发起了别的请求)不许写 state,否则慢的那份会把新的盖回去
+            if (!mounted.current || !isCurrent(seq)) return
+            if (!next || next.ok !== true) {
+              // 静默轮询失败不改面板(网络抖一下就让整块变红没有意义),只有手动刷新才报。
+              if (!silent) setError((next && next.error) || t.loadFailed)
+              return
+            }
             setError('')
+            // payload 没变就不 setData:15s 一次轮询,事实没变时重渲染纯属浪费。
+            const encoded = JSON.stringify(next)
+            if (encoded === lastJson.current) return
+            lastJson.current = encoded
+            setData(next)
+          } catch (e) {
+            if (mounted.current && isCurrent(seq) && !silent) setError(String((e && e.message) || e))
+          } finally {
+            if (!silent && mounted.current) end()
           }
-        } catch (e) {
-          if (mounted.current && isCurrent(seq)) setError(String((e && e.message) || e))
-        } finally {
-          if (mounted.current) end()
-        }
-      }, [t, begin, end, nextSeq, isCurrent])
+        },
+        [t, begin, end, nextSeq, isCurrent],
+      )
+
+      const load = useCallback(() => fetchState(false), [fetchState])
 
       useEffect(() => {
         load()
       }, [load])
+
+      // 15s 静默轮询:只在页面可见时拉(后台标签页白跑宿主探测没有意义)。
+      // 测试桩没有 document → 视为可见;可见性每 tick 现读,切回来不用重建定时器。
+      useEffect(() => {
+        const tick = () => {
+          let visible = true
+          try {
+            if (typeof document !== 'undefined' && document && typeof document.visibilityState === 'string') {
+              visible = document.visibilityState === 'visible'
+            }
+          } catch {}
+          if (visible) fetchState(true)
+        }
+        const id = setInterval(tick, POLL_MS)
+        return () => clearInterval(id)
+      }, [fetchState])
 
       const post = useCallback(
         async (body) => {
@@ -697,9 +827,12 @@ window.__ModuleLoader__.load({
       const ghostAdd = (text, onClick) => h('button', { className: 'envd-btn ghost', onClick, style: { alignSelf: 'flex-start' } }, '+ ' + text)
 
       // ── 行 ──
+      // 工具行:名称 + 默认版本 + 一行省略路径(点路径即复制);多版本才展开候选,平时不占地方。
       const toolRow = (tool) => {
         const versions = tool.versions || []
         const copiedNow = copied === tool.key + ':path'
+        const expanded = openVersions[tool.key] === true
+        const path = tool.defaultPath || ''
         return h(
           'div',
           { className: 'envd-item', key: tool.key },
@@ -709,11 +842,23 @@ window.__ModuleLoader__.load({
             h('span', { className: 'envd-dot' + (tool.defaultVersion ? '' : ' idle'), title: tool.defaultVersion ? t.default : t.versionUnknown }),
             h('span', { className: 'envd-name' }, tool.label),
             h('span', { className: 'envd-ver' }, tool.defaultVersion ? 'v' + tool.defaultVersion : t.versionUnknown),
-            h('button', { className: 'envd-btn ghost', title: tool.defaultPath, onClick: () => copy(tool.defaultPath, tool.key + ':path') }, copiedNow ? '✓ ' + t.copied : t.copy),
+            versions.length > 1
+              ? h(
+                  'button',
+                  { className: 'envd-btn ghost envd-versionchip', 'aria-expanded': expanded, onClick: () => setOpenVersions((prev) => Object.assign({}, prev, { [tool.key]: !expanded })) },
+                  fmt(t.versionChip, { n: versions.length }),
+                )
+              : null,
             tool.custom ? h('button', { className: 'envd-btn ghost', onClick: () => post({ op: 'removeCustomTool', key: tool.key }) }, t.remove) : null,
           ),
-          h('div', { className: 'envd-path envd-mono', title: tool.defaultPath || '' }, tool.defaultPath || ''),
-          versions.length > 1
+          path
+            ? h(
+                'button',
+                { className: 'envd-pathbtn', title: t.copyPathHint + ': ' + path, 'aria-label': t.copyPathHint + ': ' + path, onClick: () => copy(path, tool.key + ':path') },
+                copiedNow ? '✓ ' + t.copied : path,
+              )
+            : null,
+          expanded && versions.length
             ? h(
                 'div',
                 { className: 'envd-vlist' },
@@ -796,8 +941,8 @@ window.__ModuleLoader__.load({
       // 所以这一行在没数据时也要能点到(下面两份互斥,不会重复渲染)。
       const allowLanSwitch = h(
         'div',
-        { className: 'envd-opt' },
-        h('div', { className: 'envd-opt-text' }, h('span', {}, t.allowLan), h('span', { className: 'envd-hint' }, t.allowLanHint)),
+        { className: 'envd-foot-item' },
+        h('span', { title: t.allowLanHint }, t.allowLan),
         h('button', {
           className: 'envd-switch' + (options.allowLan === true ? ' on' : ''),
           'aria-pressed': options.allowLan === true,
@@ -806,56 +951,44 @@ window.__ModuleLoader__.load({
         }),
       )
 
-      // ── 诊断:只在真有问题时出现,健康时把计数收进状态标记的 title ──
-      // s = syncStats;tool = commandTool(含逐会话 scopes);sandbox = 三层沙箱事实(可选)。
-      const diagProblem = (s, tool, sandbox) => {
-        const stats = s && typeof s === 'object' ? s : null
-        const sb = sandbox && typeof sandbox === 'object' ? sandbox : null
-        const scopes = tool && Array.isArray(tool.scopes) ? tool.scopes.filter((x) => x && typeof x === 'object') : []
-        const warns = []
-        // 沙箱:**有围栏会话**或本会话被围栏时才算需要说明的事;部署具备围栏能力是常态,
-        // 以前只要能力位在就挂一行 ⚠,健康机器上也一直红着。
-        const confinedCount = scopes.filter((x) => x.confined === true).length
+      // ── 接管诊断:默认折叠;只在真有问题时自动展开一行红摘要 ──
+      // 事实来自 scopes(逐会话)+ syncStats(计数)。沙箱只在「有围栏会话 / 本会话被围栏 /
+      // 策略未知」时才说 —— 光有围栏能力是常态,不该让健康机器挂一行 ⚠。
+      const diagFacts = () => {
+        const sb = sandboxInfo && typeof sandboxInfo === 'object' ? sandboxInfo : null
+        const items = []
+        const confinedCount = ctScopes.filter((x) => x.confined === true).length
         const policyUnknown = Boolean(sb && sb.policyKnown === false)
-        if (tool && tool.sandbox === true && (confinedCount > 0 || tool.sandboxConfined === true || policyUnknown)) {
+        if (ctSandbox && (confinedCount > 0 || ct.sandboxConfined === true || policyUnknown)) {
           const parts = [sb && sb.capable ? t.sandboxCapable : t.sandboxNoTakeover]
           if (sb && sb.defaultMode) parts.push(t.sandboxDefault + ' ' + sb.defaultMode)
-          if (scopes.length) parts.push(fmt(t.sandboxScopeCount, { n: confinedCount }))
+          if (ctScopes.length) parts.push(fmt(t.sandboxScopeCount, { n: confinedCount }))
           else parts.push(t.sandboxPolicyUnknown)
-          warns.push({ text: parts.join(' · '), title: t.sandboxHint })
+          items.push({ level: 'warn', text: parts.join(' · '), title: t.sandboxHint })
         }
-        // 逐会话异常:模型实际拿不到命令工具 / 接管下宿主工具仍可见 / 挡了却仍可见。
-        // tool 为空就是「一个命令工具都没有」——不能只信服务端的 anomaly 标志,
-        // 旧版 / 半新版本可能没算这条,面板必须自己认得出来。
-        const anomalyScopes = scopes.filter(
-          (x) =>
-            x.anomaly === true ||
-            !x.tool ||
-            x.visible === false ||
-            (x.kind === 'takeover' && Array.isArray(x.hostTools) && x.hostTools.length > 0) ||
-            (Array.isArray(x.leaked) && x.leaked.length > 0),
-        )
-        if (anomalyScopes.length) {
-          warns.push({ text: t.syncScopeAnomalies + ': ' + anomalyScopes.map((x) => String(x.id || '').slice(0, 8)).join(', '), title: t.scopesAnomalyHint })
+        if (anomalySessions.length) {
+          items.push({ level: 'error', text: t.syncScopeAnomalies + ': ' + anomalySessions.map((x) => String(x.id || '').slice(0, 8)).join(', '), title: t.scopesAnomalyHint })
         }
-        if (stats && Array.isArray(stats.unrestrictable) && stats.unrestrictable.length) warns.push({ text: t.syncUnrestrictable + ': ' + stats.unrestrictable.map(String).join(', '), title: t.syncUnrestrictableHint })
-        if (stats && Array.isArray(stats.blockedScopes) && stats.blockedScopes.length) warns.push({ text: t.syncBlockedScopes + ': ' + stats.blockedScopes.map((x) => String(x).slice(0, 8)).join(', '), title: t.syncBlockedScopesHint })
-        // 「让路」是 README 认可的正常终局(不是故障):头部已汇总,这里不再挂 ⚠。
+        if (stats && Array.isArray(stats.unrestrictable) && stats.unrestrictable.length) {
+          items.push({ level: 'warn', text: t.syncUnrestrictable + ': ' + stats.unrestrictable.map(String).join(', '), title: t.syncUnrestrictableHint })
+        }
+        if (stats && Array.isArray(stats.blockedScopes) && stats.blockedScopes.length) {
+          items.push({ level: 'warn', text: t.syncBlockedScopes + ': ' + stats.blockedScopes.map((x) => String(x).slice(0, 8)).join(', '), title: t.syncBlockedScopesHint })
+        }
         const lastError = stats && typeof stats.lastError === 'string' ? stats.lastError.trim() : ''
         const errorAge = stats && Number(stats.lastErrorAt) > 0 ? Math.max(0, Math.round((Date.now() - Number(stats.lastErrorAt)) / 1000)) : 0
-        if (!warns.length && !lastError) return null
-        return h(
-          'div',
-          { className: 'envd-diag' },
-          ...warns.map((w, i) => h('span', { key: 'w' + i, className: 'w', title: w.title }, '⚠ ' + w.text)),
-          lastError
-            ? h(
-                'span',
-                { key: 'e', className: 'e', title: lastError },
-                t.syncLastError + (errorAge > 0 ? '(' + errorAge + 's)' : '') + ': ' + (lastError.length > 160 ? lastError.slice(0, 160) + '…' : lastError),
-              )
-            : null,
-        )
+        // 自动展开的只有「真问题」:异常会话 / 挡不掉的宿主 shell / 没遮挡的作用域 / 最近错误。
+        // 沙箱那一行是事实说明(有围栏会话),不该把诊断区自动顶开、也不染红。
+        const auto =
+          anomalySessions.length > 0 ||
+          Boolean(lastError) ||
+          Boolean(stats && Array.isArray(stats.unrestrictable) && stats.unrestrictable.length) ||
+          Boolean(stats && Array.isArray(stats.blockedScopes) && stats.blockedScopes.length)
+        const redBits = []
+        if (anomalySessions.length) redBits.push(fmt(t.scopesAnomaly, { n: anomalySessions.length }))
+        if (lastError) redBits.push(t.syncLastError + (errorAge > 0 ? '(' + errorAge + 's)' : ''))
+        const summary = auto ? redBits.join(' · ') : items.length ? items.map((x) => x.text).join(' · ') : t.diagHealthy
+        return { auto, danger: auto, summary, items, lastError, errorAge }
       }
       const diagTitle = (s) => {
         if (!s || typeof s !== 'object') return undefined
@@ -945,37 +1078,95 @@ window.__ModuleLoader__.load({
       titleLines.push(diagTitle(stats) || '')
       const ctTitle = titleLines.filter(Boolean).join('\n')
 
-      // ── 头部:一句话说清「哪台机器 / 默认终端 / 命令工具 / 有没有问题」 ──
+      // ── 头部只留 1 个状态 badge:异常红 / 混合黄 / 接管绿 / 未接管灰 ──
+      // 全局 ct.visible 只说明 envd_shell 在不在工具表;真正的结论由 scopes 汇总出来。
+      const headerBadge = !ct
+        ? badge('muted', t.noCommandTool, { title: ctTitle })
+        : ctAnomaly
+          ? badge('bad', fmt(t.scopesAnomaly, { n: anomalyCount }), { title: ctTitle })
+          : ctMixed
+            ? badge('warn', fmt(t.scopesSummary, { n: mixedCount }), { title: ctTitle })
+            : ctVisible === true
+              ? ct.takeover === true
+                ? badge('ok', t.cmdVisible, { title: ctTitle })
+                : badge('muted', t.cmdNotTakenOver, { title: ctTitle })
+              : ctVisible === false
+                ? ctSandbox
+                  ? badge('muted', t.statusSandbox, { title: ctSub })
+                  : badge('bad', t.cmdInvisible, { title: ctSub })
+                : badge('muted', t.noCommandTool, { title: ctTitle })
+
+      // 状态短语:一句短词说清「模型手里的命令工具」是什么状态。优先级:
+      // 异常(会丢工具)> 有会话未接管(host)> 沙箱让路 > 让路 > 接管中。
+      const statusKind = !ct
+        ? 'host'
+        : ctAnomaly
+          ? 'anomaly'
+          : hasScopeFacts
+            ? hostToolSessions.some((sc) => sc.kind === 'host')
+              ? 'host'
+              : hostToolSessions.some((sc) => sc.kind === 'sandbox-host')
+                ? 'sandbox'
+                : hostToolSessions.length
+                  ? 'yield'
+                  : 'takeover'
+            : ct.takeover === true && ctVisible === true
+              ? 'takeover'
+              : 'host'
+      const statusText = { takeover: t.statusTakeover, yield: t.statusYield, sandbox: t.statusSandbox, host: t.statusHost, anomaly: t.statusAnomaly }[statusKind]
+      const statusTone = statusKind === 'anomaly' ? 'bad' : statusKind === 'takeover' ? 'ok' : statusKind === 'host' ? 'muted' : 'warn'
+
+      // 执行器族:委托执行时命令由谁包装(win32 默认 powershell);source=platform 说明只是平台默认。
+      const executorFamily = stats && stats.executorFamily ? String(stats.executorFamily) : ''
+      const executorText = executorFamily
+        ? t.syncExecutorFamily + ' ' + executorFamily + (stats && stats.executorFamilySource === 'platform' ? '(' + t.executorPlatform + ')' : '')
+        : ''
+
+      // 已识别的宿主命令工具(运行时扫到的名字 + 家族);learned = 名字/描述启发式认出来的。
+      const runtimeShellTools = (stats && Array.isArray(stats.runtimeShellTools) ? stats.runtimeShellTools : [])
+        .map((item) =>
+          typeof item === 'string'
+            ? { name: item, family: '', learned: false }
+            : { name: item && item.name ? String(item.name) : '', family: item && item.family ? String(item.family) : '', learned: Boolean(item && item.learned) },
+        )
+        .filter((item) => item.name)
+
+      // 逐会话行:一行一个会话,异常行整体红 + 行尾给原因。
+      const scopeIsBad = (sc) =>
+        sc.anomaly === true ||
+        !sc.tool ||
+        sc.visible === false ||
+        (sc.kind === 'takeover' && Array.isArray(sc.hostTools) && sc.hostTools.length > 0) ||
+        (Array.isArray(sc.leaked) && sc.leaked.length > 0)
+      const scopeReasons = (sc) => {
+        const reasons = []
+        if (!sc.tool || sc.visible === false) reasons.push(t.scopeAnomalyInvisible)
+        if (sc.kind === 'takeover' && Array.isArray(sc.hostTools) && sc.hostTools.length) reasons.push(fmt(t.scopeAnomalyLeak, { tools: sc.hostTools.join(', ') }))
+        if (Array.isArray(sc.leaked) && sc.leaked.length) reasons.push(fmt(t.scopeAnomalyLeak, { tools: sc.leaked.join(', ') }))
+        // 只有服务端 anomaly 标志、客户端看不出具体原因时,也要给一句话,不能红了却不说为什么。
+        if (!reasons.length && sc.anomaly === true) reasons.push(t.scopeAnomalyFlagged)
+        return reasons
+      }
+      const dotTone = (sc) => (scopeIsBad(sc) ? 'bad' : sc.kind === 'takeover' ? 'ok' : sc.kind === 'host' ? 'idle' : 'warn')
+
+      // ── 头部:一行说清「哪台机器 / 默认终端 / 状态 / 有没有问题」 ──
       const head = h(
         'div',
         { className: 'envd-head' },
-        h(
-          'div',
-          { style: { minWidth: 0 } },
-          h('h1', { className: 'envd-h1' }, h('span', { style: { color: 'var(--dsw-alias-brand-primary)', display: 'flex', flex: 'none' } }, h(EnvDockIcon, { size: 19 })), t.title),
-          h(
-            'p',
-            { className: 'envd-sub' },
-            data
-              ? h('span', {}, h('b', {}, shell.label || '—'), shell.version ? ' v' + shell.version : '')
-              : h('span', {}, t.loading),
-            data ? h('span', { className: 'envd-sep' }, '·') : null,
-            ct && ct.name ? h('span', { className: 'envd-mono' }, ct.name) : null,
-            ctAnomaly
-              ? badge('bad', fmt(t.scopesAnomaly, { n: anomalyCount }), { title: ctTitle })
-              : ctMixed
-                ? badge('warn', fmt(t.scopesSummary, { n: mixedCount }), { title: ctTitle })
-                : ctVisible === true
-                  ? badge('ok', t.cmdVisible, { title: ctTitle })
-                  : null,
-            ctVisible === false && !ctSandbox ? badge('bad', t.cmdInvisible, { title: ctSub }) : null,
-            issues.length ? h('span', { className: 'envd-attn' }, '⚠ ' + fmt(t.countItems, { n: issues.length })) : null,
-            data && data.detectedAt
-              ? h('span', { className: 'envd-sep' }, '·')
-              : null,
-            data && data.detectedAt ? h('span', { title: platform ? [platform.os, platform.release, platform.arch].filter(Boolean).join(' ') : '' }, t.updatedAt + ' ' + fmtTime(data.detectedAt)) : null,
-          ),
-        ),
+        h('h1', { className: 'envd-h1' }, h('span', { style: { color: 'var(--dsw-alias-brand-primary)', display: 'flex', flex: 'none' } }, h(EnvDockIcon, { size: 19 })), t.title),
+        data
+          ? h(
+              'span',
+              { className: 'envd-headline', title: data.detectedAt ? t.updatedAt + ' ' + fmtTime(data.detectedAt) : undefined },
+              h('b', {}, shell.label || '—'),
+              shell.version ? ' v' + shell.version : '',
+              ' · ',
+              statusText,
+            )
+          : h('span', { className: 'envd-headline' }, t.loading),
+        data ? headerBadge : null,
+        issues.length ? h('span', { className: 'envd-attn' }, '⚠ ' + fmt(t.countItems, { n: issues.length })) : null,
+        h('span', { className: 'envd-grow' }),
         h('button', { className: 'envd-btn primary', disabled: busy, onClick: () => post({ op: 'refresh' }) }, busy ? t.detecting : t.refresh),
       )
 
@@ -1022,27 +1213,128 @@ window.__ModuleLoader__.load({
         )
       }
 
-      // 数据没读到时只给 allowLan 这一节:被 403 挡在门外的人在这里打开它
-      if (!data) {
-        body.push(section(t.options, [allowLanSwitch], null, 'options'))
-      }
-
       if (data) {
-        // 默认终端
-        body.push(
-          section(
-            t.defaultShell,
-            [
-              shellChips,
-              h(
+        // ── 置顶卡片:命令工具 / 接管(终端 + 状态 + 逐会话 + 宿主工具 + 诊断折叠) ──
+        // 逐会话最多 5 行,超出的收进「还有 N 个」;数字与行数都从 scopes 事实来。
+        const SCOPE_ROW_LIMIT = 5
+        const scopeRows = hasScopeFacts ? ctScopes : fallbackSessions
+        const shownScopes = sessionsOpen ? scopeRows : scopeRows.slice(0, SCOPE_ROW_LIMIT)
+        const moreScopes = Math.max(0, scopeRows.length - shownScopes.length)
+        const scopeRow = (sc, index) => {
+          const reasons = scopeReasons(sc)
+          const bad = scopeIsBad(sc)
+          return h(
+            'div',
+            { className: 'envd-srow' + (bad ? ' bad' : ''), key: 'sc-' + String(sc.id || index), 'data-kind': String(sc.kind || 'unknown') },
+            h('span', { className: 'envd-sdot ' + dotTone(sc) }),
+            h('span', { className: 'envd-sid envd-mono' }, String(sc.id || '?').slice(0, 8)),
+            h('span', { className: 'envd-skind' }, scopeKindText(sc.kind)),
+            h('span', { className: 'envd-stool envd-mono' }, sc.tool ? String(sc.tool) : t.noCommandTool),
+            reasons.length ? h('span', { className: 'envd-sreason' }, reasons.join(' · ')) : null,
+          )
+        }
+        const diag = diagFacts()
+        const diagShown = diagOpen || diag.auto
+        // 接管模式 chips(自动 / 总是 / 只给简报)
+        const modeChips = h(
+          'div',
+          { className: 'envd-chips envd-chips-sm', role: 'group', 'aria-label': t.modeLabel },
+          [
+            ['auto', t.takeoverAuto],
+            ['takeover', t.takeoverOn],
+            ['off', t.takeoverOff],
+          ].map((pair) =>
+            h('button', { key: pair[0], className: 'envd-chip' + (takeoverMode === pair[0] ? ' on' : ''), 'aria-pressed': takeoverMode === pair[0], onClick: () => post({ op: 'setOption', shellTakeover: pair[0] }) }, pair[1]),
+          ),
+        )
+        // 沙箱下接管 chips:只有「真有围栏会话」或「执行器具备围栏能力」时才值得占地方。
+        const confinedSessions = ctScopes.filter((sc) => sc.confined === true).length
+        const sandboxModeChips =
+          confinedSessions > 0 || (sandboxInfo && sandboxInfo.capable)
+            ? h(
                 'div',
-                { className: 'envd-meta' },
-                // 只显示「模型实际会用的那个终端」的路径。
-                // 宿主 ptyShell(subprocess.terminalEnvironment 的 defaultShell)是 dsh 自己开 PTY 用的,
-                // 跟命令工具无关,还可能和默认终端不一致 —— 放在这里只会误导,所以不显示(API 里仍保留)。
-                shell.path ? h('span', { className: 'envd-mono', title: shell.path }, shell.path) : null,
-              ),
-              diagProblem(data.syncStats, ct, data.sandbox),
+                { className: 'envd-chips envd-chips-sm', role: 'group', 'aria-label': t.sandboxTakeover, title: t.sandboxDelegateHint },
+                [
+                  ['delegate', t.sandboxDelegate],
+                  ['refuse', t.sandboxRefuse],
+                ].map((pair) =>
+                  h('button', { key: pair[0], className: 'envd-chip' + (sandboxTakeoverMode === pair[0] ? ' on' : ''), 'aria-pressed': sandboxTakeoverMode === pair[0], onClick: () => post({ op: 'setOption', sandboxTakeover: pair[0] }) }, pair[1]),
+                ),
+              )
+            : null
+        const statusLine = h(
+          'div',
+          { className: 'envd-statusline' },
+          h('span', { className: 'envd-statuschip ' + statusTone }, h('span', { className: 'dot' }), statusText),
+          h('span', { className: 'envd-tool envd-mono' }, ct && ct.name ? String(ct.name) : t.noCommandTool),
+          executorText ? h('span', { className: 'envd-exec envd-muted', style: { fontSize: '11.5px' } }, executorText) : null,
+          h('span', { className: 'envd-grow' }),
+          modeChips,
+          sandboxModeChips,
+        )
+        const sessionBlock = h(
+          'div',
+          { className: 'envd-sessions' },
+          h(
+            'div',
+            { className: 'envd-statusline' },
+            h('span', { className: 'envd-mini-label' }, t.perSession),
+            moreScopes > 0 || sessionsOpen
+              ? h('button', { className: 'envd-btn ghost envd-morebtn', 'aria-expanded': sessionsOpen, onClick: () => setSessionsOpen((v) => !v) }, sessionsOpen ? t.collapse : fmt(t.sessionsMore, { n: moreScopes }))
+              : null,
+            h('span', { className: 'envd-grow' }),
+            hasScopeFacts ? null : h('span', { className: 'envd-legacy' }, t.scopesLegacyNote),
+          ),
+          shownScopes.length ? shownScopes.map(scopeRow) : null,
+        )
+        const shellToolBlock = h(
+          'div',
+          { className: 'envd-shelltools' },
+          h('span', { className: 'envd-mini-label' }, t.runtimeShellTools),
+          runtimeShellTools.length
+            ? runtimeShellTools.map((item) =>
+                h(
+                  'span',
+                  { className: 'envd-shellchip', key: item.name, title: item.learned ? t.learnedTag : undefined },
+                  h('span', { className: 'envd-mono' }, item.name),
+                  item.family ? h('span', { className: 'envd-muted' }, ' · ' + item.family) : null,
+                  item.learned ? h('span', { className: 'envd-learned', title: t.learnedTag }, ' ✦') : null,
+                ),
+              )
+            : h('span', { className: 'envd-muted', style: { fontSize: '11.5px' } }, t.runtimeShellToolsNone),
+        )
+        const diagBlock = h(
+          'div',
+          { className: 'envd-diagbox' },
+          h(
+            'div',
+            { className: 'envd-diagrow' },
+            h('span', { className: 'envd-mini-label' }, t.diag),
+            h('span', { className: 'envd-diag-sum' + (diag.danger ? ' danger' : ''), title: diag.auto ? t.diagAutoHint : undefined }, diag.summary),
+            h('span', { className: 'envd-grow' }),
+            h('button', { className: 'envd-btn ghost', 'aria-expanded': diagShown, title: diag.auto ? undefined : t.diagAutoHint, onClick: () => setDiagOpen((v) => !v) }, diagShown ? t.collapse : t.expand),
+          ),
+          diagShown
+            ? h(
+                'div',
+                { className: 'envd-diag-detail' },
+                ...diag.items.map((item, i) => h('span', { key: 'dg' + i, className: item.level === 'error' ? 'e' : 'w', title: item.title }, '⚠ ' + item.text)),
+                diag.lastError
+                  ? h('span', { key: 'dge', className: 'e', title: diag.lastError }, t.syncLastError + (diag.errorAge > 0 ? '(' + diag.errorAge + 's)' : '') + ': ' + (diag.lastError.length > 160 ? diag.lastError.slice(0, 160) + '…' : diag.lastError))
+                  : null,
+                diagTitle(stats) ? h('span', { key: 'dgc' }, diagTitle(stats)) : null,
+              )
+            : null,
+        )
+        body.push(
+          h(
+            'section',
+            { className: 'envd-card', key: 'takeover' },
+            h('div', { className: 'envd-card-h' }, h('h2', {}, t.takeoverCard)),
+            h(
+              'div',
+              { className: 'envd-card-b' },
+              shellChips,
               shellFormOpen
                 ? h(
                     'div',
@@ -1078,9 +1370,11 @@ window.__ModuleLoader__.load({
                     ),
                   )
                 : ghostAdd(t.customShell, () => setShellFormOpen(true)),
-            ],
-            null,
-            'shell',
+              statusLine,
+              sessionBlock,
+              shellToolBlock,
+              diagBlock,
+            ),
           ),
         )
 
@@ -1141,106 +1435,67 @@ window.__ModuleLoader__.load({
           ),
         )
 
-        // 健康检查:没问题就整节不出现
+        // 健康检查:没问题整节不出现;有问题也只一行计数,点开才看列表。
         if (issues.length) {
           const hasError = issues.some((i) => i.level === 'error')
           body.push(
-            section(t.health, h('div', { className: 'envd-issues' }, issues.map(issueRow)), h('span', { className: 'n', style: { color: hasError ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-warn-primary)' } }, fmt(t.countItems, { n: issues.length })), 'health'),
+            section(
+              t.health,
+              [
+                h(
+                  'button',
+                  { className: 'envd-foldrow envd-fold-health', 'aria-expanded': healthOpen, onClick: () => setHealthOpen((v) => !v) },
+                  h('span', { style: { color: hasError ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-state-warn-primary)', fontWeight: 600 } }, fmt(t.countItems, { n: issues.length })),
+                  h('span', { className: 'envd-muted' }, healthOpen ? t.collapse : t.expand),
+                ),
+                healthOpen ? h('div', { className: 'envd-issues' }, issues.map(issueRow)) : null,
+              ],
+              null,
+              'health',
+            ),
           )
         }
 
-        // 环境简报:默认收起
+        // 环境简报:默认折叠成一行(展开 / 复制)
         body.push(
           section(
             t.brief,
             [
-              briefOpen ? h('pre', { className: 'envd-pre envd-mono' }, options.injectBrief === true ? data.brief || t.never : t.briefOff) : null,
               h(
                 'div',
-                { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                { className: 'envd-statusline' },
+                h('span', { className: 'envd-muted' }, options.injectBrief === true ? t.briefHint : t.briefOff),
+                h('span', { className: 'envd-grow' }),
                 h('button', { className: 'envd-btn ghost', onClick: () => copy(data.brief || '', 'brief') }, copied === 'brief' ? '✓ ' + t.copied : t.copyBrief),
-                h('button', { className: 'envd-btn ghost', onClick: () => setBriefOpen((v) => !v) }, briefOpen ? t.collapse : t.expand),
+                h('button', { className: 'envd-btn ghost envd-fold-brief', 'aria-expanded': briefOpen, onClick: () => setBriefOpen((v) => !v) }, briefOpen ? t.collapse : t.expand),
               ),
+              briefOpen ? h('pre', { className: 'envd-pre envd-mono' }, options.injectBrief === true ? data.brief || t.never : t.briefOff) : null,
             ],
-            h('span', { className: 'n' }, options.injectBrief === true ? t.briefHint : t.briefOff),
+            null,
             'brief',
           ),
         )
-
-        // 选项
-        body.push(
-          section(
-            t.options,
-            [
-              h(
-                'div',
-                { className: 'envd-opt' },
-                h('span', {}, t.injectBrief),
-                h('button', {
-                  className: 'envd-switch' + (options.injectBrief === true ? ' on' : ''),
-                  'aria-pressed': options.injectBrief === true,
-                  'aria-label': t.injectBrief,
-                  onClick: () => post({ op: 'setOption', injectBrief: options.injectBrief !== true }),
-                }),
-              ),
-              allowLanSwitch,
-              h(
-                'div',
-                { className: 'envd-opt' },
-                h('span', {}, t.takeover),
-                h(
-                  'div',
-                  { className: 'envd-chips', role: 'group', 'aria-label': t.takeover },
-                  [
-                    ['auto', t.takeoverAuto],
-                    ['takeover', t.takeoverOn],
-                    ['off', t.takeoverOff],
-                  ].map((pair) =>
-                    h(
-                      'button',
-                      {
-                        key: pair[0],
-                        className: 'envd-chip' + (takeoverMode === pair[0] ? ' on' : ''),
-                        'aria-pressed': takeoverMode === pair[0],
-                        onClick: () => post({ op: 'setOption', shellTakeover: pair[0] }),
-                      },
-                      pair[1],
-                    ),
-                  ),
-                ),
-              ),
-              sandboxInfo && sandboxInfo.capable
-                ? h(
-                    'div',
-                    { className: 'envd-opt' },
-                    h('span', { title: t.sandboxDelegateHint }, t.sandboxTakeover),
-                    h(
-                      'div',
-                      { className: 'envd-chips', role: 'group', 'aria-label': t.sandboxTakeover },
-                      [
-                        ['delegate', t.sandboxDelegate],
-                        ['refuse', t.sandboxRefuse],
-                      ].map((pair) =>
-                        h(
-                          'button',
-                          {
-                            key: pair[0],
-                            className: 'envd-chip' + (sandboxTakeoverMode === pair[0] ? ' on' : ''),
-                            'aria-pressed': sandboxTakeoverMode === pair[0],
-                            onClick: () => post({ op: 'setOption', sandboxTakeover: pair[0] }),
-                          },
-                          pair[1],
-                        ),
-                      ),
-                    ),
-                  )
-                : null,
-            ],
-            null,
-            'options',
-          ),
-        )
       }
+
+      // 底部一行:两个开关(allowLan 必须在 if (data) 之外 —— 被 403 挡在门外时它是唯一的解法)
+      body.push(
+        h(
+          'div',
+          { className: 'envd-foot', key: 'foot' },
+          h(
+            'div',
+            { className: 'envd-foot-item' },
+            h('span', {}, t.injectBrief),
+            h('button', {
+              className: 'envd-switch' + (options.injectBrief === true ? ' on' : ''),
+              'aria-pressed': options.injectBrief === true,
+              'aria-label': t.injectBrief,
+              onClick: () => post({ op: 'setOption', injectBrief: options.injectBrief !== true }),
+            }),
+          ),
+          allowLanSwitch,
+        ),
+      )
 
       return h('div', { className: 'envd-root' }, h('style', {}, CSS), h('div', { className: 'envd-scroll' }, body))
     }

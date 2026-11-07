@@ -136,7 +136,29 @@ function stateIssue() {
   }
 }
 
+/**
+ * 状态文件的内存缓存。
+ *
+ * 简报每个模型请求都要读一次 state;以前每次都 readFileSync + JSON.parse。
+ * 用「mtime+size」当签名:文件没变就直接复用解析结果,别把磁盘读放进热路径。
+ * 任何写入路径结束都会主动失效,不依赖 mtime 精度。
+ */
+let stateCache = { signature: null, value: null }
+function stateFileSignature() {
+  try {
+    const st = statSync(STATE_FILE)
+    return st.mtimeMs + ':' + st.size
+  } catch {
+    return 'missing'
+  }
+}
+function invalidateStateCache() {
+  stateCache = { signature: null, value: null }
+}
+
 function readState() {
+  const signature = stateFileSignature()
+  if (stateCache.value && stateCache.signature === signature) return stateCache.value
   let raw = null
   try {
     raw = JSON.parse(readFileSync(STATE_FILE, 'utf8'))
@@ -146,13 +168,15 @@ function readState() {
     if (error && error.code !== 'ENOENT') noteStateCorrupt(error)
     raw = null
   }
-  return {
+  const normalized = {
     ...DEFAULT_STATE,
     ...(raw || {}),
     options: normalizeOptions(raw && raw.options),
     selections: normalizeSelections(raw && raw.selections),
     customTools: Array.isArray(raw && raw.customTools) ? raw.customTools.map(normalizeCustomTool).filter(Boolean) : [],
   }
+  stateCache = { signature, value: normalized }
+  return normalized
 }
 
 function writeState(patch) {
@@ -183,6 +207,8 @@ function writeState(patch) {
     }
     // 写成功 = 状态文件恢复健康:面板上的「损坏」issue 可以收了(备份文件仍留着)。
     stateCorrupt = null
+    // 内存缓存跟着失效:下一次读必须看到刚写的内容
+    invalidateStateCache()
     // 状态变了(自定义工具 / 默认版本 / 选项),下一趟探测必须重扫,
     // 不能继续把 45 秒前的旧快照端给面板。
     invalidateDetection()
@@ -577,6 +603,7 @@ const SHELL_TOOL_FAMILY = {
 
 /** 发现顺序:先看宿主最可能自带的那个。 */
 const SHELL_TOOL_ORDER = IS_WIN ? ['pwsh', 'powershell', 'cmd', 'bash', 'ops_bash'] : ['bash', 'zsh', 'sh', 'ops_bash']
+const SHELL_TOOL_NAMES = Object.freeze(Object.keys(SHELL_TOOL_FAMILY))
 
 /**
  * 名字里的家族 token:用来认 `ops_bash` 之外的第三方发布名(`tenant_bash`、`pwsh_sandbox` 之类)。
@@ -779,7 +806,7 @@ function createRuntime() {
  * 能力位与有效策略必须分开报:以前把「执行器会围栏」当成「本会话在围栏」,
  * 于是在 danger-full-access 的会话里也谎报 workspace-write、并把接管永久锁死。
  */
-function commandToolState(runtime, isVisible, gate) {
+function commandToolState(runtime, isVisible, gate, includeScopes = true) {
   const probe = typeof isVisible === 'function' ? isVisible : null
   const denies = Array.isArray(runtime.denyNames) ? runtime.denyNames.slice() : []
   const g = gate && typeof gate === 'object' ? gate : null
@@ -800,7 +827,7 @@ function commandToolState(runtime, isVisible, gate) {
      * 逐会话终局(panel/API 用):哪个会话的模型实际拿到哪个命令工具、为什么。
      * 解析时复制一份,调用方改坏了也不会污染运行态账本。
      */
-    scopes: Array.isArray(runtime.scopeToolFacts)
+    scopes: includeScopes && Array.isArray(runtime.scopeToolFacts)
       ? runtime.scopeToolFacts.map((fact) => ({
           id: String(fact.id || ''),
           kind: String(fact.kind || 'host'),
@@ -1650,7 +1677,7 @@ function brief(detection, state, probeIn, runtime) {
     const probe = probeIn && typeof probeIn.visible === 'function' ? probeIn : null
     const gate = probe && typeof probe.gate === 'function' ? probe.gate() : null
     const visible = (name) => (probe && typeof probe.visible === 'function' ? Boolean(probe.visible(name)) : false)
-    const commandState = commandToolState(runtime, visible, gate)
+    const commandState = commandToolState(runtime, visible, gate, false)
     // API 简报没有 agent:它只能报全局视图,逐会话结论必须指路 scopes。
     const sessionless = Boolean(probeIn && probeIn.sessionless === true)
     // 逐会话事实:这个会话里模型实际拿到哪个宿主工具、终局是什么。
@@ -2722,7 +2749,7 @@ export function apply(ctx, config) {
      */
     /** 运行时候选宿主命令工具名:内置名单 + 学到的第三方发布名 + 各作用域见过/运行时记得的。 */
     const shellCandidates = () => {
-      const names = new Set(Object.keys(SHELL_TOOL_FAMILY))
+      const names = new Set(SHELL_TOOL_NAMES)
       for (const name of rt.learnedShells.keys()) names.add(name)
       for (const name of rt.seenShells) names.add(name)
       for (const cur of scopes.values()) for (const name of cur.hostSeen) names.add(name)
