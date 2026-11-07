@@ -743,6 +743,8 @@ function commandToolState(runtime, isVisible, gate) {
           id: String(fact.id || ''),
           kind: String(fact.kind || 'host'),
           tool: fact.tool || null,
+          hostTool: fact.hostTool || null,
+          hostTools: Array.isArray(fact.hostTools) ? fact.hostTools.slice() : [],
           visible: fact.visible === true,
           hidden: Array.isArray(fact.hidden) ? fact.hidden.slice() : [],
           hidesOwn: fact.hidesOwn === true,
@@ -1583,7 +1585,15 @@ function brief(detection, state, probeIn, runtime) {
     const gate = probe && typeof probe.gate === 'function' ? probe.gate() : null
     const visible = (name) => (probe && typeof probe.visible === 'function' ? Boolean(probe.visible(name)) : false)
     const commandState = commandToolState(runtime, visible, gate)
-    const hostName = commandState.hostName || (commandState.takeover ? null : commandState.name)
+    // 逐会话:这个会话里模型实际拿到的宿主命令工具名。不能用全局 shippedName ——
+    // 同一台机器可能同时挂着官方 pwsh 和 dsh-ops 的 ops_bash,按注册顺序挑出来的那一个
+    // 未必是这个会话里可见的(以前简报因此漏掉「`ops_bash` 仍然可用」这句话)。
+    const scopeFact =
+      probeIn && probeIn.agentId && Array.isArray(runtime.scopeToolFacts)
+        ? runtime.scopeToolFacts.find((fact) => String(fact.id) === String(probeIn.agentId))
+        : null
+    const scopeHost = scopeFact && scopeFact.hostTool ? String(scopeFact.hostTool) : ''
+    const hostName = scopeHost || commandState.hostName || (commandState.takeover ? null : commandState.name)
     const hostFamily = hostName ? SHELL_TOOL_FAMILY[hostName] || '' : ''
     const familyLabel = (f) =>
       ({ bash: 'bash / sh', powershell: 'PowerShell', cmd: 'cmd', wsl: 'WSL', custom: '自定义终端' })[f] || ''
@@ -1618,12 +1628,15 @@ function brief(detection, state, probeIn, runtime) {
       pushSyntax(hostFamily || shell.family)
     } else if (commandState.takeover && commandState.visible) {
       lines.push('  · 命令工具: `' + commandState.name + '`(EnvDock 已接管),里面只能写 ' + shell.label + ' 语法' + sandboxLine)
-      // 挡不掉的宿主 shell(作用域私有 / 别的插件后注册)会和我们并列:说真话,别让模型以为只有一个
-      if (commandState.hostName && visible(commandState.hostName)) {
+      // 挡不掉的宿主 shell(作用域私有 / 别的插件后注册)会和我们并列:说真话,别让模型以为只有一个。
+      // 逐个查**本会话**里可见的宿主 shell,不能只查全局挑出来的那一个 ——
+      // 多宿主 shell 的部署里,以前就漏掉过真正没挡住的 `ops_bash`。
+      const leakHosts = Object.keys(SHELL_TOOL_FAMILY).filter((name) => name !== ENVD_SHELL_NAME && visible(name))
+      if (leakHosts.length) {
         lines.push(
-          '  · 注意:宿主 `' +
-            commandState.hostName +
-            '` 在这个会话里没被挡住,仍然可用;两条命令工具都在时优先用 `' +
+          '  · 注意:宿主 ' +
+            leakHosts.map((name) => '`' + name + '`').join('、') +
+            ' 在这个会话里没被挡住,仍然可用;两条命令工具都在时优先用 `' +
             commandState.name +
             '`(语法见下面几行)',
         )
@@ -1874,7 +1887,7 @@ function commandTool(ctx, activeShell, gateFor, hostFamilyOf, stats) {
   const runDelegated = async (exec, gate, line, shell, cwd, timeoutMs) => {
     const host = ctx.get('shell')
     if (!host || typeof host.resolve !== 'function' || typeof host.execute !== 'function') return null
-    const hostFamily = typeof hostFamilyOf === 'function' ? String(hostFamilyOf() || '') : ''
+    const hostFamily = typeof hostFamilyOf === 'function' ? String(hostFamilyOf(exec && exec.agent ? exec.agent : null) || '') : ''
     if (!hostFamily) return null
     const command = delegatedInvocation(hostFamily, shell, line)
     if (!command) return null
@@ -2222,6 +2235,9 @@ export function apply(ctx, config) {
                 {
                   visible: (name) => hasTool(agent ? agent.ctx : ctx, name, agent || undefined),
                   gate: () => sandboxGate(agent, state.options),
+                  // 简报要按**这个会话**报「模型手里是哪个宿主工具」:router 把 agent id 带进去,
+                  // brief 再查 scopeToolFacts(同一台机器上可以同时挂着 pwsh 和 ops_bash)。
+                  agentId: agent ? String(agent.id) : '',
                 },
                 rt,
               )
@@ -2342,7 +2358,7 @@ export function apply(ctx, config) {
       if (scopes.has(agent.id)) return
       // badNames 是**作用域私有**的:一个作用域挡不掉的名字(作用域私有 shell),
       // 在别的作用域里往往挡得掉 —— 记到全局就等于让那边永久漏挡。
-      scopes.set(agent.id, { agent, actx: agent.ctx, denyKey: '', denyBlockedKey: '', disposers: [], badNames: new Set() })
+      scopes.set(agent.id, { agent, actx: agent.ctx, denyKey: '', denyBlockedKey: '', disposers: [], badNames: new Set(), hostSeen: new Set() })
       // 简报按 scope 查 agent(见 agentOfScope):scope key 就是 agent 本身,查不到就降级说真话。
       try {
         scopeAgents.set(agent, agent)
@@ -2468,7 +2484,19 @@ export function apply(ctx, config) {
         const appliedOwn = applied.startsWith('own|')
         const appliedMask = applied.replace(/^own\|/, '').split(',').filter(Boolean)
         const kind = appliedOwn ? (yieldHost ? 'yield' : 'sandbox-host') : appliedMask.length ? 'takeover' : 'host'
-        const tool = kind === 'takeover' ? ENVD_SHELL_NAME : rt.shippedName || null
+        // 这个会话里此刻真正可见的宿主 shell(不含我们自己的固定名)。让路 / 沙箱 / 未接管
+        // 会话靠它说清「模型手里到底是哪个工具」;直连接管会话里它应为空,非空就是还没挡干净。
+        const visibleHosts = []
+        for (const name of Object.keys(SHELL_TOOL_FAMILY)) {
+          if (name === ENVD_SHELL_NAME) continue
+          try {
+            if (hasTool(cur.actx, name, cur.agent)) visibleHosts.push(name)
+          } catch {}
+        }
+        const stuck = Array.isArray(entry && entry.stuck) ? entry.stuck : []
+        // 让路时优先报「挡不掉、此刻还在」的那个宿主工具;别的作用域里就是可见的那个。
+        const hostTool = stuck.find((name) => visibleHosts.includes(name)) || visibleHosts[0] || null
+        const tool = kind === 'takeover' ? ENVD_SHELL_NAME : hostTool || rt.shippedName || null
         let visible = false
         if (tool) {
           try {
@@ -2481,6 +2509,10 @@ export function apply(ctx, config) {
           id,
           kind,
           tool,
+          // 逐会话的宿主工具:简报按它说语法、面板按它说「模型实际拿到的是谁」。
+          // 不能用全局 shippedName —— 同一台机器可能同时挂着官方 pwsh 和 dsh-ops 的 ops_bash。
+          hostTool,
+          hostTools: visibleHosts,
           visible,
           hidden: appliedMask,
           hidesOwn: appliedOwn,
@@ -2494,9 +2526,11 @@ export function apply(ctx, config) {
     /**
      * 按**每个作用域**自己的计划遮挡。
      *
-     * 两份掩码互斥,保证任何作用域都不会落到「零命令工具」:
+     * 任何作用域都不会落到「零命令工具」:
      *   · 本会话没有围栏 → 藏宿主的 shell,留 envd_shell;
-     *   · 本会话被围栏   → 藏 envd_shell,留宿主的 shell(模型用带围栏的那个)。
+     *   · 本会话被围栏   → 藏 envd_shell,留宿主的 shell(模型用带围栏的那个);
+     *   · 宿主的某个 shell 挡不掉 → 藏 envd_shell,同时挡住本作用域挡得掉的其它宿主 shell,
+     *     留那个挡不掉的(让路)。
      *
      * 规则照旧三条(幂等 / 掩码不按「此刻查得到」算 / 先建后挡),再加一条:
      * 藏自己之前必须先确认自己真的在,藏别人之前必须先确认自己真的可见。
@@ -2604,8 +2638,9 @@ export function apply(ctx, config) {
         const visible = hasTool(cur.actx, ENVD_SHELL_NAME, cur.agent)
         // 已遮挡的作用域也要复检「我们的工具还在不在」:它一旦不可见,这个作用域就是
         // 「宿主的被挡住 + 我们的看不见」= 零命令工具。立刻把宿主的还回去,记进 blockedScopes。
-        // (hideOwn 的作用域 mask 为空,不会走到这里:藏自己本来就会让 visible 为 false。)
-        if (mask.length && !visible && cur.denyKey === key) {
+        // hideOwn 的作用域要跳过:让路/沙箱会话本来就把自己藏起来,visible=false 是**设计状态**,
+        // 不是「掉下去了」;而且让路计划里还可能带着「挡住其它宿主 shell」的 mask。
+        if (!entry.hideOwn && mask.length && !visible && cur.denyKey === key) {
           dropDenies(cur)
           cur.denyBlockedKey = key
           return false
@@ -2690,8 +2725,15 @@ export function apply(ctx, config) {
         activeShell,
         // 每一单都按**本会话**有效策略复检(不缓存全局布尔)
         (agent) => sandboxGate(agent),
-        // 委托执行要知道宿主执行器是哪个族(它决定包装语法),未知就拒绝委托
-        () => (rt.shippedName ? SHELL_TOOL_FAMILY[rt.shippedName] || '' : ''),
+        // 委托执行要知道宿主执行器是哪个族(它决定包装语法)。按**本会话**的宿主工具算:
+        // 同一台机器可能同时挂着官方 pwsh 和 dsh-ops 的 ops_bash,拿错家族就会用错包装器。
+        // 未知就拒绝委托。
+        (agent) => {
+          const fact =
+            agent && Array.isArray(rt.scopeToolFacts) ? rt.scopeToolFacts.find((item) => String(item.id) === String(agent.id)) : null
+          const name = (fact && fact.hostTool) || rt.shippedName
+          return name ? SHELL_TOOL_FAMILY[name] || '' : ''
+        },
         // 诊断计数(委托次数等):commandTool 在模块级,拿不到 syncStats,这里显式传进去
         syncStats,
       )
@@ -2835,13 +2877,29 @@ export function apply(ctx, config) {
 
       // 宿主自带的 shell 名字要「记住」:被我们自己遮挡之后 tools.get 就查不到了,
       // 每次重算会得到 null → 放开遮挡 → 又查到 → 再遮挡,5 秒一次来回抖。
-      // 见到过就记住(哪怕此刻被我们挡住了查不到)。挡不掉的记忆是**按作用域**的
-      // (cur.badNames),不再有全局黑名单:一个作用域挡不掉不代表别的也挡不掉。
+      // 但记忆必须**按作用域**:全局记忆会把「只在别的会话里注册的 pwsh」带进这个会话,
+      // mask 一旦非空,下面的让路分支就被跳过 → envd_shell 和挡不掉的 ops_bash 同时可见。
+      // 所以每个作用域记它自己真的见过的宿主 shell(cur.hostSeen):被挡住之后记忆仍在,
+      // 掩码不会忽有忽无;而「没见过」的名字也不会被拿到这里来挡。
+      for (const cur of scopes.values()) {
+        for (const name of Object.keys(SHELL_TOOL_FAMILY)) {
+          if (name === ENVD_SHELL_NAME) continue
+          try {
+            if (hasTool(cur.actx, name, cur.agent)) cur.hostSeen.add(name)
+          } catch {}
+        }
+      }
       for (const name of collectShellNames()) {
         if (rt.ownNames.has(name)) continue
         rt.seenShells.add(name)
       }
-      const shippedName = SHELL_TOOL_ORDER.find((name) => rt.seenShells.has(name)) || null
+      const allHostNames = new Set()
+      for (const cur of scopes.values()) for (const name of cur.hostSeen) allHostNames.add(name)
+      const hostNamesAt = (cur) => [...cur.hostSeen].filter((name) => name !== ENVD_SHELL_NAME).sort()
+      // 宿主的「主 shell」优先取作用域里真的见过的那个,全局 seenShells 只作兜底。
+      // 一台机器上可能同时挂着官方 pwsh 和 dsh-ops 的 ops_bash:按注册顺序挑第一个会挑错,
+      // 简报/委托就会按错的家族说语法、挑错的包装器。
+      const shippedName = SHELL_TOOL_ORDER.find((name) => allHostNames.has(name)) || SHELL_TOOL_ORDER.find((name) => rt.seenShells.has(name)) || null
       rt.shippedName = shippedName
       const shippedFamily = shippedName ? SHELL_TOOL_FAMILY[shippedName] : null
       const familyMatches = Boolean(shippedFamily) && shippedFamily === shell.family
@@ -2860,24 +2918,21 @@ export function apply(ctx, config) {
       //     一个会话都没有 / 策略服务缺失时不猜(注册了也是被自己藏起来,还多一次拆建)。
       const trustedUnconfined = cap.capable ? scopeFacts.some(({ gate }) => gate.confined === false) : true
       const takeoverWanted = wants && trustedUnconfined
-      // 要遮挡的是「历史上真的见过」的宿主 shell 名(不含自己的固定名)。
-      // 刻意不用 hasTool 过滤:宿主 shell 注册在 agent 作用域里,全局视图本来就查不到,
-      // 被我们挡住之后更是查不到 —— 用它过滤会让掩码忽有忽无,退化成 5 秒一抖。
-      const hostNames = wants ? [...rt.seenShells].filter((name) => name !== ENVD_SHELL_NAME).sort() : []
       // 每个作用域一份计划:
       //   · 有围栏 → 藏我们的、留宿主的;
       //   · 无围栏 → 藏宿主的、留我们的;
-      //   · 宿主 shell 在这个作用域**挡不掉**(作用域私有,restrict 实测失败)→ 反过来藏我们自己的,
-      //     留宿主的 —— 同样只有一个命令工具(学 dsh-ops:它的 session-shells 按会话挂 ops_bash)。
-      // 三份互斥,任何作用域都不会出现「两个都藏」(零命令工具)。
+      //   · 宿主 shell 在这个作用域**挡不掉**(作用域私有,restrict 实测失败)而且此刻真的还在
+      //     → 让路:藏我们自己的、留宿主的(学 dsh-ops:它的 session-shells 按会话挂 ops_bash)。
+      // 让路时仍然挡住「本作用域里挡得掉的其它宿主 shell」,模型手里只会剩那个挡不掉的宿主工具。
+      // 判据必须是「此刻可见」而不是 badNames 历史:宿主后来撤回了工具,就不能再让路 ——
+      // 否则会把模型唯一的命令工具一起藏掉(零命令工具)。
       const plan = scopeFacts.map(({ cur, gate }) => {
         if (!takeoverWanted) return { cur, gate, mask: [], hideOwn: false }
         if (gate.confined === true) return { cur, gate, mask: [], hideOwn: true }
-        const mask = maskFor(cur, hostNames)
-        if (!mask.length && hostNames.some((name) => cur.badNames.has(name) && hasTool(cur.actx, name, cur.agent))) {
-          // 宿主工具还在,只是我们挡不掉:让路,别让模型同时看到两个
-          return { cur, gate, mask: [], hideOwn: true, yieldHost: true }
-        }
+        const hosts = hostNamesAt(cur)
+        const mask = maskFor(cur, hosts)
+        const stuck = hosts.filter((name) => cur.badNames.has(name) && hasTool(cur.actx, name, cur.agent))
+        if (stuck.length) return { cur, gate, mask, hideOwn: true, yieldHost: true, stuck }
         return { cur, gate, mask, hideOwn: false }
       })
       // 让路 tick 单独计数:稳态时它应该跟着 ticks 涨,而 registers/disposes/denyApplies 一动不动。
@@ -2901,7 +2956,7 @@ export function apply(ctx, config) {
           rt.toolVisible = true
           if (!scopesSettled(plan)) {
             // 只有遮挡这一步要补:注册表一个字节都不动
-            denyScopes(plan, hostNames)
+            denyScopes(plan, [...allHostNames])
           }
           syncStats.steadyTicks++
           publishScopeFacts(plan)
@@ -2959,7 +3014,7 @@ export function apply(ctx, config) {
       rt.toolVisible = true
       rt.denyName = shippedName && shippedName !== ENVD_SHELL_NAME ? shippedName : null
       // 真正生效的掩码由 denyScopes 按作用域算(它才剔得掉各作用域挡不掉的名字)。
-      denyScopes(plan, hostNames)
+      denyScopes(plan, [...allHostNames])
       // 遮挡已经落地,现在才把逐会话终局端给面板/API(早一步就是谎报)
       publishScopeFacts(plan)
       appliedOwned = true

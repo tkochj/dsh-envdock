@@ -1554,6 +1554,66 @@ check(
   ptcBrief.split('\n').find((l) => l.includes('命令工具')) || '',
 )
 
+// ── 多宿主 shell 回归:官方 pwsh(全局注册、被 dsh-ops 按会话藏掉)+ ops_bash(按会话发布)──
+//
+// 真机踩到的坑:旧实现用**全局** seenShells 算掩码,一旦官方 pwsh 被记进来,
+// mask=['pwsh'] 就是非空 → 让路分支被跳过 → 挡不掉的 ops_bash 和 envd_shell 同时可见
+// (模型手里两个命令工具,brief 还只提 envd_shell)。现在按作用域记忆判定:
+// 本作用域只挡它自己见过的宿主 shell;挡不掉的只要此刻还在,就藏自己、让路。
+const hMulti = makeHarness({
+  shippedTools: ['bash', 'pwsh'],
+  agentIds: ['agent-m'],
+  // dsh-ops 的 ops_bash(这里用 bash 代表)是作用域私有、restrict 挡不掉;pwsh 挡得掉
+  unrestrictableFor: (scopeId, name) => name === 'bash',
+})
+apply(hMulti.ctx, { syncIntervalMs: 25 })
+await post(hMulti, { op: 'setOption', shellTakeover: 'takeover' })
+const multiSnap = await pollSnapshot(
+  hMulti,
+  (s) => {
+    const fact = ((s.commandTool || {}).scopes || []).find((x) => x.id === 'agent-m')
+    return Boolean(fact && fact.kind === 'yield' && fact.hostTool === 'bash')
+  },
+  6000,
+)
+phase('多宿主 shell:让路(不许并列)')
+const multiView = hMulti.toolsFor('agent-m')
+const multiVisible = () => COMMAND_TOOL_NAMES.filter((name) => Boolean(multiView.get(name)))
+check(
+  '多宿主 shell:模型手里只有一个命令工具,而且是挡不掉的 bash',
+  multiVisible().length === 1 && multiVisible()[0] === 'bash',
+  multiVisible().join(','),
+)
+const multiFact = (multiSnap.commandTool.scopes || []).find((s) => s.id === 'agent-m')
+check(
+  '多宿主 shell:终局 kind=yield、tool/hostTool=bash、hidden 只含真正挡掉的 pwsh',
+  Boolean(
+    multiFact &&
+      multiFact.kind === 'yield' &&
+      multiFact.tool === 'bash' &&
+      multiFact.hostTool === 'bash' &&
+      multiFact.hidden.join(',') === 'pwsh' &&
+      multiFact.hidesOwn === true,
+  ),
+  JSON.stringify(multiFact),
+)
+const multiBefore = (await callApi(hMulti)).json.syncStats
+await sleep(300)
+const multiAfter = (await callApi(hMulti)).json.syncStats
+check(
+  '多宿主 shell:让路是稳态(registers / disposes / denyApplies 不涨)',
+  multiAfter.registers === multiBefore.registers &&
+    multiAfter.disposes === multiBefore.disposes &&
+    multiAfter.denyApplies === multiBefore.denyApplies,
+  JSON.stringify([multiBefore.registers, multiAfter.registers, multiBefore.disposes, multiAfter.disposes, multiBefore.denyApplies, multiAfter.denyApplies]),
+)
+const multiBrief = hMulti.state.brief.text({ scope: hMulti.state.agents[0] })
+check(
+  '多宿主 shell:简报点名实际可用的宿主工具(bash),不再谎称只有 envd_shell',
+  multiBrief.includes('已让路') && multiBrief.includes('`bash`'),
+  multiBrief.split('\n').find((l) => l.includes('命令工具')) || '',
+)
+
 // 收掉回归用例的 fixture
 for (const { dis } of [
   ...h8.state.effects,
@@ -1567,6 +1627,7 @@ for (const { dis } of [
   ...h12.state.effects,
   ...h13.state.effects,
   ...hPtc.state.effects,
+  ...hMulti.state.effects,
 ]) {
   try {
     if (typeof dis === 'function') dis()
