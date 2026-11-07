@@ -765,6 +765,16 @@ check(
 )
 check('保守判定下宿主命令工具仍然可用', Boolean(hPolicy.toolsFor('agent-p').get('bash')))
 
+// dsh-ops 在 cordis 模式用 ops_bash 顶替官方 shell 工具:EnvDock 必须认得出这个家族,
+// 否则接管之后模型会同时看到 ops_bash + envd_shell 两个命令工具(想藏也藏不掉)。
+const hOps = makeHarness({ shippedTools: ['ops_bash'], agentIds: ['agent-ops'] })
+apply(hOps.ctx, { syncIntervalMs: 25 })
+await post(hOps, { op: 'setOption', shellTakeover: 'takeover' })
+const opsSnap = await pollSnapshot(hOps, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true)
+check('认领 ops_bash 为宿主 bash 工具(shippedShell 报得出)', opsSnap.shippedShell === 'ops_bash', String(opsSnap.shippedShell))
+check('接管后 ops_bash 被遮挡(不同时暴露两个命令工具)', hOps.toolsFor('agent-ops').get('ops_bash') === null)
+check('挡住 ops_bash 之后 envd_shell 仍然可见', Boolean(hOps.toolsFor('agent-ops').get('envd_shell')))
+
 // 混合部署:有围栏的会话用宿主工具,无围栏的会话用 envd_shell —— 一个会话的策略不该锁死另一个
 const hMix = makeHarness({
   shippedTools: ['bash'],

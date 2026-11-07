@@ -570,10 +570,13 @@ const SHELL_TOOL_FAMILY = {
   sh: 'bash',
   zsh: 'bash',
   fish: 'bash',
+  // dsh-ops 在 cordis 模式下用 ops_bash 顶替官方 pwsh/bash 工具(同一套 bash 语法)。
+  // 不认它就会同时看到两个命令工具(EnvDock 想藏也藏不掉),所以按 bash 家族认领。
+  ops_bash: 'bash',
 }
 
 /** 发现顺序:先看宿主最可能自带的那个。 */
-const SHELL_TOOL_ORDER = IS_WIN ? ['pwsh', 'powershell', 'cmd', 'bash'] : ['bash', 'zsh', 'sh']
+const SHELL_TOOL_ORDER = IS_WIN ? ['pwsh', 'powershell', 'cmd', 'bash', 'ops_bash'] : ['bash', 'zsh', 'sh', 'ops_bash']
 
 const SYNTAX_NOTES = {
   powershell: [

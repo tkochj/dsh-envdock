@@ -141,6 +141,7 @@ dsh web
 - 宿主自带的命令工具是 `pwsh` / `bash` 等；当你的默认终端与它不是同一族时，EnvDock 会注册固定名字的 `envd_shell`，并隐藏宿主 shell，避免模型在两种语法之间猜。
 - 与宿主同族时**什么都不做**，不会重复造工具。
 - **沙箱按会话判，不按部署默认档判**：dsh 的执行器公布 `sandboxMode`（那是**部署默认档**），真实策略要逐会话 `sandboxPolicy.resolve({ session })`。只有本会话解析出 `danger-full-access` 时 EnvDock 才直接接管；一个会话被围栏不影响别的会话（`read-only` / `workspace-write` 的会话保留宿主命令工具）。
+- **认得出 dsh-ops 的 `ops_bash`**（cordis 模式下顶替官方 shell）：它按 bash 家族参与接管判定，不会被漏认成「两个命令工具并列」。
 - 注册失败或被同名工具占用时，EnvDock 放弃接管并保留宿主工具，不会让你一个命令工具都没有。
 
 ## 设置与状态
