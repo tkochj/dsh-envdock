@@ -209,6 +209,18 @@ function makeHarness(options = {}) {
       if (scopeId !== null && denyOf(scopeId).has(name)) return null
       return state.toolDefs.get(name) || null
     },
+    /**
+     * 真机语义(dsh-ops 口径):`get` 回答「注册了没有」,`executable` 回答「这一单真的能调」。
+     * ptc 模式下模型直呼只允许 run_code 时,替代工具会「get 有、executable 无」——
+     * 拿 get 判就绪就会把真正能用的宿主工具藏掉,模型于是收到零命令工具。
+     * 默认与 get 同口径(注册且未被本作用域 deny);夹具用 options.executableFor(scopeId, name)
+     * 制造分歧:返回 false → 视为不可执行(返回 null);返回 undefined / true → 回落 get。
+     */
+    executable(name) {
+      const forced = typeof options.executableFor === 'function' ? options.executableFor(scopeId, name) : undefined
+      if (forced === false) return null
+      return scopeId !== null && denyOf(scopeId).has(name) ? null : state.toolDefs.get(name) || null
+    },
     restrict(spec) {
       const deny = (spec && spec.deny) || []
       if (!deny.length) throw new Error('empty restriction')
@@ -753,6 +765,29 @@ check(
   confinedBrief.split('\n').find((l) => l.includes('命令工具')) || '',
 )
 const sandboxBrief = String((await callApi(hSandbox)).json.brief)
+// P0-1:逐会话终局端出来 —— 只有围栏会话时 EnvDock 根本不注册(trustedUnconfined=false),
+// 终局必须如实写 host,不能因为「全局没接管」就把这个会话说成「已接管」或留空。
+const sandboxFact = ((sandboxSnap.commandTool || {}).scopes || []).find((s) => s.id === 'agent-s')
+check(
+  '只有围栏会话时不注册 envd_shell(registers 为 0)',
+  sandboxSnap.syncStats.registers === 0,
+  'registers=' + sandboxSnap.syncStats.registers + ' scopes=' + JSON.stringify((sandboxSnap.commandTool || {}).scopes),
+)
+check(
+  '围栏会话的逐会话终局如实写 host(不是 takeover)',
+  sandboxFact &&
+    sandboxFact.kind === 'host' &&
+    sandboxFact.tool === 'bash' &&
+    sandboxFact.confined === true &&
+    sandboxFact.hidesOwn === false &&
+    (sandboxFact.hidden || []).length === 0,
+  JSON.stringify(sandboxFact),
+)
+check(
+  'API 简报不再写「本会话策略未知」,改指路 scopes',
+  !sandboxBrief.includes('本会话策略未知') && sandboxBrief.includes('见 scopes'),
+  sandboxBrief.split('\n').find((l) => l.includes('命令工具')) || '',
+)
 check('沙箱时简报说明为什么没接管', sandboxBrief.includes('沙箱'), sandboxBrief.split('\n').find((l) => l.includes('沙箱')) || '')
 
 // 同一个部署默认档,但本会话 resolve 出 danger-full-access → 必须照常接管(假阳性修复)
@@ -813,6 +848,40 @@ check(
 check('让路:该会话还剩宿主的 ops_bash', Boolean(hLocal.toolsFor('agent-local').get('ops_bash')))
 check('让路:该会话的 envd_shell 已藏(不同时暴露两个)', hLocal.toolsFor('agent-local').get('envd_shell') === null)
 check('挡不掉的 ops_bash 也记进 unrestrictable', (localSnap.syncStats.unrestrictable || []).includes('ops_bash'), JSON.stringify(localSnap.syncStats.unrestrictable))
+// P0-1:让路会话的逐会话终局。tool 是宿主 shell 名(不是 envd_shell),hidden 空(藏的是我们自己),
+// visible 走的是该作用域的口径(宿主工具真的可执行)。
+const localFact = ((localSnap.commandTool || {}).scopes || []).find((s) => s.id === 'agent-local')
+check(
+  '让路会话的逐会话终局:kind=yield、tool=宿主 shell、visible、hidesOwn、hidden 为空',
+  localFact &&
+    localFact.kind === 'yield' &&
+    localFact.tool === 'ops_bash' &&
+    localFact.visible === true &&
+    localFact.hidesOwn === true &&
+    Array.isArray(localFact.hidden) &&
+    localFact.hidden.length === 0,
+  JSON.stringify(localFact),
+)
+// P3-9:让路是稳态 —— yieldTicks 跟着 tick 涨,而注册表三个相位一动不动。
+// 这两个数一起涨就说明让路分支在 5 秒一次地拆建工具(模型会撞上 unknown tool 空窗)。
+const yieldBefore = (await callApi(hLocal)).json.syncStats
+await new Promise((r) => setTimeout(r, 250))
+const yieldAfter = (await callApi(hLocal)).json.syncStats
+check(
+  '让路是稳态:yieldTicks 随 tick 涨,registers/disposes/denyApplies 不变',
+  yieldAfter.ticks > yieldBefore.ticks &&
+    yieldAfter.yieldTicks > yieldBefore.yieldTicks &&
+    yieldAfter.registers === yieldBefore.registers &&
+    yieldAfter.disposes === yieldBefore.disposes &&
+    yieldAfter.denyApplies === yieldBefore.denyApplies,
+  JSON.stringify({
+    ticks: [yieldBefore.ticks, yieldAfter.ticks],
+    yieldTicks: [yieldBefore.yieldTicks, yieldAfter.yieldTicks],
+    registers: [yieldBefore.registers, yieldAfter.registers],
+    disposes: [yieldBefore.disposes, yieldAfter.disposes],
+    denyApplies: [yieldBefore.denyApplies, yieldAfter.denyApplies],
+  }),
+)
 const localBrief = hLocal.state.brief.text({ scope: hLocal.state.agents[0] })
 check('让路会话的简报说清「用宿主工具、EnvDock 已让路」', localBrief.includes('让路'), localBrief.split('\n').find((l) => l.includes('命令工具')) || '')
 
@@ -839,6 +908,30 @@ check(
   '有围栏会话:用宿主 bash,envd_shell 被藏(不制造零工具)',
   Boolean(hMix.toolsFor('agent-locked').get('bash')) && hMix.toolsFor('agent-locked').get('envd_shell') === null,
   'locked=' + ['envd_shell', 'bash'].filter((n) => hMix.toolsFor('agent-locked').get(n)).join(','),
+)
+// P0-1:同一进程里两种终局并存 —— 面板不能只看全局 commandTool.visible 就报「已接管」,
+// 逐会话 scopes 必须各报各的:free=takeover,locked=sandbox-host(用宿主带围栏的 bash)。
+const mixSnap = (await callApi(hMix)).json
+const mixFreeFact = ((mixSnap.commandTool || {}).scopes || []).find((s) => s.id === 'agent-free')
+const mixLockedFact = ((mixSnap.commandTool || {}).scopes || []).find((s) => s.id === 'agent-locked')
+check(
+  '混合部署:无围栏会话 kind=takeover、tool=envd_shell、hidden 含宿主 bash',
+  mixFreeFact &&
+    mixFreeFact.kind === 'takeover' &&
+    mixFreeFact.tool === 'envd_shell' &&
+    (mixFreeFact.hidden || []).includes('bash') &&
+    mixFreeFact.hidesOwn === false,
+  JSON.stringify(mixFreeFact),
+)
+check(
+  '混合部署:围栏会话 kind=sandbox-host、tool=宿主 bash、hidesOwn、confined',
+  mixLockedFact &&
+    mixLockedFact.kind === 'sandbox-host' &&
+    mixLockedFact.tool === 'bash' &&
+    mixLockedFact.hidesOwn === true &&
+    mixLockedFact.confined === true &&
+    mixLockedFact.visible === true,
+  JSON.stringify(mixLockedFact),
 )
 
 // 围栏下调用 envd_shell:没有可委托的宿主执行器 → 拒绝,绝不 spawn 一条无 policy 的命令
@@ -888,6 +981,9 @@ check(
   delegated.ok === true && delegated.text.includes('delegated-ok') && delegated.text.includes('[sandbox]'),
   String(delegated.text).slice(0, 160),
 )
+// P3-9:委托路径真的被走过一次 —— 诊断条靠这个数区分「围栏会话没走过委托」和「走了、但宿主拒绝」。
+const delegateStats = (await callApi(hDelegate)).json.syncStats
+check('成功委托被记账:syncStats.delegateCalls === 1', delegateStats.delegateCalls === 1, String(delegateStats.delegateCalls))
 await post(hDelegate, { op: 'setOption', sandboxTakeover: 'refuse' })
 const refusedByOpt = await delTool.execute({ command: 'echo delegated' }, { signal: null, agent: { session: { key: 'locked2' } } })
 check('sandboxTakeover=refuse:围栏会话直接拒绝', refusedByOpt.ok === false && refusedByOpt.text.includes('沙箱围栏'), String(refusedByOpt.text).slice(0, 140))
@@ -905,6 +1001,9 @@ check(
   typeof guardReason === 'string' && guardReason.includes('envd_shell'),
   String(guardReason),
 )
+// P3-9:守卫真的命中过一次就记一次 —— 诊断条要能证明拒绝路径被走过,不是只看静态配置猜。
+const guardStats = (await callApi(hGuard)).json.syncStats
+check('守卫命中被记账:syncStats.guardDenials === 1', guardStats.guardDenials === 1, String(guardStats.guardDenials))
 check('guard 不拦我们自己的工具', hGuard.guardReason('envd_shell', hGuard.state.agents[0]) === undefined)
 // 我们的工具在这个作用域不可见时,guard 必须放行宿主 shell —— 绝不制造「两个都调不到」
 hGuard.setScopeDeny('agent-guard', ['envd_shell'])
@@ -1170,6 +1269,25 @@ check(
   visibleCommands('agent-a').join(',') === 'envd_shell' && visibleCommands('agent-b').join(',') === 'envd_shell',
   'a=' + visibleCommands('agent-a').join(',') + ' b=' + visibleCommands('agent-b').join(','),
 )
+// P0-1:直连接管的逐会话终局。面板头部据此显示 envd_shell + 「已接管」;
+// hidden 必须是被 restrict 真正挡住的宿主 shell 名(账本口径,不是「本来想挡」)。
+const settledScopes = (settled && settled.commandTool && settled.commandTool.scopes) || []
+const takeoverFact = settledScopes.find((s) => s.id === 'agent-a')
+check(
+  '接管会话的逐会话终局:kind=takeover、tool=envd_shell、hidden 含被挡的宿主 bash、hidesOwn=false',
+  takeoverFact &&
+    takeoverFact.kind === 'takeover' &&
+    takeoverFact.tool === 'envd_shell' &&
+    (takeoverFact.hidden || []).includes('bash') &&
+    takeoverFact.hidesOwn === false &&
+    takeoverFact.visible === true,
+  JSON.stringify(takeoverFact),
+)
+check(
+  '逐会话终局按会话逐个记(两个 agent 各一条,不是只报一条全局)',
+  settledScopes.length === 2 && settledScopes.every((s) => s.kind === 'takeover' && s.tool === 'envd_shell'),
+  JSON.stringify(settledScopes),
+)
 check('syncStats 已端出去', Boolean(settled && settled.syncStats && typeof settled.syncStats.ticks === 'number'), JSON.stringify(settled && settled.syncStats))
 check('接管后简报只说「已接管」', String((await apiSnapshot()).brief).includes('EnvDock 已接管'), String((await apiSnapshot()).brief).split('\n').find((l) => l.includes('命令工具')) || '')
 
@@ -1384,6 +1502,58 @@ check('恢复可见后自动补上遮挡(不会永久漏挡)', !visibleD().inclu
 const d2 = (await callApi(h13)).json
 check('自愈后不再留着「该作用域没遮挡」的告警', (d2.syncStats.blockedScopes || []).length === 0, JSON.stringify(d2.syncStats.blockedScopes))
 
+// ── P2-8:dsh-ops 的 ptc 折叠让 get 与 executable 分歧 ──
+//
+// 真机语义:`tools.get` 说「注册了」,`tools.executable` 说「这一单真的能调」。
+// dsh-ops 在 ptc 模式下把替代工具折叠起来时,名字仍在工具表里,但模型直呼不可执行。
+// EnvDock 以前只问 get → 把一下调不到的 envd_shell 当成就绪 → 挡住宿主的 bash →
+// 那个会话里模型一个命令工具都调不到。夹具用 executableFor 把这条分歧固定下来:
+// 只有 a-ptc 作用域里的 envd_shell「注册了但不可执行」,其余名字一律回落 get。
+const hPtc = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: ['a-ptc'],
+  executableFor: (scopeId, name) => !(scopeId === 'a-ptc' && name === 'envd_shell'),
+})
+apply(hPtc.ctx, { syncIntervalMs: 25 })
+await post(hPtc, { op: 'setOption', shellTakeover: 'takeover' })
+const ptcSnap = await pollSnapshot(hPtc, (s) => Boolean(s.syncStats) && (s.syncStats.blockedScopes || []).includes('a-ptc'), 6000)
+phase('PTC 折叠:get/executable 分歧')
+const ptcView = hPtc.toolsFor('a-ptc')
+const execOf = (name) => (typeof ptcView.executable === 'function' ? ptcView.executable(name) : 'missing')
+check(
+  '夹具前置:envd_shell 在 a-ptc 里 get 有、executable 无',
+  Boolean(ptcView.get('envd_shell')) && execOf('envd_shell') === null,
+  'get=' + Boolean(ptcView.get('envd_shell')) + ' executable=' + String(execOf('envd_shell')),
+)
+check(
+  '夹具前置:其它名字的 executable 回落 get(宿主的 bash 仍然可执行)',
+  Boolean(execOf('bash')),
+  String(execOf('bash')),
+)
+check(
+  'PTC 折叠下故意不挡宿主 bash(自己的工具调不到,再挡就是零命令工具)',
+  Boolean(ptcView.get('bash')),
+  'vis=' + ['envd_shell', 'bash'].filter((n) => ptcView.get(n)).join(','),
+)
+check(
+  'PTC 折叠下记进 blockedScopes(不是静默)',
+  (ptcSnap.syncStats.blockedScopes || []).includes('a-ptc'),
+  JSON.stringify(ptcSnap.syncStats.blockedScopes),
+)
+check('PTC 折叠下没有真的 restrict 宿主 bash(denyApplies 为 0)', ptcSnap.syncStats.denyApplies === 0, String(ptcSnap.syncStats.denyApplies))
+const ptcFact = (ptcSnap.commandTool.scopes || []).find((s) => s.id === 'a-ptc')
+check(
+  'PTC 折叠下逐会话终局是 host(用宿主工具),不是 takeover',
+  ptcFact && ptcFact.kind === 'host' && ptcFact.tool === 'bash' && ptcFact.visible === true,
+  JSON.stringify(ptcFact),
+)
+const ptcBrief = hPtc.state.brief.text({ scope: hPtc.state.agents[0] })
+check(
+  'PTC 折叠下的简报不自称「已接管」,而是说清宿主工具可用 / envd_shell 已让路',
+  !ptcBrief.includes('已接管') && ptcBrief.includes('已让路') && ptcBrief.includes('bash'),
+  ptcBrief.split('\n').find((l) => l.includes('命令工具')) || '',
+)
+
 // 收掉回归用例的 fixture
 for (const { dis } of [
   ...h8.state.effects,
@@ -1396,6 +1566,7 @@ for (const { dis } of [
   ...hLife.state.effects,
   ...h12.state.effects,
   ...h13.state.effects,
+  ...hPtc.state.effects,
 ]) {
   try {
     if (typeof dis === 'function') dis()

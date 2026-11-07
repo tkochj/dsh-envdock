@@ -696,6 +696,13 @@ function createRuntime() {
      * (dsh-ops 的 publication ownership 就是同一口径:`tools.get(name) === 我注册的那个对象`)。
      */
     ownDefinition: null,
+    /**
+     * 逐会话的命令工具终局:[{ id, kind, tool, visible, hidden, hidesOwn, confined, mode }]。
+     *
+     * 全局可见性回答不了「这个会话的模型实际拿到哪个命令工具」—— 同一进程里可以让路、
+     * 沙箱、直连接管三种会话同时存在。对账每次把 plan 的终局写进这里,API 原样端出去。
+     */
+    scopeToolFacts: [],
   }
 }
 
@@ -727,6 +734,22 @@ function commandToolState(runtime, isVisible, gate) {
     /** 'delegate' = 围栏下委托宿主执行器执行;'refuse' = 不接管 */
     sandboxDelegate: Boolean(g && g.delegate),
     sandboxPolicyKnown: g ? g.policyKnown !== false : false,
+    /**
+     * 逐会话终局(panel/API 用):哪个会话的模型实际拿到哪个命令工具、为什么。
+     * 解析时复制一份,调用方改坏了也不会污染运行态账本。
+     */
+    scopes: Array.isArray(runtime.scopeToolFacts)
+      ? runtime.scopeToolFacts.map((fact) => ({
+          id: String(fact.id || ''),
+          kind: String(fact.kind || 'host'),
+          tool: fact.tool || null,
+          visible: fact.visible === true,
+          hidden: Array.isArray(fact.hidden) ? fact.hidden.slice() : [],
+          hidesOwn: fact.hidesOwn === true,
+          confined: fact.confined === true,
+          mode: String(fact.mode || ''),
+        }))
+      : [],
   }
   if (runtime.toolName) {
     const name = runtime.toolName
@@ -1575,7 +1598,11 @@ function brief(detection, state, probeIn, runtime) {
         ? ';本会话被沙箱围栏(' + (commandState.sandboxMode || '策略未知') + ')'
         : commandState.sandboxConfined === false
           ? ';沙箱能力在,本会话策略 ' + (commandState.sandboxMode || 'danger-full-access') + '(无围栏)'
-          : ';宿主执行器带沙箱能力(部署默认 ' + (commandState.sandboxMode || '未知') + '),本会话策略未知'
+          : probeIn && probeIn.sessionless === true
+            ? // API 不带会话:这里给「本会话策略未知」会被当成故障读。逐会话结论在
+              // commandTool.scopes / sandbox.scopes 里,简报只指路,不下会话结论。
+              ';宿主执行器带沙箱能力(部署默认 ' + (commandState.sandboxMode || '未知') + '),各会话有效策略见 scopes'
+            : ';宿主执行器带沙箱能力(部署默认 ' + (commandState.sandboxMode || '未知') + '),本会话策略未知'
     if (commandState.sandbox && commandState.sandboxConfined === true) {
       // 本会话真被围栏:模型唯一能用的是宿主工具 —— 语法也必须按宿主工具教,
       // 继续教「默认终端」的语法就是让它拿 bash 语法去打 pwsh。
@@ -1819,7 +1846,7 @@ function envdTool(ctx, getDetection, getState, forceRefresh, isVisible, runtime,
  * 代价是描述里不能写死某个终端的语法(注册时就固化了,之后不会跟着变),
  * 所以语法一律以每步重新求值的环境简报为准 —— 那边永远是当前终端。
  */
-function commandTool(ctx, activeShell, gateFor, hostFamilyOf) {
+function commandTool(ctx, activeShell, gateFor, hostFamilyOf, stats) {
   /** 本会话的沙箱事实。取不到就按「有围栏」保守处理,绝不猜成无围栏。 */
   const gateAt = (agent) => {
     const fallback = { capable: false, confined: false, mode: '', policyKnown: true, delegate: false }
@@ -1888,6 +1915,9 @@ function commandTool(ctx, activeShell, gateFor, hostFamilyOf) {
     } catch (error) {
       return { ok: false, text: '委托宿主执行器失败(执行): ' + String((error && error.message) || error) }
     }
+    // 「委托路径真的跑起来了」单独记账:诊断条要靠它区分「围栏会话根本没走过委托」
+    // 和「走了、但宿主执行器拒绝/失败」—— 只看输出文本分不清这两种。
+    if (stats && typeof stats === 'object') stats.delegateCalls = (Number(stats.delegateCalls) || 0) + 1
     const LIMIT = 16000
     const clip = (text) => (text.length > LIMIT ? text.slice(0, LIMIT) + '\n…(已截断,原长 ' + text.length + ' 字符)' : text)
     const mode = (policy && policy.mode) || gate.mode || '宿主的围栏'
@@ -2063,6 +2093,12 @@ export function apply(ctx, config) {
     lastChosenName: null,
     lastAt: 0,
     intervalMs: 5000,
+    /** 围栏会话里真正委托给宿主执行器执行的次数(0 = 委托路径没被走过) */
+    delegateCalls: 0,
+    /** 拒绝守卫命中次数(被藏掉的全局 shell 名被直呼时记一次) */
+    guardDenials: 0,
+    /** plan 里含「让路」作用域的 tick 数(稳态时它跟着 ticks 涨、注册表动作不涨才是对的) */
+    yieldTicks: 0,
     /** 连 restrict 都挡不掉的宿主 shell 名(挡不了就会一直并列可见,面板据此能解释) */
     unrestrictable: [],
     /** 因为看不到 envd_shell 而没遮挡的作用域(空 = 全都对完账了) */
@@ -2402,6 +2438,60 @@ export function apply(ctx, config) {
     const planKey = (entry) => (entry.hideOwn ? 'own|' : '') + entry.mask.join(',')
 
     /**
+     * 把每个作用域的命令工具终局写进运行态,供 /envdock-api 的 commandTool.scopes 端出去。
+     *
+     * 为什么必须在**作用域**这一层回答:同一进程里可以同时有
+     *   · danger-full-access 会话 → EnvDock 直连接管(模型用 envd_shell);
+     *   · 宿主 shell 作用域私有的会话 → 让路(模型用宿主的 shell);
+     *   · workspace-write 围栏会话 → 沙箱让路(模型用宿主带围栏的 shell)。
+     * 面板头部只看全局 commandTool.visible,就会同时说「已接管」和「有个会话在用宿主工具」。
+     *
+     * 终局以**实际生效的账本**为准(cur.denyKey 记的是 restrict 真成功了什么):
+     * plan 只是意图,restrict 失败时不能拿意图充数,否则面板会谎报「已挡住」。
+     * 四种 kind:
+     *   · takeover     藏了宿主 shell、留着 envd_shell;
+     *   · yield        宿主 shell 作用域私有挡不掉,EnvDock 藏自己的、让路;
+     *   · sandbox-host 本会话被围栏,EnvDock 藏自己的、用宿主带围栏的 shell;
+     *   · host         没有接管(关闭 / 无需接管 / 注册失败),模型用宿主工具。
+     */
+    const publishScopeFacts = (plan) => {
+      const entries = Array.isArray(plan) ? plan : []
+      const byId = new Map()
+      for (const entry of entries) byId.set(String(entry.cur.agent.id), entry)
+      const facts = []
+      for (const cur of scopes.values()) {
+        const id = String(cur.agent.id)
+        const entry = byId.get(id) || null
+        const gate = (entry && entry.gate) || sandboxGate(cur.agent)
+        const yieldHost = Boolean(entry && entry.yieldHost)
+        const applied = String(cur.denyKey || '')
+        const appliedOwn = applied.startsWith('own|')
+        const appliedMask = applied.replace(/^own\|/, '').split(',').filter(Boolean)
+        const kind = appliedOwn ? (yieldHost ? 'yield' : 'sandbox-host') : appliedMask.length ? 'takeover' : 'host'
+        const tool = kind === 'takeover' ? ENVD_SHELL_NAME : rt.shippedName || null
+        let visible = false
+        if (tool) {
+          try {
+            visible = hasTool(cur.actx, tool, cur.agent)
+          } catch {
+            visible = false
+          }
+        }
+        facts.push({
+          id,
+          kind,
+          tool,
+          visible,
+          hidden: appliedMask,
+          hidesOwn: appliedOwn,
+          confined: gate.confined === true,
+          mode: String(gate.mode || ''),
+        })
+      }
+      rt.scopeToolFacts = facts
+    }
+
+    /**
      * 按**每个作用域**自己的计划遮挡。
      *
      * 两份掩码互斥,保证任何作用域都不会落到「零命令工具」:
@@ -2557,6 +2647,8 @@ export function apply(ctx, config) {
       rt.denyName = null
       rt.denyNames = []
       rt.toolVisible = false
+      // 逐会话终局一起清:卸载/teardown 之后还挂着「某会话用 envd_shell」就是幽灵事实
+      rt.scopeToolFacts = []
     }
 
     /**
@@ -2600,6 +2692,8 @@ export function apply(ctx, config) {
         (agent) => sandboxGate(agent),
         // 委托执行要知道宿主执行器是哪个族(它决定包装语法),未知就拒绝委托
         () => (rt.shippedName ? SHELL_TOOL_FAMILY[rt.shippedName] || '' : ''),
+        // 诊断计数(委托次数等):commandTool 在模块级,拿不到 syncStats,这里显式传进去
+        syncStats,
       )
       try {
         dispose = ctx.tools.register(definition)
@@ -2724,6 +2818,8 @@ export function apply(ctx, config) {
         } else {
           syncStats.steadyTicks++
         }
+        // 关闭接管之后每个会话都用宿主工具:面板按会话说真话,别留着上一轮「已接管」的终局
+        publishScopeFacts([])
         return
       }
       if (!cache.value || cache.at === 0) {
@@ -2753,6 +2849,7 @@ export function apply(ctx, config) {
       if (!shippedName && mode !== 'takeover') {
         if (appliedSig || disposeTool || rt.owns || appliedDenyKey) teardown()
         else syncStats.steadyTicks++
+        publishScopeFacts([])
         return
       }
 
@@ -2774,15 +2871,18 @@ export function apply(ctx, config) {
       //     留宿主的 —— 同样只有一个命令工具(学 dsh-ops:它的 session-shells 按会话挂 ops_bash)。
       // 三份互斥,任何作用域都不会出现「两个都藏」(零命令工具)。
       const plan = scopeFacts.map(({ cur, gate }) => {
-        if (!takeoverWanted) return { cur, mask: [], hideOwn: false }
-        if (gate.confined === true) return { cur, mask: [], hideOwn: true }
+        if (!takeoverWanted) return { cur, gate, mask: [], hideOwn: false }
+        if (gate.confined === true) return { cur, gate, mask: [], hideOwn: true }
         const mask = maskFor(cur, hostNames)
         if (!mask.length && hostNames.some((name) => cur.badNames.has(name) && hasTool(cur.actx, name, cur.agent))) {
           // 宿主工具还在,只是我们挡不掉:让路,别让模型同时看到两个
-          return { cur, mask: [], hideOwn: true, yieldHost: true }
+          return { cur, gate, mask: [], hideOwn: true, yieldHost: true }
         }
-        return { cur, mask, hideOwn: false }
+        return { cur, gate, mask, hideOwn: false }
       })
+      // 让路 tick 单独计数:稳态时它应该跟着 ticks 涨,而 registers/disposes/denyApplies 一动不动。
+      // 一旦这两个数一起涨,就是让路分支在 5 秒一次地拆建工具(模型会撞上 unknown tool 空窗)。
+      if (plan.some((entry) => entry.yieldHost)) syncStats.yieldTicks++
       const denyKey = plan.map((entry) => String(entry.cur.agent.id) + ':' + planKey(entry)).sort().join(';')
       const sig = [mode, takeoverWanted ? 'takeover' : 'idle', shell.family, shippedName || ''].join('|')
 
@@ -2794,6 +2894,7 @@ export function apply(ctx, config) {
       if (steady) {
         if (!appliedOwned) {
           syncStats.steadyTicks++
+          publishScopeFacts(plan)
           return
         }
         if (hasTool(ctx, ENVD_SHELL_NAME)) {
@@ -2803,6 +2904,7 @@ export function apply(ctx, config) {
             denyScopes(plan, hostNames)
           }
           syncStats.steadyTicks++
+          publishScopeFacts(plan)
           return
         }
         // 账本说有、工具表里没有 → 掉下去走完整对账(下面 ensureOwnTool 会补注册)
@@ -2815,12 +2917,14 @@ export function apply(ctx, config) {
         } else {
           syncStats.steadyTicks++
         }
+        publishScopeFacts(plan)
         return
       }
 
       // 上一次失败还没到重试时间:保持「没有自己的工具」,宿主自带的继续干活
       if (retryAt && Date.now() < retryAt) {
         syncStats.steadyTicks++
+        publishScopeFacts(plan)
         return
       }
       retryAt = 0
@@ -2843,6 +2947,8 @@ export function apply(ctx, config) {
         rt.toolVisible = false
         syncStats.lastSig = sig
         retryAt = Date.now() + 30000
+        // 没接管成功:每个会话都用宿主工具,终局要如实写(不能留上一轮的「已接管」)
+        publishScopeFacts(plan)
         return
       }
 
@@ -2854,6 +2960,8 @@ export function apply(ctx, config) {
       rt.denyName = shippedName && shippedName !== ENVD_SHELL_NAME ? shippedName : null
       // 真正生效的掩码由 denyScopes 按作用域算(它才剔得掉各作用域挡不掉的名字)。
       denyScopes(plan, hostNames)
+      // 遮挡已经落地,现在才把逐会话终局端给面板/API(早一步就是谎报)
+      publishScopeFacts(plan)
       appliedOwned = true
       appliedSig = sig
       appliedDenyKey = denyKey
@@ -2904,25 +3012,55 @@ export function apply(ctx, config) {
     }
 
     /**
-     * 被我们藏起来的宿主 shell 仍有一步之遥能被调到(模型按上一步的工具表直呼),
+     * 被藏掉的命令工具仍有一步之遥能被调到(模型按上一步的工具表直呼),
      * 这时给它一条**可操作**的拒绝,而不是 UNKNOWN_TOOL。
      *
+     * 两个方向都要管:
+     *   · 宿主 shell 被我们藏掉(直连接管会话)→ 让它改用 `envd_shell`;
+     *   · 我们自己的 `envd_shell` 被藏掉(让路 / 沙箱会话)→ 让它改用宿主工具。
      * dsh-ops 用 tools.guard 做同一件事(refusal 与 mask 同权);这边再加两条保险:
-     *   · 只拒绝「确实被我们藏掉、而且我们的工具此刻可执行」的名字 —— 否则宁可放行,
+     *   · 只拒绝「确实被藏掉、而且替代工具此刻可执行」的名字 —— 否则宁可放行,
      *     绝不制造「两个都调不到」;
      *   · 只认自己登记的那一份定义,防止同名工具被别人接管后我们还去挡。
      */
     const shellRefusal = (exec) => {
       if (!rt.owns) return undefined
       const name = String((exec && exec.name) || '')
-      if (!name || name === ENVD_SHELL_NAME || !SHELL_TOOL_FAMILY[name]) return undefined
+      if (!name) return undefined
       const agent = exec && exec.agent ? exec.agent : null
       if (!agent) return undefined
       const scopeCtx = agent.ctx || ctx
-      // 只拒绝「这个作用域里确实被我们藏掉」的宿主 shell:
+
+      // 方向一:模型直呼我们自己的固定名,但它在**这个作用域**里已经被藏掉。
+      // 这不是错配置,而是让路 / 沙箱会话的正常状态:替代品是宿主自带的那个 shell。
+      // (归属用全局视图判:作用域视图里它被 restrict 藏了,查不到自己。)
+      if (name === ENVD_SHELL_NAME) {
+        if (hasTool(scopeCtx, ENVD_SHELL_NAME, agent)) return undefined
+        if (!isOwnDefinition(ctx, undefined)) return undefined
+        const hostName = rt.shippedName
+        // 宿主工具在这一作用域真的可见,才有「改用 xxx」这条可操作路径;否则不猜,交给工具表。
+        if (!hostName || !SHELL_TOOL_FAMILY[hostName] || !hasTool(scopeCtx, hostName, agent)) return undefined
+        const fact = Array.isArray(rt.scopeToolFacts) ? rt.scopeToolFacts.find((f) => String(f.id) === String(agent.id)) : null
+        const kind = fact ? String(fact.kind || '') : ''
+        syncStats.guardDenials++
+        const why =
+          kind === 'sandbox-host'
+            ? '本会话被宿主沙箱围栏(' + ((fact && fact.mode) || '策略未知') + '),EnvDock 不接管'
+            : kind === 'yield'
+              ? '宿主 `' + hostName + '` 是作用域私有、挡不掉,EnvDock 已让路'
+              : 'EnvDock 没有接管这个会话'
+        return (
+          '`' + ENVD_SHELL_NAME + '` 在本会话不可用:' + why + ';请改用宿主自带的 `' + hostName + '`,终端语法以「本机环境 (EnvDock)」简报为准'
+        )
+      }
+
+      if (!SHELL_TOOL_FAMILY[name]) return undefined
+      // 方向二:宿主 shell 被我们藏掉。只拒绝「这个作用域里确实被我们藏掉」的:
       // 见过它、现在看不见、而我们的工具在这一作用域可执行 —— 三条同时成立才算接管生效。
       if (!rt.seenShells.has(name) || hasTool(scopeCtx, name, agent)) return undefined
       if (!isOwnDefinition(scopeCtx, agent) || !hasTool(scopeCtx, ENVD_SHELL_NAME, agent)) return undefined
+      // 守卫真的命中一次就记一次:诊断条要能证明「拒绝路径被走过」,而不是只看静态配置猜。
+      syncStats.guardDenials++
       return (
         '`' +
         name +
@@ -3074,7 +3212,17 @@ export function apply(ctx, config) {
                   terminals: detection.terminals,
                   versionManagers: detection.versionManagers,
                   issues: healthIssues(detection, state),
-                  brief: brief(detection, state, { visible: (name) => hasTool(ctx, name), gate: () => sandboxGate(null, state.options) }, rt),
+                  brief: brief(
+                    detection,
+                    state,
+                    {
+                      visible: (name) => hasTool(ctx, name),
+                      gate: () => sandboxGate(null, state.options),
+                      // API 没有 agent:简报不能给「本会话」结论,逐会话事实由 commandTool.scopes 给
+                      sessionless: true,
+                    },
+                    rt,
+                  ),
                   detectedAt: detection.at,
                   hasSubprocess: Boolean(runner),
                 })

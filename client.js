@@ -129,6 +129,20 @@ window.__ModuleLoader__.load({
         collapse: '收起',
         dismiss: '知道了',
         actionFailed: '操作失败',
+        // 头部按会话汇总:全局 visible 只说明「EnvDock 的 envd_shell 注册成功」,
+        // 不说明每个会话里模型真拿到的是谁 —— 混合状态必须按会话说。
+        scopesSummary: '{n} 个会话用宿主工具',
+        scopesHint: '头部按会话汇总:前缀是会话 id 前 8 位,后面是该会话里实际生效的命令工具。这些会话 EnvDock 没有接管(宿主工具挡不掉 / 被沙箱围栏),模型用的是宿主自带的命令工具。',
+        scopeKindTakeover: '直连接管',
+        scopeKindHost: '未接管',
+        scopeKindYield: '让路',
+        scopeKindSandbox: '沙箱让路',
+        scopeLine: '{id} · {kind} · {tool}',
+        scopeHidden: '挡掉 {hidden}',
+        // 三个计数的中文名:和 registers / disposes / denyApplies 并列,收进诊断 title。
+        syncDelegateCalls: '委托',
+        syncGuardDenials: '守卫拒绝',
+        syncYieldTicks: '让路轮次',
       },
       en: {
         title: 'EnvDock',
@@ -233,6 +247,18 @@ window.__ModuleLoader__.load({
         collapse: 'Collapse',
         dismiss: 'Got it',
         actionFailed: 'Action failed',
+        // Header aggregates per session: the global visible flag only says EnvDock’s envd_shell registered.
+        scopesSummary: '{n} session(s) use the host tool',
+        scopesHint: 'Aggregated per session: the prefix is the first 8 characters of the session id, followed by the command tool actually in effect there. EnvDock did not take over in these sessions (host tool cannot be masked / sandbox-confined), so the model runs the host’s own command tool.',
+        scopeKindTakeover: 'direct takeover',
+        scopeKindHost: 'not taken over',
+        scopeKindYield: 'stepped aside',
+        scopeKindSandbox: 'sandboxed',
+        scopeLine: '{id} · {kind} · {tool}',
+        scopeHidden: 'hides {hidden}',
+        syncDelegateCalls: 'delegated',
+        syncGuardDenials: 'guard denials',
+        syncYieldTicks: 'yield rounds',
       },
     }
 
@@ -263,6 +289,8 @@ window.__ModuleLoader__.load({
 .envd-badge .dot{width:5px;height:5px;border-radius:50%;background:currentColor;flex:none}
 .envd-badge.ok{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 14%,transparent)}
 .envd-badge.bad{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 14%,transparent)}
+/* warn:有会话没走 EnvDock 的命令工具 —— 不是错误(设计如此),但也不是「全绿」 */
+.envd-badge.warn{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 14%,transparent)}
 
 /* 按钮:只有「有边框」和「无边框」两种,行内动作用 ghost */
 .envd-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;height:28px;padding:0 11px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:transparent;color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;white-space:nowrap;flex:none;transition:background .12s ease,border-color .12s ease,color .12s ease}
@@ -782,8 +810,44 @@ window.__ModuleLoader__.load({
           return Number.isFinite(x) ? x : 0
         }
         const steady = n(s.steadyTicks) > 0 && !s.lastError && !(s.unrestrictable || []).length && !(s.blockedScopes || []).length
-        return [t.reconcile + ': ' + t.syncRegisters + ' ' + n(s.registers), t.syncDisposes + ' ' + n(s.disposes), t.syncDenyApplies + ' ' + n(s.denyApplies), steady ? t.steady : ''].filter(Boolean).join(' · ')
+        // 三个新计数说明「接管到底干过什么活」:成功委托 / 守卫拒绝 / plan 含 yieldHost 的 tick 数
+        // (让路的会话一直在,这个数就会一直涨 —— 它是持续状态,不是故障计数)。
+        const base = [t.reconcile + ': ' + t.syncRegisters + ' ' + n(s.registers), t.syncDisposes + ' ' + n(s.disposes), t.syncDenyApplies + ' ' + n(s.denyApplies)]
+        const extra = [t.syncDelegateCalls + ' ' + n(s.delegateCalls), t.syncGuardDenials + ' ' + n(s.guardDenials), t.syncYieldTicks + ' ' + n(s.yieldTicks)]
+        return base.concat(extra, steady ? [t.steady] : []).filter(Boolean).join(' · ')
       }
+
+      // ── 头部 badge:按会话汇总,不再只报全局「模型可见」 ──
+      // ct.visible 是全局视图(EnvDock 的 envd_shell 此刻在不在工具表),
+      // 但模型实际拿到哪个命令工具由每个会话自己的作用域决定:接管没生效的会话
+      // (host / yield / sandbox-host)里模型用的是宿主工具。混合状态还单挂一个「模型可见」,
+      // 就是在替这些会话说谎 —— 所以改挂汇总 warn badge,逐会话细节全收进 title。
+      const ctScopes = ct && Array.isArray(ct.scopes) ? ct.scopes.filter((s) => s && typeof s === 'object') : []
+      const hostToolSessions = ctScopes.filter((s) => s.kind !== 'takeover') // 模型用宿主工具的那些会话
+      const scopeKindText = (kind) =>
+        ({
+          takeover: t.scopeKindTakeover,
+          host: t.scopeKindHost,
+          yield: t.scopeKindYield,
+          'sandbox-host': t.scopeKindSandbox,
+        })[kind] || String(kind || '?')
+      const scopeLine = (s) => {
+        const hidden = Array.isArray(s.hidden) ? s.hidden.filter(Boolean).map(String) : []
+        const line = fmt(t.scopeLine, { id: String(s.id || '?').slice(0, 8), kind: scopeKindText(s.kind), tool: s.tool ? String(s.tool) : t.noCommandTool })
+        return hidden.length ? line + ' · ' + fmt(t.scopeHidden, { hidden: hidden.join(', ') }) : line
+      }
+      // 只有「全局可见 + 有会话在用宿主工具」才算混合;纯接管(全是 takeover)保持原 ok badge。
+      // scopes 缺失时用保留的 syncStats 兜底:hostOnlyScopes 里的会话同样确定在用宿主工具,
+      // 头部不能因为字段缺失又退回孤立的「模型可见」;sandboxHiddenScopes 只有计数,就只用它报数。
+      const stats = data && data.syncStats && typeof data.syncStats === 'object' ? data.syncStats : null
+      const statsHostOnly = stats && Array.isArray(stats.hostOnlyScopes) ? stats.hostOnlyScopes.filter(Boolean).map(String) : []
+      const listed = new Set(hostToolSessions.map((s) => String(s.id)))
+      const fallbackSessions = statsHostOnly.filter((id) => !listed.has(id)).map((id) => ({ id, kind: 'yield', tool: ct && ct.hostName ? String(ct.hostName) : '' }))
+      const mixedSessions = hostToolSessions.concat(fallbackSessions)
+      const sandboxHiddenCount = stats ? Math.max(0, Math.trunc(Number(stats.sandboxHiddenScopes) || 0)) : 0
+      const mixedCount = Math.max(mixedSessions.length, sandboxHiddenCount)
+      const ctMixed = ctVisible === true && mixedCount > 0
+      const ctMixedTitle = ctMixed ? [t.scopesHint, ...mixedSessions.map(scopeLine), diagTitle(stats) || ''].filter(Boolean).join('\n') : ''
 
       // ── 头部:一句话说清「哪台机器 / 默认终端 / 命令工具 / 有没有问题」 ──
       const head = h(
@@ -801,7 +865,11 @@ window.__ModuleLoader__.load({
               : h('span', {}, t.loading),
             data ? h('span', { className: 'envd-sep' }, '·') : null,
             ct && ct.name ? h('span', { className: 'envd-mono' }, ct.name) : null,
-            ctVisible === true ? badge('ok', t.cmdVisible, { title: diagTitle(data.syncStats) }) : null,
+            ctMixed
+              ? badge('warn', fmt(t.scopesSummary, { n: mixedCount }), { title: ctMixedTitle })
+              : ctVisible === true
+                ? badge('ok', t.cmdVisible, { title: diagTitle(data.syncStats) })
+                : null,
             ctVisible === false && !ctSandbox ? badge('bad', t.cmdInvisible, { title: ctSub }) : null,
             issues.length ? h('span', { className: 'envd-attn' }, '⚠ ' + fmt(t.countItems, { n: issues.length })) : null,
             data && data.detectedAt
