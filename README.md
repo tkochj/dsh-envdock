@@ -142,6 +142,8 @@ dsh web
 - 与宿主同族时**什么都不做**，不会重复造工具。
 - **沙箱按会话判，不按部署默认档判**：dsh 的执行器公布 `sandboxMode`（那是**部署默认档**），真实策略要逐会话 `sandboxPolicy.resolve({ session })`。只有本会话解析出 `danger-full-access` 时 EnvDock 才直接接管；一个会话被围栏不影响别的会话（`read-only` / `workspace-write` 的会话保留宿主命令工具）。
 - **认得出 dsh-ops 的 `ops_bash`**（cordis 模式下顶替官方 shell）：它按 bash 家族参与接管判定，不会被漏认成「两个命令工具并列」。
+- **工具表一变就立刻对账**（监听 `tools/change`，同一轮变更合并成一次）：别的插件晚一步注册或撤销 shell 时，遮挡是立即收敛，不用等 5 秒轮询。
+- **被藏掉的宿主 shell 直呼时给可操作拒绝**（`tools.guard`）：告诉你「已由 EnvDock 接管，改用 `envd_shell`，语法见简报」，而不是一个没头没尾的 `UNKNOWN_TOOL`；我们的工具在那个作用域不可见时守卫放行，绝不制造两个都调不到。
 - 注册失败或被同名工具占用时，EnvDock 放弃接管并保留宿主工具，不会让你一个命令工具都没有。
 
 ## 设置与状态

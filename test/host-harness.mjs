@@ -186,6 +186,8 @@ function makeHarness(options = {}) {
     deny: new Map(),
     listeners: new Map(),
     agents: [],
+    /** tools.guard 的替身:返回拒绝理由的第一条(真机语义:任一 guard 拒绝即拒绝) */
+    guards: [],
   }
   const denyOf = (scopeId) => {
     if (!state.deny.has(scopeId)) state.deny.set(scopeId, new Set())
@@ -231,6 +233,14 @@ function makeHarness(options = {}) {
       }
       return () => {
         for (const name of added) set.delete(name)
+      }
+    },
+    /** 真机:全局 guard(经 ctx.tools.guard 注册)对每次调用求理由,任一拒绝即拒绝 */
+    guard(fn) {
+      state.guards.push(fn)
+      return () => {
+        const i = state.guards.indexOf(fn)
+        if (i >= 0) state.guards.splice(i, 1)
       }
     },
   })
@@ -324,7 +334,17 @@ function makeHarness(options = {}) {
     set.clear()
     for (const name of names || []) set.add(name)
   }
-  return { ctx, state, webRoutes, services, subprocess, makeAgent, emit, toolsFor, setScopeDeny }
+  /** 某次调用的 guard 结论(真机:任一 guard 拒绝即拒绝) */
+  const guardReason = (name, agent) => {
+    for (const fn of state.guards) {
+      try {
+        const reason = fn({ name, agent })
+        if (typeof reason === 'string' && reason) return reason
+      } catch {}
+    }
+    return undefined
+  }
+  return { ctx, state, webRoutes, services, subprocess, makeAgent, emit, toolsFor, setScopeDeny, guardReason }
 }
 
 // ───────────────────────────────────── HTTP 请求替身 ──
@@ -775,6 +795,27 @@ check('认领 ops_bash 为宿主 bash 工具(shippedShell 报得出)', opsSnap.s
 check('接管后 ops_bash 被遮挡(不同时暴露两个命令工具)', hOps.toolsFor('agent-ops').get('ops_bash') === null)
 check('挡住 ops_bash 之后 envd_shell 仍然可见', Boolean(hOps.toolsFor('agent-ops').get('envd_shell')))
 
+// dsh-ops 的 session-shells 把 ops_bash 挂在**会话自己的层**里:restrict 过滤不到它。
+// EnvDock 必须让路(藏自己、留宿主),而不是让模型同时看到两个命令工具。
+const hLocal = makeHarness({
+  shippedTools: ['ops_bash'],
+  agentIds: ['agent-local'],
+  unrestrictableFor: (scopeId, name) => name === 'ops_bash',
+})
+apply(hLocal.ctx, { syncIntervalMs: 25 })
+await post(hLocal, { op: 'setOption', shellTakeover: 'takeover' })
+const localSnap = await pollSnapshot(hLocal, (s) => (s.syncStats.hostOnlyScopes || []).includes('agent-local'), 6000)
+check(
+  '作用域私有的宿主 shell 挡不掉 → 记进 hostOnlyScopes(不是静默)',
+  (localSnap.syncStats.hostOnlyScopes || []).includes('agent-local'),
+  JSON.stringify(localSnap.syncStats.hostOnlyScopes),
+)
+check('让路:该会话还剩宿主的 ops_bash', Boolean(hLocal.toolsFor('agent-local').get('ops_bash')))
+check('让路:该会话的 envd_shell 已藏(不同时暴露两个)', hLocal.toolsFor('agent-local').get('envd_shell') === null)
+check('挡不掉的 ops_bash 也记进 unrestrictable', (localSnap.syncStats.unrestrictable || []).includes('ops_bash'), JSON.stringify(localSnap.syncStats.unrestrictable))
+const localBrief = hLocal.state.brief.text({ scope: hLocal.state.agents[0] })
+check('让路会话的简报说清「用宿主工具、EnvDock 已让路」', localBrief.includes('让路'), localBrief.split('\n').find((l) => l.includes('命令工具')) || '')
+
 // 混合部署:有围栏的会话用宿主工具,无围栏的会话用 envd_shell —— 一个会话的策略不该锁死另一个
 const hMix = makeHarness({
   shippedTools: ['bash'],
@@ -851,6 +892,44 @@ await post(hDelegate, { op: 'setOption', sandboxTakeover: 'refuse' })
 const refusedByOpt = await delTool.execute({ command: 'echo delegated' }, { signal: null, agent: { session: { key: 'locked2' } } })
 check('sandboxTakeover=refuse:围栏会话直接拒绝', refusedByOpt.ok === false && refusedByOpt.text.includes('沙箱围栏'), String(refusedByOpt.text).slice(0, 140))
 await post(hDelegate, { op: 'setOption', sandboxTakeover: 'delegate' })
+
+// ── 学 dsh-ops:被藏掉的宿主 shell 直呼时给可操作拒绝(guard),而不是 UNKNOWN_TOOL ──
+const hGuard = makeHarness({ shippedTools: ['bash'], agentIds: ['agent-guard'] })
+apply(hGuard.ctx, { syncIntervalMs: 60000 })
+await post(hGuard, { op: 'setOption', shellTakeover: 'takeover' })
+await pollSnapshot(hGuard, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true)
+const guardReason = hGuard.guardReason('bash', hGuard.state.agents[0])
+phase('拒绝守卫(学 dsh-ops 的 refusal)')
+check(
+  'guard 注册了,直呼被藏的宿主 shell 会得到可操作拒绝',
+  typeof guardReason === 'string' && guardReason.includes('envd_shell'),
+  String(guardReason),
+)
+check('guard 不拦我们自己的工具', hGuard.guardReason('envd_shell', hGuard.state.agents[0]) === undefined)
+// 我们的工具在这个作用域不可见时,guard 必须放行宿主 shell —— 绝不制造「两个都调不到」
+hGuard.setScopeDeny('agent-guard', ['envd_shell'])
+check('envd_shell 不可见时 guard 放行宿主 shell(零工具保险)', hGuard.guardReason('bash', hGuard.state.agents[0]) === undefined)
+hGuard.setScopeDeny('agent-guard', [])
+
+// ── 学 dsh-ops:tools/change 驱动对账(别的插件晚一步注册 shell 时立刻收敛,不等 5 秒) ──
+const hEvt = makeHarness({ agentIds: ['agent-evt'] })
+apply(hEvt.ctx, { syncIntervalMs: 60000 })
+await post(hEvt, { op: 'setOption', shellTakeover: 'auto' })
+await waitForBrief(hEvt)
+check('前置:宿主还没注册命令工具时先不接管', !hEvt.state.toolDefs.has('envd_shell'))
+// 模拟别的插件在 apply 之后才注册 bash,并按真机语义派发 tools/change
+hEvt.state.toolDefs.set('bash', {
+  name: 'bash',
+  description: 'late bash',
+  parameters: { type: 'object', properties: {} },
+  output: { schema: { type: 'object' }, render: () => [] },
+  execute: async () => ({}),
+})
+hEvt.emit('tools/change')
+const evtSnap = await pollSnapshot(hEvt, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true, 1500)
+phase('事件驱动对账')
+check('tools/change 之后立刻接管(不等 60 秒 tick)', Boolean(evtSnap.commandTool && evtSnap.commandTool.takeover), JSON.stringify(evtSnap.commandTool))
+check('遮挡也立刻生效(宿主的 bash 已藏)', hEvt.toolsFor('agent-evt').get('bash') === null)
 
 // ── 不变量:已遮挡作用域里 envd_shell 消失 → 立刻把宿主 shell 还回去(不制造零工具) ──
 const hDeny = makeHarness({ shippedTools: ['bash'], agentIds: ['agent-r'] })

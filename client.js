@@ -86,6 +86,8 @@ window.__ModuleLoader__.load({
         syncUnrestrictableHint: '这些名字在当前作用域里挡不掉（通常是作用域私有的 shell），会一直和 envd_shell 并列可见；插件重载后会再试一次',
         syncBlockedScopes: '有作用域没遮挡',
         syncBlockedScopesHint: '这些 agent 作用域里看不到 envd_shell，所以没有遮挡宿主 shell（宁可多一个工具，也不要零个）；一旦恢复可见会自动补上',
+        syncHostOnly: '有会话的宿主 shell 挡不掉',
+        syncHostOnlyHint: '这些会话的宿主命令工具注册在作用域私有层，restrict 过滤不到它；EnvDock 让自己的 envd_shell 让路，保证该会话仍然只有一个命令工具',
         allowLan: '允许局域网访问面板 API',
         allowLanHint: '只放行读取面板数据',
         customTool: '自定义工具',
@@ -188,6 +190,8 @@ window.__ModuleLoader__.load({
         syncUnrestrictableHint: 'These names cannot be restricted in the current scope (usually a scope-local shell), so they stay visible next to envd_shell. Retried after a plugin reload.',
         syncBlockedScopes: 'scope(s) left undended',
         syncBlockedScopesHint: 'These agent scopes cannot see envd_shell, so the host shell was left visible there (two tools rather than none). It is hidden automatically once envd_shell becomes visible again.',
+        syncHostOnly: 'host shell cannot be masked in some sessions',
+        syncHostOnlyHint: 'These sessions register the host command tool in their own layer; restrict cannot filter it, so EnvDock lets its envd_shell step aside and keeps exactly one command tool.',
         allowLan: 'Allow LAN access to the panel API',
         allowLanHint: 'Panel data only',
         customTool: 'Custom tool',
@@ -761,6 +765,7 @@ window.__ModuleLoader__.load({
         }
         if (stats && Array.isArray(stats.unrestrictable) && stats.unrestrictable.length) warns.push({ text: t.syncUnrestrictable + ': ' + stats.unrestrictable.map(String).join(', '), title: t.syncUnrestrictableHint })
         if (stats && Array.isArray(stats.blockedScopes) && stats.blockedScopes.length) warns.push({ text: t.syncBlockedScopes + ': ' + stats.blockedScopes.map((x) => String(x).slice(0, 8)).join(', '), title: t.syncBlockedScopesHint })
+        if (stats && Array.isArray(stats.hostOnlyScopes) && stats.hostOnlyScopes.length) warns.push({ text: t.syncHostOnly + ': ' + stats.hostOnlyScopes.map((x) => String(x).slice(0, 8)).join(', '), title: t.syncHostOnlyHint })
         const lastError = stats && typeof stats.lastError === 'string' ? stats.lastError.trim() : ''
         if (!warns.length && !lastError) return null
         return h(

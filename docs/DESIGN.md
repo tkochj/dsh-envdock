@@ -51,14 +51,34 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 
 ## 终端接替
 
-- **宿主自带哪个 shell 是「查出来」的，不是写死的**。启动后把 `pwsh / powershell / cmd / bash / sh / zsh / fish` 在全局与每个 agent 作用域里挨个查一遍（`tools.get(name, agent)`——不传 agent 只见全局视图，这是踩过的坑），谁在，宿主就是哪个家族。
+- **宿主自带哪个 shell 是「查出来」的，不是写死的**。启动后把 `pwsh / powershell / cmd / bash / sh / zsh / fish / ops_bash` 在全局与每个 agent 作用域里挨个查一遍（`tools.get(name, agent)`——不传 agent 只见全局视图，这是踩过的坑；有 `tools.executable(name, agent)` 时优先用它，见下），谁在，宿主就是哪个家族。
 - **默认终端与宿主同族 → 什么都不做**，不重复造工具、不遮挡。
-- **固定名注册 + 占名不认领**：接管的命令工具固定叫 `envd_shell`（切终端只改执行方式，不拆建、不留空窗）；同名已被别的插件注册 → 报错并放弃接管，绝不认领别人的工具。
-- 注册后按**全局可见性**验证一次「模型看得见」，不是看 `register()` 有没有抛错；各 agent 作用域能不能看见由遮挡层逐个处理。
+- **固定名注册 + 占名不认领**：接管的命令工具固定叫 `envd_shell`（切终端只改执行方式，不拆建、不留空窗）；同名已被别的插件注册 → 报错并放弃接管，绝不认领别人的工具。判断「是不是我这一份」用**登记身份**（`tools.get(name) === 我注册的那个定义对象`，dsh-ops 的 publication ownership 是同一口径），不只看名字——同名工具被别人顶掉时，名字还在不代表还是我们的。
+- 注册后验证「模型看得见」，不是看 `register()` 有没有抛错；各 agent 作用域能不能看见由遮挡层逐个处理。**可执行面优先**：有 `tools.executable(name, agent)` 就用它判「这一单能调」，否则回落 `tools.get`——`ptc` 模式下模型直呼只允许 `run_code`，拿 `get` 判会把一个调不了的替代工具当成就绪，于是把真正能用的宿主工具藏掉。
 - **注册失败绝不遮挡宿主工具**：宁可放弃接管，也不让模型一个命令工具都没有。（早期版本在这里把自己锁死过：`bash` 被遮、`pwsh` 被 deny，手上没有任何命令通道。）
 - **沙箱按会话判，不按能力位判**：dsh 的 `ctx.shell` 是 ShellExecutor。可围栏的实现会公布 `sandboxMode`——但那是**部署默认档**（`dsh-pwsh-sandbox` 里就是 `sandboxPolicy.defaultMode`），不是本会话的有效策略。拿它当事实会在 `danger-full-access` 的会话里谎报围栏、把接管永久锁死。正确口径（与 `dsh-tool-pwsh` 一致）：能力位 = 执行器会不会围栏；有效策略 = 逐会话 `ctx.sandboxPolicy.resolve({ session })`。只有 `confined === true`（或策略不可知）才拦住 EnvDock 自己的 spawn；一个会话被围栏不影响别的会话，EnvDock 按作用域决定遮宿主的 shell 还是遮自己的 `envd_shell`（两份掩码互斥，任何作用域都不会零命令工具）。
 - **宿主 shell 记忆是历史事实**：一旦见过 `pwsh`，即使后来被我们自己遮挡，也仍然记得它是宿主自带的——否则每 5 秒会在「遮住 → 看不见 → 放开 → 又看见」之间来回抖。
 - **作用域私有的遮挡失败不株连**：某个 agent 作用域挡不掉的 shell 名只记在那个作用域，不会全局剔除——否则别的挡得掉的作用域会永久漏挡；已遮挡作用域里如果 `envd_shell` 变得不可见，会立刻把宿主 shell 还回去（宁可两个，也不制造零工具）。
+
+## 与 dsh-ops 的兼容与借鉴
+
+同一台机器上 EnvDock 与 dsh-ops 可能同时接管命令工具（dsh-ops 的 cordis 模式会把官方 `pwsh` 换成 `ops_bash`）。两边都只用 `tools.register` + `tools.get/restrict`，没有私有通道，所以共存靠三条：
+
+**适配**
+
+- `ops_bash` 按 bash 家族认领（`SHELL_TOOL_FAMILY`），否则 EnvDock 认不出真正的宿主命令工具，接管后模型会同时看到 `ops_bash` + `envd_shell`，`shippedShell` 也永远是 null（连委托都做不了）。
+- 谁的官方替换谁负责：EnvDock 只遮「命令工具」（shell 家族），不碰 dsh-ops 替换的 `read/glob/grep` 等文件工具，也不认领 dsh-ops 的 refusal 职责。
+
+**借鉴（都是 dsh-ops 已经踩过的坑）**
+
+1. **事件驱动对账**：监听 `tools/change`，用一个 40ms 的合并定时器触发对账；别的插件晚一步注册/撤销 shell 时立刻收敛，而不是等下一个 5 秒 tick。5 秒 tick 保留为兜底（旧宿主没有该事件、或事件不完整时仍然正确）。对账期间置 `mutating` 标志，自己的 `register/restrict` 派发的 `tools/change` 不再触发下一轮——这就是 dsh-ops 用 `withToolChange` 表达的作用域归属。
+2. **mask + refusal 同权**：被藏掉的宿主 shell 仍可能被上一步捕获的工具表直呼。注册一个 `tools.guard`，对这种调用返回「已由 EnvDock 接管，请用 `envd_shell`，语法见简报」，而不是让它掉成 `UNKNOWN_TOOL`。守卫必须比遮挡更保守：只在「这个作用域里确实被我们藏掉 + 我们的工具在该作用域可执行」时拒绝，否则放行——绝不制造「两个都调不到」。
+3. **登记身份，不只看名字**：`tools.get(name) === 我注册的那个定义对象` 才算我们的工具。同名工具被别的层盖住时，名字还在不代表还是我们的；这时候绝不能拿它当「已接管」去挡宿主。
+4. **可执行面优先**：`tools.get` 是注册表视图，`tools.executable(name, agent)` 才是「这一单能不能调」（`ptc` 折叠、按步捕获）。就绪判定用后者，旧宿主没有该方法才回落前者。
+
+**不学的部分**
+
+dsh-ops 的 `ops_bash` 同样走 `ctx.subprocess`（没有 `sandboxPolicy` 入口），所以 EnvDock 自己 spawn 时的沙箱闸门必须原样保留：围栏会话绝不直连，只能委托宿主执行器或拒绝。
 
 ## 状态与面板 API
 

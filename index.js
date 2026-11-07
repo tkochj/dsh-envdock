@@ -690,6 +690,12 @@ function createRuntime() {
     /** 宿主 shell 的沙箱事实:沙箱在场时绝不接管(我们的工具走 subprocess,会绕过沙箱)。 */
     sandbox: false,
     sandboxMode: '',
+    /**
+     * 我们自己注册的那一份定义对象(登记身份)。
+     * 只按名字判「是我的工具」会被同名工具骗过 —— 登记身份才是归属
+     * (dsh-ops 的 publication ownership 就是同一口径:`tools.get(name) === 我注册的那个对象`)。
+     */
+    ownDefinition: null,
   }
 }
 
@@ -1585,7 +1591,29 @@ function brief(detection, state, probeIn, runtime) {
       pushSyntax(hostFamily || shell.family)
     } else if (commandState.takeover && commandState.visible) {
       lines.push('  · 命令工具: `' + commandState.name + '`(EnvDock 已接管),里面只能写 ' + shell.label + ' 语法' + sandboxLine)
+      // 挡不掉的宿主 shell(作用域私有 / 别的插件后注册)会和我们并列:说真话,别让模型以为只有一个
+      if (commandState.hostName && visible(commandState.hostName)) {
+        lines.push(
+          '  · 注意:宿主 `' +
+            commandState.hostName +
+            '` 在这个会话里没被挡住,仍然可用;两条命令工具都在时优先用 `' +
+            commandState.name +
+            '`(语法见下面几行)',
+        )
+      }
       pushSyntax(shell.family)
+    } else if (commandState.takeover && !commandState.visible && hostName && visible(hostName)) {
+      // 宿主 shell 是作用域私有、挡不掉:EnvDock 把自己的工具让路,这个会话用宿主的那个
+      lines.push(
+        '  · 命令工具: `' +
+          hostName +
+          '`(宿主自带' +
+          (hostFamily ? ',用 ' + familyLabel(hostFamily) + ' 语法' : '') +
+          ');宿主 shell 在这个会话里挡不掉(作用域私有),EnvDock 的 `' +
+          ENVD_SHELL_NAME +
+          '` 已让路,直接用这个',
+      )
+      pushSyntax(hostFamily || shell.family)
     } else if (commandState.takeover) {
       // 接管了但工具此刻不在工具表里(刚重载 / 注册失败):别谎报「已接管」让模型去撞 unknown tool。
       lines.push(
@@ -2039,6 +2067,8 @@ export function apply(ctx, config) {
     unrestrictable: [],
     /** 因为看不到 envd_shell 而没遮挡的作用域(空 = 全都对完账了) */
     blockedScopes: [],
+    /** 宿主 shell 是作用域私有、挡不掉的会话:EnvDock 让路,该会话用宿主工具 */
+    hostOnlyScopes: [],
     /** 宿主执行器会围栏(能力位)。注意它**不等于**本会话被围栏 —— 见 sandboxScopes */
     sandboxCapable: false,
     /** 部署默认档(执行器公布的 sandboxMode),不是本会话有效策略 */
@@ -2196,12 +2226,35 @@ export function apply(ctx, config) {
    * 某个作用域里有没有这个工具。
    * 注意 `tools.get(name)` 是**全局视图**:preset 把 shell 工具注册在 agent 作用域里,
    * 不传 agent 当 scope 就永远查不到(会误判成「宿主没有命令工具」)。
+   *
+   * 有 agent 作用域时优先问 `tools.executable(name, agent)`(dsh-ops 的口径):
+   * 「注册了」不等于「这一单能调」—— ptc 模式下模型直呼只允许 run_code,
+   * 拿 get 判会把一个调不了的替代工具当成就绪,于是把真正能用的宿主工具藏掉。
+   * 旧宿主没有 executable → 回落 get;全局视图(agent 省略)也走 get。
    */
   const hasTool = (context, name, agent) => {
     const tools = toolsOf(context)
-    if (!tools || typeof tools.get !== 'function') return false
+    if (!tools) return false
+    if (agent && typeof tools.executable === 'function') {
+      try {
+        return Boolean(tools.executable(name, agent))
+      } catch {}
+    }
+    if (typeof tools.get !== 'function') return false
     try {
       return Boolean(tools.get(name, agent))
+    } catch {
+      return false
+    }
+  }
+  /** 这个作用域里登记的对象是不是**我们亲手注册**的那一份(登记身份,不是名字)。 */
+  const isOwnDefinition = (context, agent) => {
+    const tools = toolsOf(context)
+    if (!tools || typeof tools.get !== 'function') return false
+    try {
+      const current = tools.get(ENVD_SHELL_NAME, agent)
+      if (!current) return false
+      return rt.ownDefinition ? current === rt.ownDefinition : true
     } catch {
       return false
     }
@@ -2234,6 +2287,14 @@ export function apply(ctx, config) {
     /** 本代实例是否已卸载:卸载之后任何回调都不许再动注册表(否则会留下「幽灵工具」,
      *  它占着固定名,下一次启用永远被判成「已被其它插件占用」,接管再也起不来)。 */
     let stopped = false
+    /**
+     * 正在动注册表(register / restrict)。这期间宿主会同步派发 `tools/change`,
+     * 我们不希望自己的变更再触发一轮对账 —— dsh-ops 用 withToolChange 做同样的归属,
+     * 这里用同步标志实现:对账本身是同步的,窗口足够。
+     */
+    let mutating = false
+    /** 事件驱动对账的合并定时器(宿主一次注册会连发多枚 tools/change) */
+    let pendingSync = null
     /** agent 补账的定时器:卸载时必须一起清掉 */
     const scopeTimers = new Set()
     const scopes = new Map() // agentId -> { agent, actx, denyKey, denyBlockedKey, disposers }
@@ -2330,7 +2391,12 @@ export function apply(ctx, config) {
       cur.denyKey = ''
       cur.denyBlockedKey = ''
     }
-    /** 这个作用域实际能挡的掩码:剔掉它自己挡不掉的名字(别的作用域多半挡得掉)。 */
+    /**
+     * 这个作用域实际能挡的掩码:剔掉它自己挡不掉的名字(别的作用域多半挡得掉)。
+     * 「挡不掉」只从**实测失败**里认(`restrict` 抛错的那些进 cur.badNames),
+     * 不用全局视图去猜 —— 预设在 agent 祖先层注册的 shell 在全局视图里也查不到,
+     * 但在 agent 作用域里**挡得掉**(restrict 过滤的是继承面)。
+     */
     const maskFor = (cur, names) => names.filter((name) => !cur.badNames.has(name))
     /** 一份作用域计划的幂等键:宿主掩码 + 是否藏我们自己的工具。 */
     const planKey = (entry) => (entry.hideOwn ? 'own|' : '') + entry.mask.join(',')
@@ -2345,7 +2411,7 @@ export function apply(ctx, config) {
      * 规则照旧三条(幂等 / 掩码不按「此刻查得到」算 / 先建后挡),再加一条:
      * 藏自己之前必须先确认自己真的在,藏别人之前必须先确认自己真的可见。
      */
-    const denyScopes = (plan) => {
+    const denyScopes = (plan, candidates) => {
       const entries = Array.isArray(plan) ? plan : []
       const byId = new Map()
       for (const entry of entries) byId.set(String(entry.cur.agent.id), entry)
@@ -2418,7 +2484,8 @@ export function apply(ctx, config) {
       }
       const scopeList = [...scopes.values()]
       // 面板上的「已遮挡」必须是**真的挡住了**的名字:取交集,只有每个作用域都挡住了才敢说。
-      const allNames = new Set()
+      // 候选集必须包含「本来想挡但没挡住」的名字,否则让路的作用域会让 badNames 变成静默
+      const allNames = new Set(Array.isArray(candidates) ? candidates : [])
       for (const entry of entries) for (const name of entry.mask || []) allNames.add(name)
       rt.denyNames = scopeList.length ? [...allNames].filter((name) => scopeList.every((cur) => !cur.badNames.has(name))) : []
       // 挡不掉的按作用域记,诊断只做并集(别当成全局黑名单用)。
@@ -2434,8 +2501,10 @@ export function apply(ctx, config) {
       syncStats.blockedScopes = blockedNow
       // 沙箱会话里「藏了我们自己的工具」的有几个:面板据此解释「为什么模型看到的是宿主工具」
       syncStats.sandboxHiddenScopes = entries.filter((entry) => entry.hideOwn).length
+      // 宿主 shell 挡不掉、EnvDock 主动让路的会话(作用域私有 shell):面板单独说明
+      syncStats.hostOnlyScopes = entries.filter((entry) => entry.yieldHost).map((entry) => String(entry.cur.agent.id))
     }
-    const liftDenies = () => denyScopes([])
+    const liftDenies = () => denyScopes([], [])
     /** 每个作用域都按当前计划对完账了吗(含「已判定挡不了」的作用域) */
     const scopesSettled = (plan) => {
       for (const entry of Array.isArray(plan) ? plan : []) {
@@ -2496,7 +2565,8 @@ export function apply(ctx, config) {
      */
     const ownToolReady = () => {
       if (!ownRegistered) return false
-      if (hasTool(ctx, ENVD_SHELL_NAME)) return true
+      // 登记身份,不只是名字:同名工具被别人顶掉时,「名字还在」不代表「还是我们那一份」。
+      if (isOwnDefinition(ctx, undefined)) return true
       if (disposeTool) {
         try {
           disposeTool()
@@ -2505,6 +2575,7 @@ export function apply(ctx, config) {
       }
       ownRegistered = false
       appliedOwned = false
+      rt.ownDefinition = null
       return false
     }
 
@@ -2522,17 +2593,16 @@ export function apply(ctx, config) {
         return false
       }
       let dispose = null
+      const definition = commandTool(
+        ctx,
+        activeShell,
+        // 每一单都按**本会话**有效策略复检(不缓存全局布尔)
+        (agent) => sandboxGate(agent),
+        // 委托执行要知道宿主执行器是哪个族(它决定包装语法),未知就拒绝委托
+        () => (rt.shippedName ? SHELL_TOOL_FAMILY[rt.shippedName] || '' : ''),
+      )
       try {
-        dispose = ctx.tools.register(
-          commandTool(
-            ctx,
-            activeShell,
-            // 每一单都按**本会话**有效策略复检(不缓存全局布尔)
-            (agent) => sandboxGate(agent),
-            // 委托执行要知道宿主执行器是哪个族(它决定包装语法),未知就拒绝委托
-            () => (rt.shippedName ? SHELL_TOOL_FAMILY[rt.shippedName] || '' : ''),
-          ),
-        )
+        dispose = ctx.tools.register(definition)
       } catch (error) {
         // 同层重名 / 保留名:注册不上就只能让宿主自带的继续干活
         syncStats.lastError = '注册 ' + ENVD_SHELL_NAME + ' 失败: ' + ((error && error.message) || error)
@@ -2547,15 +2617,30 @@ export function apply(ctx, config) {
       // 以前拿「每个 agent 作用域都看得见」当门槛:一个作用域看不到就把刚注册的工具拆掉,
       // 结果是本来正常的作用域也跟着失去命令工具(而且那个作用域本来就不该被遮挡)。
       // 各作用域的可见性由 denyScopes 逐个处理,这里只回答「工具注册上了没有」。
-      if (!hasTool(ctx, ENVD_SHELL_NAME)) {
+      // 再验一次**登记身份**(dsh-ops 的 publication ownership):名字对、对象不对,
+      // 说明它已被别的层盖住,那就不是我们的工具,不能去挡宿主。
+      let registered = null
+      try {
+        const tools = toolsOf(ctx)
+        registered = tools && typeof tools.get === 'function' ? tools.get(ENVD_SHELL_NAME) : null
+      } catch {}
+      if (!registered) {
         try {
           dispose()
         } catch {}
         syncStats.lastError = ENVD_SHELL_NAME + ' 注册成功但工具表里查不到'
         return false
       }
+      if (registered !== definition) {
+        try {
+          dispose()
+        } catch {}
+        syncStats.lastError = ENVD_SHELL_NAME + ' 同名工具被别的层盖住(登记的已不是我们这一份),EnvDock 不接管'
+        return false
+      }
       disposeTool = dispose
       ownRegistered = true
+      rt.ownDefinition = definition
       rt.ownNames.add(ENVD_SHELL_NAME)
       syncStats.registers++
       syncStats.lastChosenName = ENVD_SHELL_NAME
@@ -2682,12 +2767,21 @@ export function apply(ctx, config) {
       // 刻意不用 hasTool 过滤:宿主 shell 注册在 agent 作用域里,全局视图本来就查不到,
       // 被我们挡住之后更是查不到 —— 用它过滤会让掩码忽有忽无,退化成 5 秒一抖。
       const hostNames = wants ? [...rt.seenShells].filter((name) => name !== ENVD_SHELL_NAME).sort() : []
-      // 每个作用域一份计划:有围栏 → 藏我们的、留宿主的;无围栏 → 藏宿主的、留我们的。
-      // 两份掩码互斥,任何作用域都不会出现「两个都藏」(零命令工具)。
+      // 每个作用域一份计划:
+      //   · 有围栏 → 藏我们的、留宿主的;
+      //   · 无围栏 → 藏宿主的、留我们的;
+      //   · 宿主 shell 在这个作用域**挡不掉**(作用域私有,restrict 实测失败)→ 反过来藏我们自己的,
+      //     留宿主的 —— 同样只有一个命令工具(学 dsh-ops:它的 session-shells 按会话挂 ops_bash)。
+      // 三份互斥,任何作用域都不会出现「两个都藏」(零命令工具)。
       const plan = scopeFacts.map(({ cur, gate }) => {
         if (!takeoverWanted) return { cur, mask: [], hideOwn: false }
         if (gate.confined === true) return { cur, mask: [], hideOwn: true }
-        return { cur, mask: maskFor(cur, hostNames), hideOwn: false }
+        const mask = maskFor(cur, hostNames)
+        if (!mask.length && hostNames.some((name) => cur.badNames.has(name) && hasTool(cur.actx, name, cur.agent))) {
+          // 宿主工具还在,只是我们挡不掉:让路,别让模型同时看到两个
+          return { cur, mask: [], hideOwn: true, yieldHost: true }
+        }
+        return { cur, mask, hideOwn: false }
       })
       const denyKey = plan.map((entry) => String(entry.cur.agent.id) + ':' + planKey(entry)).sort().join(';')
       const sig = [mode, takeoverWanted ? 'takeover' : 'idle', shell.family, shippedName || ''].join('|')
@@ -2706,7 +2800,7 @@ export function apply(ctx, config) {
           rt.toolVisible = true
           if (!scopesSettled(plan)) {
             // 只有遮挡这一步要补:注册表一个字节都不动
-            denyScopes(plan)
+            denyScopes(plan, hostNames)
           }
           syncStats.steadyTicks++
           return
@@ -2759,7 +2853,7 @@ export function apply(ctx, config) {
       rt.toolVisible = true
       rt.denyName = shippedName && shippedName !== ENVD_SHELL_NAME ? shippedName : null
       // 真正生效的掩码由 denyScopes 按作用域算(它才剔得掉各作用域挡不掉的名字)。
-      denyScopes(plan)
+      denyScopes(plan, hostNames)
       appliedOwned = true
       appliedSig = sig
       appliedDenyKey = denyKey
@@ -2772,14 +2866,81 @@ export function apply(ctx, config) {
       // 卸载之后任何回调(残留的 agent 补账定时器、探测回调)都不许再动注册表
       if (stopped) return
       syncStats.ticks++
+      // 对账期间宿主会同步派发 tools/change:自己的变更不触发新一轮对账(dsh-ops 的归属口径)
+      mutating = true
       try {
         reconcile()
       } catch (error) {
         syncStats.lastError = String((error && error.message) || error)
         console.error('[envdock] 终端接管对账失败:', error && error.message)
       } finally {
+        mutating = false
         syncStats.lastAt = Date.now()
       }
+    }
+
+    /**
+     * 工具表变了就立刻对账(合并同一轮变更),不等下一个 5 秒 tick。
+     *
+     * 这是从 dsh-ops 学的:它监听 `tools/change`(并把自家变更归属到具体作用域),
+     * 于是别的插件晚一步发布命令工具时,遮挡不是「最多晚 5 秒」而是立即收敛。
+     * 5 秒 tick 仍然保留:它是兜底,也是「宿主的 tools/change 不完整」时的安全网。
+     */
+    const scheduleSync = () => {
+      if (stopped || mutating || pendingSync) return
+      pendingSync = setTimeout(() => {
+        pendingSync = null
+        try {
+          sync()
+        } catch {}
+      }, 40)
+      scopeTimers.add(pendingSync)
+    }
+    try {
+      cleanups.push(ctx.on('tools/change', scheduleSync))
+    } catch (error) {
+      // 没有这个事件(旧宿主)也不致命:5 秒轮询兜底
+      console.error('[envdock] 监听 tools/change 失败:', error && error.message)
+    }
+
+    /**
+     * 被我们藏起来的宿主 shell 仍有一步之遥能被调到(模型按上一步的工具表直呼),
+     * 这时给它一条**可操作**的拒绝,而不是 UNKNOWN_TOOL。
+     *
+     * dsh-ops 用 tools.guard 做同一件事(refusal 与 mask 同权);这边再加两条保险:
+     *   · 只拒绝「确实被我们藏掉、而且我们的工具此刻可执行」的名字 —— 否则宁可放行,
+     *     绝不制造「两个都调不到」;
+     *   · 只认自己登记的那一份定义,防止同名工具被别人接管后我们还去挡。
+     */
+    const shellRefusal = (exec) => {
+      if (!rt.owns) return undefined
+      const name = String((exec && exec.name) || '')
+      if (!name || name === ENVD_SHELL_NAME || !SHELL_TOOL_FAMILY[name]) return undefined
+      const agent = exec && exec.agent ? exec.agent : null
+      if (!agent) return undefined
+      const scopeCtx = agent.ctx || ctx
+      // 只拒绝「这个作用域里确实被我们藏掉」的宿主 shell:
+      // 见过它、现在看不见、而我们的工具在这一作用域可执行 —— 三条同时成立才算接管生效。
+      if (!rt.seenShells.has(name) || hasTool(scopeCtx, name, agent)) return undefined
+      if (!isOwnDefinition(scopeCtx, agent) || !hasTool(scopeCtx, ENVD_SHELL_NAME, agent)) return undefined
+      return (
+        '`' +
+        name +
+        '` 已被 EnvDock 接管(`' +
+        ENVD_SHELL_NAME +
+        '` 代替):改用 `' +
+        ENVD_SHELL_NAME +
+        '`,终端是哪一个、用哪套语法以「本机环境 (EnvDock)」简报为准'
+      )
+    }
+    try {
+      const tools = toolsOf(ctx)
+      if (tools && typeof tools.guard === 'function') {
+        const disposeGuard = tools.guard(shellRefusal)
+        if (typeof disposeGuard === 'function') cleanups.push(disposeGuard)
+      }
+    } catch (error) {
+      console.error('[envdock] 注册命令工具守卫失败:', error && error.message)
     }
 
     const onStateChange = () => {
