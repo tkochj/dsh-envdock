@@ -61,8 +61,17 @@ window.__ModuleLoader__.load({
         takenOverHides: 'EnvDock 已接管（{shell} 已隐藏）',
         reuseByOther: '由其它插件提供',
         noCommandTool: '没探测到宿主命令工具',
-        sandboxNoTakeover: '宿主 shell 带沙箱策略，EnvDock 不接管（保留沙箱）',
-        sandboxHint: '接管会绕过 DSH 的沙箱（P0），所以这里保留宿主自带命令工具；沙箱关闭后会自动恢复接管。',
+        sandboxNoTakeover: '本会话被沙箱围栏，EnvDock 不接管（接管会绕过沙箱）',
+        sandboxHint: 'dsh 的执行器会围栏，但「部署默认档」不等于「本会话策略」：只有本会话 resolve 出 danger-full-access 时才接管。有围栏的会话保留宿主自带的命令工具；想保住终端的价值，把「沙箱下接管」切到「委托执行」。',
+        sandboxCapable: '宿主执行器会围栏',
+        sandboxDefault: '部署默认',
+        sandboxPolicyUnknown: '本会话策略未知',
+        sandboxFree: '本会话无围栏，接管生效',
+        sandboxScopeCount: '{n} 个会话有围栏，用宿主工具',
+        sandboxTakeover: '沙箱下接管',
+        sandboxDelegate: '委托执行',
+        sandboxRefuse: '直接拒绝',
+        sandboxDelegateHint: '委托执行：命令经带围栏的宿主执行器跑，终端选择仍生效；直接拒绝：保留宿主命令工具，EnvDock 不接管。',
         cmdVisible: '模型可见',
         cmdInvisible: '不可见：会 UNKNOWN_TOOL',
         deniesLabel: '已遮挡',
@@ -154,8 +163,17 @@ window.__ModuleLoader__.load({
         takenOverHides: 'taken over by EnvDock ({shell} hidden)',
         reuseByOther: 'provided by another plugin',
         noCommandTool: 'No host command tool detected',
-        sandboxNoTakeover: 'host shell is sandboxed; EnvDock does not take over',
-        sandboxHint: 'Takeover would bypass the DSH sandbox (P0), so the host command tool is kept. Takeover resumes automatically when the sandbox goes away.',
+        sandboxNoTakeover: 'this session is sandbox-confined; EnvDock does not take over',
+        sandboxHint: 'The executor CAN confine, but the deployment default is not this session’s policy: takeover happens only when this session resolves to danger-full-access. Confined sessions keep the host command tool; switch "sandbox takeover" to delegate to keep the terminal choice.',
+        sandboxCapable: 'host executor can confine',
+        sandboxDefault: 'deployment default',
+        sandboxPolicyUnknown: 'this session’s policy is unknown',
+        sandboxFree: 'this session is unconfined; takeover applies',
+        sandboxScopeCount: '{n} confined session(s) use the host tool',
+        sandboxTakeover: 'Sandbox takeover',
+        sandboxDelegate: 'Delegate',
+        sandboxRefuse: 'Refuse',
+        sandboxDelegateHint: 'Delegate: commands run through the confining host executor, so the terminal choice still works. Refuse: keep the host command tool and do not take over.',
         cmdVisible: 'model can see it',
         cmdInvisible: 'not visible: UNKNOWN_TOOL',
         deniesLabel: 'denied',
@@ -542,6 +560,8 @@ window.__ModuleLoader__.load({
       const options = state.options || {}
       // shellTakeover 只认这三个值;别的(旧值 / 脏值)一律归一成 auto,免得三个 chip 全都点不亮
       const takeoverMode = options.shellTakeover === 'takeover' || options.shellTakeover === 'off' ? options.shellTakeover : 'auto'
+      // 沙箱下接管:只有 delegate / refuse 两个值,脏值按默认 delegate
+      const sandboxTakeoverMode = options.sandboxTakeover === 'refuse' ? 'refuse' : 'delegate'
       const shell = (data && data.shell) || {}
       const platform = (data && data.platform) || null
       const missingPaths = data && data.pathInfo ? data.pathInfo.missingCount || (data.pathInfo.missing || []).length || 0 : 0
@@ -573,10 +593,20 @@ window.__ModuleLoader__.load({
       const ct = data && data.commandTool
       const ctVisible = ct && typeof ct.visible === 'boolean' ? ct.visible : null
       const denies = ct && Array.isArray(ct.denies) ? ct.denies.filter(Boolean).map((x) => String(x)) : []
-      // 宿主 shell 带沙箱策略时 EnvDock 不能接管(接管会绕过沙箱),这条优先于其它说明
+      // 沙箱两层说:能力位(执行器会不会围栏)+ 部署默认档 + 本会话有效策略。
+      // 只报能力位就是这次修的谎:部署默认 workspace-write 不等于本会话被围栏。
       const ctSandbox = Boolean(ct && ct.sandbox === true)
+      const sandboxInfo = (data && data.sandbox) || null
+      const sandboxParts = []
+      if (ctSandbox) {
+        sandboxParts.push(t.sandboxCapable)
+        if (sandboxInfo && sandboxInfo.defaultMode) sandboxParts.push(t.sandboxDefault + ' ' + sandboxInfo.defaultMode)
+        if (ct.sandboxConfined === true) sandboxParts.push(t.sandboxNoTakeover)
+        else if (ct.sandboxConfined === false) sandboxParts.push(t.sandboxFree)
+        else sandboxParts.push(t.sandboxPolicyUnknown)
+      }
       const ctSub = ctSandbox
-        ? t.sandboxNoTakeover + (ct.sandboxMode ? ' (' + ct.sandboxMode + ')' : '')
+        ? sandboxParts.join(' · ')
         : ctVisible === false && denies.length
           ? t.deniesLabel + ' ' + denies.join(', ')
           : !ct
@@ -714,12 +744,21 @@ window.__ModuleLoader__.load({
       )
 
       // ── 诊断:只在真有问题时出现,健康时把计数收进状态标记的 title ──
-      // s = syncStats;tool = 宿主命令工具状态(可选)。沙箱下接管会被宿主拒掉,
-      // 这里补一条能解释「为什么显示的是宿主自带」的警告。
-      const diagProblem = (s, tool) => {
+      // s = syncStats;tool = 宿主命令工具状态(可选);sandbox = 三层沙箱事实(可选)。
+      // 沙箱这条必须说清「能力位 / 部署默认 / 本会话」,否则用户会以为沙箱永远在、功能永远废。
+      const diagProblem = (s, tool, sandbox) => {
         const stats = s && typeof s === 'object' ? s : null
+        const sb = sandbox && typeof sandbox === 'object' ? sandbox : null
         const warns = []
-        if (tool && tool.sandbox === true) warns.push({ text: t.sandboxNoTakeover, title: t.sandboxHint })
+        if (tool && tool.sandbox === true) {
+          const scopes = sb && Array.isArray(sb.scopes) ? sb.scopes : []
+          const confined = scopes.filter((x) => x && x.confined === true).length
+          const parts = [sb && sb.capable ? t.sandboxCapable : t.sandboxNoTakeover]
+          if (sb && sb.defaultMode) parts.push(t.sandboxDefault + ' ' + sb.defaultMode)
+          if (scopes.length) parts.push(fmt(t.sandboxScopeCount, { n: confined }))
+          else parts.push(t.sandboxPolicyUnknown)
+          warns.push({ text: parts.join(' · '), title: t.sandboxHint })
+        }
         if (stats && Array.isArray(stats.unrestrictable) && stats.unrestrictable.length) warns.push({ text: t.syncUnrestrictable + ': ' + stats.unrestrictable.map(String).join(', '), title: t.syncUnrestrictableHint })
         if (stats && Array.isArray(stats.blockedScopes) && stats.blockedScopes.length) warns.push({ text: t.syncBlockedScopes + ': ' + stats.blockedScopes.map((x) => String(x).slice(0, 8)).join(', '), title: t.syncBlockedScopesHint })
         const lastError = stats && typeof stats.lastError === 'string' ? stats.lastError.trim() : ''
@@ -758,7 +797,7 @@ window.__ModuleLoader__.load({
             data ? h('span', { className: 'envd-sep' }, '·') : null,
             ct && ct.name ? h('span', { className: 'envd-mono' }, ct.name) : null,
             ctVisible === true ? badge('ok', t.cmdVisible, { title: diagTitle(data.syncStats) }) : null,
-            ctVisible === false ? badge('bad', t.cmdInvisible, { title: ctSub }) : null,
+            ctVisible === false && !ctSandbox ? badge('bad', t.cmdInvisible, { title: ctSub }) : null,
             issues.length ? h('span', { className: 'envd-attn' }, '⚠ ' + fmt(t.countItems, { n: issues.length })) : null,
             data && data.detectedAt
               ? h('span', { className: 'envd-sep' }, '·')
@@ -832,7 +871,7 @@ window.__ModuleLoader__.load({
                 // 跟命令工具无关,还可能和默认终端不一致 —— 放在这里只会误导,所以不显示(API 里仍保留)。
                 shell.path ? h('span', { className: 'envd-mono', title: shell.path }, shell.path) : null,
               ),
-              diagProblem(data.syncStats, ct),
+              diagProblem(data.syncStats, ct, data.sandbox),
               shellFormOpen
                 ? h(
                     'div',
@@ -999,6 +1038,32 @@ window.__ModuleLoader__.load({
                   ),
                 ),
               ),
+              sandboxInfo && sandboxInfo.capable
+                ? h(
+                    'div',
+                    { className: 'envd-opt' },
+                    h('span', { title: t.sandboxDelegateHint }, t.sandboxTakeover),
+                    h(
+                      'div',
+                      { className: 'envd-chips', role: 'group', 'aria-label': t.sandboxTakeover },
+                      [
+                        ['delegate', t.sandboxDelegate],
+                        ['refuse', t.sandboxRefuse],
+                      ].map((pair) =>
+                        h(
+                          'button',
+                          {
+                            key: pair[0],
+                            className: 'envd-chip' + (sandboxTakeoverMode === pair[0] ? ' on' : ''),
+                            'aria-pressed': sandboxTakeoverMode === pair[0],
+                            onClick: () => post({ op: 'setOption', sandboxTakeover: pair[0] }),
+                          },
+                          pair[1],
+                        ),
+                      ),
+                    ),
+                  )
+                : null,
             ],
             null,
             'options',

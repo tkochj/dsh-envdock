@@ -56,7 +56,7 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 - **固定名注册 + 占名不认领**：接管的命令工具固定叫 `envd_shell`（切终端只改执行方式，不拆建、不留空窗）；同名已被别的插件注册 → 报错并放弃接管，绝不认领别人的工具。
 - 注册后按**全局可见性**验证一次「模型看得见」，不是看 `register()` 有没有抛错；各 agent 作用域能不能看见由遮挡层逐个处理。
 - **注册失败绝不遮挡宿主工具**：宁可放弃接管，也不让模型一个命令工具都没有。（早期版本在这里把自己锁死过：`bash` 被遮、`pwsh` 被 deny，手上没有任何命令通道。）
-- **宿主 shell 带沙箱时绝不接管**：dsh 的 `ctx.shell` 是 ShellExecutor。可围栏的实现会公布 `sandboxMode`（`read-only` / `workspace-write` / `danger-full-access`）或自带 `sandboxPolicy`——**只要公布了就不接管**：`danger-full-access` 只是默认值，逐会话的 policy 可能更严（工具层每次调用都会 `resolve(exec)` 传该会话的策略），而 EnvDock 的 `subprocess` 旁路无法服从它。EnvDock 自己注册的工具因此**每执行一单都复检沙箱**，即使对账还没跑（最长 5 秒窗口），也绝不 spawn。真正无围栏的 executor（`dsh-pwsh-local` / `dsh-bash-local`）不公布这些字段，接管照常可用；沙箱消失后自动恢复。
+- **沙箱按会话判，不按能力位判**：dsh 的 `ctx.shell` 是 ShellExecutor。可围栏的实现会公布 `sandboxMode`——但那是**部署默认档**（`dsh-pwsh-sandbox` 里就是 `sandboxPolicy.defaultMode`），不是本会话的有效策略。拿它当事实会在 `danger-full-access` 的会话里谎报围栏、把接管永久锁死。正确口径（与 `dsh-tool-pwsh` 一致）：能力位 = 执行器会不会围栏；有效策略 = 逐会话 `ctx.sandboxPolicy.resolve({ session })`。只有 `confined === true`（或策略不可知）才拦住 EnvDock 自己的 spawn；一个会话被围栏不影响别的会话，EnvDock 按作用域决定遮宿主的 shell 还是遮自己的 `envd_shell`（两份掩码互斥，任何作用域都不会零命令工具）。
 - **宿主 shell 记忆是历史事实**：一旦见过 `pwsh`，即使后来被我们自己遮挡，也仍然记得它是宿主自带的——否则每 5 秒会在「遮住 → 看不见 → 放开 → 又看见」之间来回抖。
 - **作用域私有的遮挡失败不株连**：某个 agent 作用域挡不掉的 shell 名只记在那个作用域，不会全局剔除——否则别的挡得掉的作用域会永久漏挡；已遮挡作用域里如果 `envd_shell` 变得不可见，会立刻把宿主 shell 还回去（宁可两个，也不制造零工具）。
 
@@ -98,7 +98,7 @@ test/i18n-check.mjs    client.js 静态自检（词条/占位符/slot）
 test/host-harness.mjs  Host 半边运行时夹具（替身服务，全链路）
 ```
 
-Host 半边**不 import 任何 `@deepseek-ai/*` 包**（本地目录安装是 link 检出，包内 import 解析不到 profile 的 node_modules），只用 `node:` 内置模块；命令探测走宿主的 `subprocess` 服务（只跑 `--version` 之类的只读探测，继承 dsh 的工作目录语义）。**接管出来的命令工具也走 `subprocess`，不带 `sandboxPolicy`**——这正是宿主 shell 公布 `sandboxMode` 时 EnvDock 拒绝接管、把带沙箱的宿主命令工具留给模型的原因。
+Host 半边**不 import 任何 `@deepseek-ai/*` 包**（本地目录安装是 link 检出，包内 import 解析不到 profile 的 node_modules），只用 `node:` 内置模块；命令探测走宿主的 `subprocess` 服务（只跑 `--version` 之类的只读探测，继承 dsh 的工作目录语义）。**接管出来的命令工具默认也走 `subprocess`，而且是唯一的安全理由**：`subprocess.spawn` 没有 `sandboxPolicy` 入口，所以围栏会话绝不自己 spawn。围栏下的降级路径是**委托**：把命令交给带围栏的 `ctx.shell`（`resolve` + `execute`，命令经 `ENVD_CMD` 环境变量传入，避免三层引号），围栏挂在宿主进程上、子终端继承，`sandbox.denied` 也如实回显给模型。
 
 ## 已知边界
 
@@ -107,6 +107,6 @@ Host 半边**不 import 任何 `@deepseek-ai/*` 包**（本地目录安装是 li
 - 「重新探测」重读系统 PATH 依赖 Windows 注册表（`reg query`，机器级 + 用户级）。POSIX、或宿主没有 `subprocess` 服务时，只能退回 dsh 进程启动时的 `process.env.PATH`——那种情况下改了系统 PATH 仍然要重启 dsh。Windows 上「进程里多出来但目录真实存在」的 PATH 项会保留（那是启动器/终端自己塞的，不属于系统 PATH）。
 - Volta / asdf 只报「在场」，不解析版本列表。
 - 版本探测依赖宿主 `subprocess` 服务；没有它时只做 PATH 扫描，版本列显示「版本未知」。
-- 接管后的命令工具是**精简执行器**：单次前台、输出截断、支持 `cwd` / `timeoutMs`；没有后台作业、没有 tail 落盘文件、没有 `sandbox_permissions` 升级参数。要这些能力就切回「只给简报」用宿主自带的。宿主 shell 带沙箱时 EnvDock 会自动停在「不接管」，行为与「只给简报」一致。
+- 接管后的命令工具是**精简执行器**：单次前台、输出截断、支持 `cwd` / `timeoutMs`；没有后台作业、没有 tail 落盘文件、没有 `sandbox_permissions` 升级参数。要这些能力就切回「只给简报」用宿主自带的。围栏会话下它按「沙箱下接管」选项工作：`delegate`（默认）= 经带围栏的宿主执行器执行，`refuse` = 不接管（等价「只给简报」）。
 - 工作目录取**当前会话的工作目录**（不是 dsh 进程 cwd）。
 - 版本探测结果缓存在内存里 10 分钟（key 含 mtime+size），升级二进制会自动重测；纯环境切换（比如 `nvm use` 换了另一个路径）也是新路径 → 天然重测。

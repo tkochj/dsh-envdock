@@ -116,7 +116,7 @@ The `envd` tool:
 
 - The host command tool is `pwsh` / `bash` etc. When your default terminal is a different family, EnvDock registers a stable `envd_shell` and hides the host shells.
 - Same family: EnvDock does nothing and adds no duplicate tool.
-- Host shell sandboxed (`sandboxMode` / `sandboxPolicy`): EnvDock **never** takes over, because its `subprocess` path cannot honor per-session sandbox policies.
+- Sandbox is judged **per session**, not by the deployment default: the executor's `sandboxMode` is only the deployment default; the effective policy comes from `sandboxPolicy.resolve({ session })`. EnvDock takes over directly only when this session resolves to `danger-full-access`; a confined session does not disable takeover for other sessions (confined sessions keep the host command tool).
 - If registration fails or the name is taken, EnvDock keeps the host tool instead of leaving you without any command tool.
 
 ## Settings and reset
@@ -127,6 +127,7 @@ State lives in `~/.dsh/envdock.json` (atomic writes; a corrupt file is backed up
 |---|---|---|
 | Inject brief | on | Write the environment brief into the agent context |
 | Shell takeover | auto | `auto`: only for different families; `always`; `brief only` |
+| Sandbox takeover | delegate | When this session is confined: `delegate` runs commands through the confining host executor (terminal choice still works); `refuse` keeps the host command tool and does not take over |
 | Allow LAN | off | Panel API is loopback-only unless enabled |
 | Custom tools | empty | Add tools outside PATH |
 
@@ -143,7 +144,7 @@ Uninstall from the plugin page, then restart dsh.
 
 **The agent now has only `envd_shell` and fewer capabilities?** The takeover tool is a minimal executor: one foreground command, truncated output, `cwd` / `timeoutMs` — no background jobs, tail files or `sandbox_permissions`. Switch takeover to **brief only** to get the host tool back.
 
-**"Sandboxed host shell, EnvDock will not take over"?** By design: a sandboxed host shell publishes its policy, and the `subprocess` bypass cannot follow it.
+**"This session is sandbox-confined, EnvDock will not take over"?** Because this session's effective policy is not `danger-full-access`. The executor's `sandboxMode` is only the deployment default — the panel keeps three facts apart: capability, deployment default, and this session's effective policy. To keep using EnvDock's terminal here: (1) switch the session policy to `danger-full-access` and takeover applies immediately, or (2) keep the confinement and set **Sandbox takeover → Delegate** (the default): commands run through the confining host executor (the confinement rides the host process and is inherited by the child terminal), so the terminal choice still works. **Refuse** keeps the old behaviour and uses the host command tool.
 
 **Health check says the active version manager differs from PATH?** e.g. fnm is on Node 20 while PATH resolves the system Node 24. Use absolute paths or run `fnm use` first.
 

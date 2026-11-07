@@ -134,6 +134,49 @@ function fakeSubprocess(options = {}) {
   return service
 }
 
+// ─────────────────────────────── 宿主沙箱 / 执行器替身 ──
+/**
+ * 逐会话沙箱策略替身:`resolve({ session })` 按 session.key 给模式。
+ * 真机上 dsh 的 sandboxPolicy.resolve 就是「会话最后一次 sandbox/mode 覆盖 > 部署默认」。
+ */
+function fakeSandboxPolicy(fallback, bySession = {}) {
+  return {
+    resolve(request) {
+      const key = request && request.session ? request.session.key : ''
+      const mode = key && Object.prototype.hasOwnProperty.call(bySession, key) ? bySession[key] : fallback
+      return { mode, workspaceRoot: process.cwd() }
+    },
+  }
+}
+
+/** 带围栏的宿主执行器替身:记录 resolve 收到的请求,execute 返回固定结果。 */
+function fakeSandboxedShell({ mode = 'workspace-write', stdout = 'host-ran\n', denied = false } = {}) {
+  const calls = { resolved: [], executed: [] }
+  return {
+    calls,
+    sandboxMode: mode,
+    resolve(request) {
+      calls.resolved.push(request)
+      return { ...request, onExpiry: 'kill', stdoutMaxBytes: 262144 }
+    },
+    async execute(spec) {
+      calls.executed.push(spec)
+      return {
+        result: async () => ({
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          aborted: false,
+          timeoutMs: spec.timeoutMs,
+          stdout: { text: stdout, truncated: false },
+          stderr: { text: '', truncated: false },
+          sandbox: { mode: (spec.sandboxPolicy && spec.sandboxPolicy.mode) || mode, denied },
+        }),
+      }
+    },
+  }
+}
+
 // ───────────────────────────────────── Cordis ctx 替身 ──
 function makeHarness(options = {}) {
   const state = {
@@ -207,8 +250,10 @@ function makeHarness(options = {}) {
   const services = {
     subprocess,
     tools,
-    // 宿主 shell 服务替身(默认没有):沙箱用例靠它公布 sandboxMode
+    // 宿主 shell 服务替身(默认没有):沙箱用例靠它公布 sandboxMode / 提供 resolve+execute
     shell: options.shell,
+    // 逐会话沙箱策略替身(默认没有):沙箱用例靠它给出「本会话有效策略」
+    sandboxPolicy: options.sandboxPolicy,
     workingDirectory: { defaultDirectory: process.cwd(), ensure: async () => process.cwd() },
     agents: { list: () => state.agents },
     systemPrompt: {
@@ -253,9 +298,9 @@ function makeHarness(options = {}) {
   })
   const ctx = makeCtx({ webServer })
   /** 造一个 agent:作用域里的工具表带自己的遮挡集合,restrict 才真的有效果 */
-  const makeAgent = (id) => {
+  const makeAgent = (id, session) => {
     const actx = makeCtx({ tools: toolsFor(id) })
-    return { id, ctx: actx }
+    return { id, ctx: actx, session }
   }
   const emit = (event, payload) => {
     for (const listener of [...(state.listeners.get(event) || [])]) {
@@ -264,7 +309,11 @@ function makeHarness(options = {}) {
       } catch {}
     }
   }
-  for (const id of options.agentIds || []) state.agents.push(makeAgent(id))
+  // agentIds 可以是字符串(没有会话)或 { id, session }:沙箱用例要按会话判策略
+  for (const entry of options.agentIds || []) {
+    if (typeof entry === 'string') state.agents.push(makeAgent(entry))
+    else state.agents.push(makeAgent(entry.id, entry.session))
+  }
   /**
    * 直接改某个作用域的遮挡集合(模拟别的插件遮住了我们的工具 / 后来放开了)。
    * 必须**就地**改 Set:替换实例会让已经捕获旧 Set 的 restrict disposer 变成孤儿,
@@ -638,50 +687,160 @@ await new Promise((r) => setTimeout(r, 100))
 const afterOff = await callApi(h3)
 check('切到只给简报后不再接管', afterOff.json.commandTool.takeover === false, JSON.stringify(afterOff.json.commandTool))
 
-// ── P0:宿主 shell 带沙箱 → 绝不接管(我们的工具走 subprocess,会绕过沙箱) ──
-// dsh 的 ctx.shell 是 ShellExecutor:带沙箱的实现公布 sandboxMode。这种部署下接管 envd_shell
-// 等于给模型开一条没有 sandboxPolicy 的旁路 —— 显式「总是接管」也不行。
-const hSandbox = makeHarness({ shippedTools: ['bash'], agentIds: ['agent-s'], shell: { sandboxMode: 'workspace-write' } })
+// ── 沙箱:能力位 ≠ 本会话有效策略 ──
+// dsh 的 shell.sandboxMode 是**部署默认档**(dsh-pwsh-sandbox 里就是 sandboxPolicy.defaultMode),
+// 不是本会话的有效策略。修前只看它 → danger-full-access 的会话也被判成 workspace-write,
+// 接管被永久锁死,简报还把部署默认档谎报成本会话策略。
+// 修后:能力位只决定「能不能直连」,有效策略逐会话问 sandboxPolicy.resolve。
+const hSandbox = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: [{ id: 'agent-s', session: { key: 'work' } }],
+  shell: { sandboxMode: 'workspace-write' },
+  sandboxPolicy: fakeSandboxPolicy('workspace-write'),
+})
 apply(hSandbox.ctx, { syncIntervalMs: 25 })
 await post(hSandbox, { op: 'setOption', shellTakeover: 'takeover' })
 await post(hSandbox, { op: 'setShell', key: 'auto' })
 await waitForBrief(hSandbox)
 const sandboxSnap = await pollSnapshot(hSandbox, (s) => Boolean(s.syncStats) && s.syncStats.sandboxBlocked === true)
-phase('沙箱:不接管')
-check('沙箱在场:不注册 envd_shell(不制造绕沙箱的旁路)', !hSandbox.state.toolDefs.has('envd_shell'))
+phase('沙箱:按会话判策略')
+check('有围栏的会话:不注册 envd_shell(不制造绕沙箱的旁路)', !hSandbox.state.toolDefs.has('envd_shell'))
 check(
-  '沙箱在场:显式 takeover 也不接管',
+  '有围栏的会话:显式 takeover 也不接管',
   sandboxSnap.commandTool.takeover === false && sandboxSnap.commandTool.sandbox === true,
   JSON.stringify(sandboxSnap.commandTool),
 )
-check('沙箱在场:宿主命令工具仍然可见(模型还有命令工具)', Boolean(hSandbox.toolsFor('agent-s').get('bash')))
-check('沙箱模式端到面板', sandboxSnap.commandTool.sandboxMode === 'workspace-write', String(sandboxSnap.commandTool.sandboxMode))
+check('有围栏的会话:宿主命令工具仍然可见(模型还有命令工具)', Boolean(hSandbox.toolsFor('agent-s').get('bash')))
+check(
+  '面板拿到三层事实:能力位 / 部署默认档 / 逐会话有效策略',
+  sandboxSnap.sandbox &&
+    sandboxSnap.sandbox.capable === true &&
+    sandboxSnap.sandbox.defaultMode === 'workspace-write' &&
+    sandboxSnap.sandbox.scopes[0].confined === true &&
+    sandboxSnap.sandbox.scopes[0].mode === 'workspace-write',
+  JSON.stringify(sandboxSnap.sandbox),
+)
+check(
+  'API 没有会话 → commandTool 不谎报会话结论(confined=null),但逐会话事实在 sandbox.scopes 里',
+  sandboxSnap.commandTool.sandboxMode === 'workspace-write' && sandboxSnap.commandTool.sandboxConfined === null && sandboxSnap.commandTool.sandboxPolicyKnown === true,
+  JSON.stringify(sandboxSnap.commandTool),
+)
+// 简报是按会话求值的:带 scope 调一次,这才是模型真看到的那份
+const confinedBrief = hSandbox.state.brief.text({ scope: hSandbox.state.agents[0] })
+check(
+  '有围栏会话的简报:按宿主工具的语法教(不再用默认终端的语法误导)',
+  confinedBrief.includes('宿主自带') && confinedBrief.includes('bash / sh 语法') && !confinedBrief.includes('不在工具表里'),
+  confinedBrief.split('\n').find((l) => l.includes('命令工具')) || '',
+)
 const sandboxBrief = String((await callApi(hSandbox)).json.brief)
 check('沙箱时简报说明为什么没接管', sandboxBrief.includes('沙箱'), sandboxBrief.split('\n').find((l) => l.includes('沙箱')) || '')
 
-// 能力位口径:公布了 sandboxMode 就不接管 —— 即使默认值是 danger-full-access:
-// 逐会话的 policy 可能比默认更严(dsh-tool-pwsh 每次用 resolve(exec) 传该会话的 policy),
-// 而 EnvDock 的 subprocess 旁路无法服从它。真正无围栏的 executor 不公布这个字段,那时才接管。
-const hFull = makeHarness({ shippedTools: ['bash'], shell: { sandboxMode: 'danger-full-access' } })
+// 同一个部署默认档,但本会话 resolve 出 danger-full-access → 必须照常接管(假阳性修复)
+const hFull = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: [{ id: 'agent-f', session: { key: 'full' } }],
+  shell: { sandboxMode: 'workspace-write' },
+  sandboxPolicy: fakeSandboxPolicy('workspace-write', { full: 'danger-full-access' }),
+})
 apply(hFull.ctx, { syncIntervalMs: 25 })
 await post(hFull, { op: 'setOption', shellTakeover: 'takeover' })
-const fullSnap = await pollSnapshot(hFull, (s) => Boolean(s.syncStats) && s.syncStats.sandboxBlocked === true)
+const fullSnap = await pollSnapshot(hFull, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true)
+check('本会话 danger-full-access → 照常接管(不再被部署默认档锁死)', hFull.state.toolDefs.has('envd_shell'), JSON.stringify(fullSnap.commandTool))
+check('无围栏会话里宿主 bash 被遮挡(只留一个命令工具)', hFull.toolsFor('agent-f').get('bash') === null)
 check(
-  'danger-full-access 也按能力位口径不接管(会话 policy 可能更严)',
-  fullSnap.commandTool.takeover === false && fullSnap.commandTool.sandbox === true,
-  JSON.stringify(fullSnap.commandTool),
+  '无围栏会话的简报说明「本会话策略 … 无围栏」',
+  hFull.state.brief.text({ scope: hFull.state.agents[0] }).includes('无围栏'),
+  hFull.state.brief.text({ scope: hFull.state.agents[0] }).split('\n').find((l) => l.includes('命令工具')) || '',
 )
 
-// 只有 shell.sandboxPolicy(capability 位缺省)也算沙箱
-const hPolicy = makeHarness({ shippedTools: ['bash'], shell: { sandboxPolicy: { mode: 'workspace-write' } } })
+// 策略不可知(执行器会围栏但没有 sandboxPolicy 服务)→ 不猜:宁可先不接管
+const hPolicy = makeHarness({ shippedTools: ['bash'], agentIds: [{ id: 'agent-p', session: { key: 'p' } }], shell: { sandboxPolicy: { mode: 'workspace-write' } } })
 apply(hPolicy.ctx, { syncIntervalMs: 25 })
 await post(hPolicy, { op: 'setOption', shellTakeover: 'takeover' })
 const policySnap = await pollSnapshot(hPolicy, (s) => Boolean(s.syncStats) && s.syncStats.sandboxBlocked === true)
 check(
-  '只有 shell.sandboxPolicy 时同样不接管',
+  '只有 shell.sandboxPolicy、没有策略服务 → 保守不接管',
   policySnap.commandTool.takeover === false && policySnap.commandTool.sandbox === true,
   JSON.stringify(policySnap.commandTool),
 )
+check('保守判定下宿主命令工具仍然可用', Boolean(hPolicy.toolsFor('agent-p').get('bash')))
+
+// 混合部署:有围栏的会话用宿主工具,无围栏的会话用 envd_shell —— 一个会话的策略不该锁死另一个
+const hMix = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: [
+    { id: 'agent-free', session: { key: 'free' } },
+    { id: 'agent-locked', session: { key: 'locked' } },
+  ],
+  shell: { sandboxMode: 'workspace-write' },
+  sandboxPolicy: fakeSandboxPolicy('workspace-write', { free: 'danger-full-access' }),
+})
+apply(hMix.ctx, { syncIntervalMs: 25 })
+await post(hMix, { op: 'setOption', shellTakeover: 'takeover' })
+await pollSnapshot(hMix, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true)
+phase('混合部署:按会话遮不同工具')
+check(
+  '无围栏会话:用 envd_shell,宿主 bash 被藏',
+  Boolean(hMix.toolsFor('agent-free').get('envd_shell')) && hMix.toolsFor('agent-free').get('bash') === null,
+  'free=' + ['envd_shell', 'bash'].filter((n) => hMix.toolsFor('agent-free').get(n)).join(','),
+)
+check(
+  '有围栏会话:用宿主 bash,envd_shell 被藏(不制造零工具)',
+  Boolean(hMix.toolsFor('agent-locked').get('bash')) && hMix.toolsFor('agent-locked').get('envd_shell') === null,
+  'locked=' + ['envd_shell', 'bash'].filter((n) => hMix.toolsFor('agent-locked').get(n)).join(','),
+)
+
+// 围栏下调用 envd_shell:没有可委托的宿主执行器 → 拒绝,绝不 spawn 一条无 policy 的命令
+const mixTool = hMix.state.toolDefs.get('envd_shell')
+const refusedHere = await mixTool.execute({ command: 'echo portable-bypass', cwd: process.cwd() }, { signal: null, agent: { session: { key: 'locked' } } })
+check('围栏会话调用 envd_shell:拒绝而不是 spawn', refusedHere.ok === false && refusedHere.text.includes('沙箱围栏'), String(refusedHere.text).slice(0, 140))
+check(
+  '拒绝时没有产生子进程(核对 spawn 记录)',
+  !hMix.subprocess.calls.some((c) => (c.argv || []).some((a) => String(a).includes('portable-bypass'))),
+  String(hMix.subprocess.calls.length),
+)
+
+// 围栏下委托执行:命令经**带围栏的宿主执行器**跑,并带上本会话 policy(围栏不被绕过)
+const hostShell = fakeSandboxedShell({ stdout: 'delegated-ok\n' })
+const hDelegate = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: [
+    { id: 'agent-free2', session: { key: 'free2' } },
+    { id: 'agent-locked2', session: { key: 'locked2' } },
+  ],
+  shell: hostShell,
+  sandboxPolicy: fakeSandboxPolicy('workspace-write', { free2: 'danger-full-access' }),
+})
+apply(hDelegate.ctx, { syncIntervalMs: 25 })
+await post(hDelegate, { op: 'setOption', shellTakeover: 'takeover' })
+await pollSnapshot(hDelegate, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true)
+const delTool = hDelegate.state.toolDefs.get('envd_shell')
+const delegated = await delTool.execute({ command: 'echo delegated', cwd: process.cwd() }, { signal: null, agent: { session: { key: 'locked2' } } })
+phase('围栏下委托执行')
+check(
+  '委托执行走宿主执行器(resolve + execute 都被调用)',
+  hostShell.calls.resolved.length === 1 && hostShell.calls.executed.length === 1,
+  JSON.stringify({ r: hostShell.calls.resolved.length, e: hostShell.calls.executed.length }),
+)
+check(
+  '委托时带上本会话 policy(围栏不会被绕过)',
+  Boolean(hostShell.calls.executed[0].sandboxPolicy) && hostShell.calls.executed[0].sandboxPolicy.mode === 'workspace-write',
+  JSON.stringify(hostShell.calls.executed[0].sandboxPolicy),
+)
+check(
+  '命令经环境变量 ENVD_CMD 传入,没有拼进命令字符串',
+  hostShell.calls.executed[0].env.ENVD_CMD === 'echo delegated' && !String(hostShell.calls.executed[0].command).includes('echo delegated'),
+  String(hostShell.calls.executed[0].command),
+)
+check(
+  '委托执行的输出回来了(带沙箱事实)',
+  delegated.ok === true && delegated.text.includes('delegated-ok') && delegated.text.includes('[sandbox]'),
+  String(delegated.text).slice(0, 160),
+)
+await post(hDelegate, { op: 'setOption', sandboxTakeover: 'refuse' })
+const refusedByOpt = await delTool.execute({ command: 'echo delegated' }, { signal: null, agent: { session: { key: 'locked2' } } })
+check('sandboxTakeover=refuse:围栏会话直接拒绝', refusedByOpt.ok === false && refusedByOpt.text.includes('沙箱围栏'), String(refusedByOpt.text).slice(0, 140))
+await post(hDelegate, { op: 'setOption', sandboxTakeover: 'delegate' })
 
 // ── 不变量:已遮挡作用域里 envd_shell 消失 → 立刻把宿主 shell 还回去(不制造零工具) ──
 const hDeny = makeHarness({ shippedTools: ['bash'], agentIds: ['agent-r'] })
