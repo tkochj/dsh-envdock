@@ -67,7 +67,7 @@ window.__ModuleLoader__.load({
         sandboxDefault: '部署默认',
         sandboxPolicyUnknown: '本会话策略未知',
         sandboxFree: '本会话无围栏，接管生效',
-        sandboxScopeCount: '{n} 个会话有围栏，用宿主工具',
+        sandboxScopeCount: '有围栏的会话 {n} 个',
         sandboxTakeover: '沙箱下接管',
         sandboxDelegate: '委托执行',
         sandboxRefuse: '直接拒绝',
@@ -132,7 +132,7 @@ window.__ModuleLoader__.load({
         // 头部按会话汇总:全局 visible 只说明「EnvDock 的 envd_shell 注册成功」,
         // 不说明每个会话里模型真拿到的是谁 —— 混合状态必须按会话说。
         scopesSummary: '{n} 个会话用宿主工具',
-        scopesHint: '头部按会话汇总:前缀是会话 id 前 8 位,后面是该会话里实际生效的命令工具。这些会话 EnvDock 没有接管(宿主工具挡不掉 / 被沙箱围栏),模型用的是宿主自带的命令工具。',
+        scopesHint: '头部按会话汇总:前缀是会话 id 前 8 位,后面是该会话里实际生效的命令工具。这些会话里模型用的是宿主自带的命令工具(宿主工具挡不掉 / 被沙箱围栏 / EnvDock 没接管成功)。',
         scopeKindTakeover: '直连接管',
         scopeKindHost: '未接管',
         scopeKindYield: '让路',
@@ -143,6 +143,22 @@ window.__ModuleLoader__.load({
         syncDelegateCalls: '委托',
         syncGuardDenials: '守卫拒绝',
         syncYieldTicks: '让路轮次',
+        // 逐会话异常与旧版兜底:面板必须能说「有一个会话零命令工具」,不能只报汇总数字。
+        scopesAnomaly: '{n} 个会话命令工具异常',
+        scopesAnomalyHint: '这些会话里模型可能拿不到任何命令工具,或者接管后宿主工具仍然可见(两个命令工具)。逐会话原因见上面的清单。',
+        scopesLegacyNote: '当前 /envdock-api 是旧版构建(没有逐会话 scopes):这里只能给汇总计数,无法逐个会话核对;重启 dsh 加载新版本后会列出每个会话。',
+        scopeKindUnknown: '未知终局',
+        scopeAnomalyInvisible: '⚠ 看不到命令工具',
+        scopeAnomalyLeak: '⚠ 宿主 {tools} 仍可见',
+        scopeConfined: '沙箱围栏',
+        syncRegisterTries: '注册尝试',
+        syncDelegateTries: '委托尝试',
+        syncDelegateFailures: '委托失败',
+        syncTicks: 'tick',
+        syncDenyDrops: '释放遮挡',
+        syncExecutorFamily: '执行器',
+        syncScopeAnomalies: '命令工具异常会话',
+        syncGuardMissing: '拒绝守卫未注册',
       },
       en: {
         title: 'EnvDock',
@@ -185,7 +201,7 @@ window.__ModuleLoader__.load({
         sandboxDefault: 'deployment default',
         sandboxPolicyUnknown: 'this session’s policy is unknown',
         sandboxFree: 'this session is unconfined; takeover applies',
-        sandboxScopeCount: '{n} confined session(s) use the host tool',
+        sandboxScopeCount: '{n} confined session(s)',
         sandboxTakeover: 'Sandbox takeover',
         sandboxDelegate: 'Delegate',
         sandboxRefuse: 'Refuse',
@@ -249,7 +265,7 @@ window.__ModuleLoader__.load({
         actionFailed: 'Action failed',
         // Header aggregates per session: the global visible flag only says EnvDock’s envd_shell registered.
         scopesSummary: '{n} session(s) use the host tool',
-        scopesHint: 'Aggregated per session: the prefix is the first 8 characters of the session id, followed by the command tool actually in effect there. EnvDock did not take over in these sessions (host tool cannot be masked / sandbox-confined), so the model runs the host’s own command tool.',
+        scopesHint: 'Aggregated per session: the prefix is the first 8 characters of the session id, followed by the command tool actually in effect there. In these sessions the model runs the host’s own command tool (host tool cannot be masked / sandbox-confined / takeover failed).',
         scopeKindTakeover: 'direct takeover',
         scopeKindHost: 'not taken over',
         scopeKindYield: 'stepped aside',
@@ -259,6 +275,21 @@ window.__ModuleLoader__.load({
         syncDelegateCalls: 'delegated',
         syncGuardDenials: 'guard denials',
         syncYieldTicks: 'yield rounds',
+        scopesAnomaly: '{n} session(s) with a broken command tool',
+        scopesAnomalyHint: 'In these sessions the model may have no command tool at all, or a host tool is still visible after takeover (two tools). See the per-session list above for the reason.',
+        scopesLegacyNote: 'This /envdock-api is an older build (no per-session scopes): only aggregate counts are available, so sessions cannot be verified one by one. Restart dsh with the new version to list each session here.',
+        scopeKindUnknown: 'unknown outcome',
+        scopeAnomalyInvisible: '⚠ no command tool visible',
+        scopeAnomalyLeak: '⚠ host {tools} still visible',
+        scopeConfined: 'sandbox-confined',
+        syncRegisterTries: 'register tries',
+        syncDelegateTries: 'delegate tries',
+        syncDelegateFailures: 'delegate failures',
+        syncTicks: 'ticks',
+        syncDenyDrops: 'mask releases',
+        syncExecutorFamily: 'executor',
+        syncScopeAnomalies: 'broken command-tool sessions',
+        syncGuardMissing: 'refusal guard missing',
       },
     }
 
@@ -776,31 +807,54 @@ window.__ModuleLoader__.load({
       )
 
       // ── 诊断:只在真有问题时出现,健康时把计数收进状态标记的 title ──
-      // s = syncStats;tool = 宿主命令工具状态(可选);sandbox = 三层沙箱事实(可选)。
-      // 沙箱这条必须说清「能力位 / 部署默认 / 本会话」,否则用户会以为沙箱永远在、功能永远废。
+      // s = syncStats;tool = commandTool(含逐会话 scopes);sandbox = 三层沙箱事实(可选)。
       const diagProblem = (s, tool, sandbox) => {
         const stats = s && typeof s === 'object' ? s : null
         const sb = sandbox && typeof sandbox === 'object' ? sandbox : null
+        const scopes = tool && Array.isArray(tool.scopes) ? tool.scopes.filter((x) => x && typeof x === 'object') : []
         const warns = []
-        if (tool && tool.sandbox === true) {
-          const scopes = sb && Array.isArray(sb.scopes) ? sb.scopes : []
-          const confined = scopes.filter((x) => x && x.confined === true).length
+        // 沙箱:**有围栏会话**或本会话被围栏时才算需要说明的事;部署具备围栏能力是常态,
+        // 以前只要能力位在就挂一行 ⚠,健康机器上也一直红着。
+        const confinedCount = scopes.filter((x) => x.confined === true).length
+        const policyUnknown = Boolean(sb && sb.policyKnown === false)
+        if (tool && tool.sandbox === true && (confinedCount > 0 || tool.sandboxConfined === true || policyUnknown)) {
           const parts = [sb && sb.capable ? t.sandboxCapable : t.sandboxNoTakeover]
           if (sb && sb.defaultMode) parts.push(t.sandboxDefault + ' ' + sb.defaultMode)
-          if (scopes.length) parts.push(fmt(t.sandboxScopeCount, { n: confined }))
+          if (scopes.length) parts.push(fmt(t.sandboxScopeCount, { n: confinedCount }))
           else parts.push(t.sandboxPolicyUnknown)
           warns.push({ text: parts.join(' · '), title: t.sandboxHint })
         }
+        // 逐会话异常:模型实际拿不到命令工具 / 接管下宿主工具仍可见 / 挡了却仍可见。
+        // tool 为空就是「一个命令工具都没有」——不能只信服务端的 anomaly 标志,
+        // 旧版 / 半新版本可能没算这条,面板必须自己认得出来。
+        const anomalyScopes = scopes.filter(
+          (x) =>
+            x.anomaly === true ||
+            !x.tool ||
+            x.visible === false ||
+            (x.kind === 'takeover' && Array.isArray(x.hostTools) && x.hostTools.length > 0) ||
+            (Array.isArray(x.leaked) && x.leaked.length > 0),
+        )
+        if (anomalyScopes.length) {
+          warns.push({ text: t.syncScopeAnomalies + ': ' + anomalyScopes.map((x) => String(x.id || '').slice(0, 8)).join(', '), title: t.scopesAnomalyHint })
+        }
         if (stats && Array.isArray(stats.unrestrictable) && stats.unrestrictable.length) warns.push({ text: t.syncUnrestrictable + ': ' + stats.unrestrictable.map(String).join(', '), title: t.syncUnrestrictableHint })
         if (stats && Array.isArray(stats.blockedScopes) && stats.blockedScopes.length) warns.push({ text: t.syncBlockedScopes + ': ' + stats.blockedScopes.map((x) => String(x).slice(0, 8)).join(', '), title: t.syncBlockedScopesHint })
-        if (stats && Array.isArray(stats.hostOnlyScopes) && stats.hostOnlyScopes.length) warns.push({ text: t.syncHostOnly + ': ' + stats.hostOnlyScopes.map((x) => String(x).slice(0, 8)).join(', '), title: t.syncHostOnlyHint })
+        // 「让路」是 README 认可的正常终局(不是故障):头部已汇总,这里不再挂 ⚠。
         const lastError = stats && typeof stats.lastError === 'string' ? stats.lastError.trim() : ''
+        const errorAge = stats && Number(stats.lastErrorAt) > 0 ? Math.max(0, Math.round((Date.now() - Number(stats.lastErrorAt)) / 1000)) : 0
         if (!warns.length && !lastError) return null
         return h(
           'div',
           { className: 'envd-diag' },
           ...warns.map((w, i) => h('span', { key: 'w' + i, className: 'w', title: w.title }, '⚠ ' + w.text)),
-          lastError ? h('span', { key: 'e', className: 'e', title: lastError }, t.syncLastError + ': ' + (lastError.length > 160 ? lastError.slice(0, 160) + '…' : lastError)) : null,
+          lastError
+            ? h(
+                'span',
+                { key: 'e', className: 'e', title: lastError },
+                t.syncLastError + (errorAge > 0 ? '(' + errorAge + 's)' : '') + ': ' + (lastError.length > 160 ? lastError.slice(0, 160) + '…' : lastError),
+              )
+            : null,
         )
       }
       const diagTitle = (s) => {
@@ -809,45 +863,87 @@ window.__ModuleLoader__.load({
           const x = Number(v)
           return Number.isFinite(x) ? x : 0
         }
-        const steady = n(s.steadyTicks) > 0 && !s.lastError && !(s.unrestrictable || []).length && !(s.blockedScopes || []).length
-        // 三个新计数说明「接管到底干过什么活」:成功委托 / 守卫拒绝 / plan 含 yieldHost 的 tick 数
-        // (让路的会话一直在,这个数就会一直涨 —— 它是持续状态,不是故障计数)。
-        const base = [t.reconcile + ': ' + t.syncRegisters + ' ' + n(s.registers), t.syncDisposes + ' ' + n(s.disposes), t.syncDenyApplies + ' ' + n(s.denyApplies)]
-        const extra = [t.syncDelegateCalls + ' ' + n(s.delegateCalls), t.syncGuardDenials + ' ' + n(s.guardDenials), t.syncYieldTicks + ' ' + n(s.yieldTicks)]
+        // steadyNow 是「本 tick 是否稳态」;steadyTicks 只是累计量,拿累计量当状态会让 title 永远写「稳态」。
+        const steady = s.steadyNow === true && !s.lastError && !(s.unrestrictable || []).length && !(s.blockedScopes || []).length
+        const base = [
+          t.reconcile + ': ' + t.syncRegisters + ' ' + n(s.registers) + '/' + t.syncRegisterTries + ' ' + n(s.registerTries),
+          t.syncDisposes + ' ' + n(s.disposes),
+          t.syncDenyApplies + ' ' + n(s.denyApplies),
+          t.syncTicks + ' ' + n(s.ticks),
+        ]
+        const extra = [
+          t.syncDelegateCalls + ' ' + n(s.delegateCalls) + '/' + t.syncDelegateTries + ' ' + n(s.delegateTries),
+          t.syncDelegateFailures + ' ' + n(s.delegateFailures),
+          t.syncGuardDenials + ' ' + n(s.guardDenials),
+          t.syncYieldTicks + ' ' + n(s.yieldTicks),
+          t.syncDenyDrops + ' ' + n(s.denyDrops),
+        ]
+        if (s.executorFamily) {
+          extra.push(t.syncExecutorFamily + ' ' + String(s.executorFamily) + (s.executorFamilySource === 'platform' ? '(平台默认)' : ''))
+        }
+        if (s.guardReady === false) base.push(t.syncGuardMissing)
         return base.concat(extra, steady ? [t.steady] : []).filter(Boolean).join(' · ')
       }
 
       // ── 头部 badge:按会话汇总,不再只报全局「模型可见」 ──
-      // ct.visible 是全局视图(EnvDock 的 envd_shell 此刻在不在工具表),
-      // 但模型实际拿到哪个命令工具由每个会话自己的作用域决定:接管没生效的会话
-      // (host / yield / sandbox-host)里模型用的是宿主工具。混合状态还单挂一个「模型可见」,
-      // 就是在替这些会话说谎 —— 所以改挂汇总 warn badge,逐会话细节全收进 title。
+      // 全局 ct.visible 只说明「EnvDock 的 envd_shell 此刻在不在工具表」;模型实际拿到哪个
+      // 命令工具由每个会话自己的作用域决定。只要有一个会话不是「直连接管且真能调」,
+      // 单挂「模型可见」就是在替那个会话说谎 —— 改挂汇总 badge,逐会话细节进 title。
       const ctScopes = ct && Array.isArray(ct.scopes) ? ct.scopes.filter((s) => s && typeof s === 'object') : []
-      const hostToolSessions = ctScopes.filter((s) => s.kind !== 'takeover') // 模型用宿主工具的那些会话
+      const hasScopeFacts = ctScopes.length > 0
+      const stats = data && data.syncStats && typeof data.syncStats === 'object' ? data.syncStats : null
       const scopeKindText = (kind) =>
         ({
           takeover: t.scopeKindTakeover,
           host: t.scopeKindHost,
           yield: t.scopeKindYield,
           'sandbox-host': t.scopeKindSandbox,
-        })[kind] || String(kind || '?')
-      const scopeLine = (s) => {
-        const hidden = Array.isArray(s.hidden) ? s.hidden.filter(Boolean).map(String) : []
-        const line = fmt(t.scopeLine, { id: String(s.id || '?').slice(0, 8), kind: scopeKindText(s.kind), tool: s.tool ? String(s.tool) : t.noCommandTool })
-        return hidden.length ? line + ' · ' + fmt(t.scopeHidden, { hidden: hidden.join(', ') }) : line
+        })[kind] || t.scopeKindUnknown
+      const scopeLine = (sc) => {
+        const hidden = Array.isArray(sc.hidden) ? sc.hidden.filter(Boolean).map(String) : []
+        const tool = sc.tool ? String(sc.tool) : t.noCommandTool
+        const line = fmt(t.scopeLine, { id: String(sc.id || '?').slice(0, 8), kind: scopeKindText(sc.kind), tool })
+        const extras = []
+        if (hidden.length) extras.push(fmt(t.scopeHidden, { hidden: hidden.join(', ') }))
+        if (sc.confined === true) extras.push(t.scopeConfined)
+        if (sc.visible === false) extras.push(t.scopeAnomalyInvisible)
+        if (sc.kind === 'takeover' && Array.isArray(sc.hostTools) && sc.hostTools.length) extras.push(fmt(t.scopeAnomalyLeak, { tools: sc.hostTools.join(', ') }))
+        if (Array.isArray(sc.leaked) && sc.leaked.length) extras.push(fmt(t.scopeAnomalyLeak, { tools: sc.leaked.join(', ') }))
+        return extras.length ? line + ' · ' + extras.join(' · ') : line
       }
-      // 只有「全局可见 + 有会话在用宿主工具」才算混合;纯接管(全是 takeover)保持原 ok badge。
-      // scopes 缺失时用保留的 syncStats 兜底:hostOnlyScopes 里的会话同样确定在用宿主工具,
-      // 头部不能因为字段缺失又退回孤立的「模型可见」;sandboxHiddenScopes 只有计数,就只用它报数。
-      const stats = data && data.syncStats && typeof data.syncStats === 'object' ? data.syncStats : null
+      // 模型用宿主工具的会话:非 takeover 就是。takeover 但看不到 envd_shell 的情况必然同时
+      // 命中下面的 anomalySessions(交给 bad badge),这里不再重复判断 —— 否则是永不参与渲染的死条件。
+      const hostToolSessions = hasScopeFacts ? ctScopes.filter((sc) => sc.kind !== 'takeover') : []
+      // 异常会话:看不到任何命令工具(tool 为空)/ takeover 下宿主工具仍可见 / 挡了却仍可见。
+      // tool 为空是客户端自己就能判定的事实,不依赖服务端 anomaly 标志(旧版可能没算)。
+      const anomalySessions = hasScopeFacts
+        ? ctScopes.filter(
+            (sc) =>
+              sc.anomaly === true ||
+              !sc.tool ||
+              sc.visible === false ||
+              (sc.kind === 'takeover' && Array.isArray(sc.hostTools) && sc.hostTools.length > 0) ||
+              (Array.isArray(sc.leaked) && sc.leaked.length > 0),
+          )
+        : []
+      // 旧版 API(没有 scopes)才用 stats 兜底:此时不能按会话核对,title 里必须明说。
       const statsHostOnly = stats && Array.isArray(stats.hostOnlyScopes) ? stats.hostOnlyScopes.filter(Boolean).map(String) : []
-      const listed = new Set(hostToolSessions.map((s) => String(s.id)))
-      const fallbackSessions = statsHostOnly.filter((id) => !listed.has(id)).map((id) => ({ id, kind: 'yield', tool: ct && ct.hostName ? String(ct.hostName) : '' }))
-      const mixedSessions = hostToolSessions.concat(fallbackSessions)
-      const sandboxHiddenCount = stats ? Math.max(0, Math.trunc(Number(stats.sandboxHiddenScopes) || 0)) : 0
-      const mixedCount = Math.max(mixedSessions.length, sandboxHiddenCount)
+      const statsHidden = stats ? Math.max(0, Math.trunc(Number(stats.sandboxHiddenScopes) || 0)) : 0
+      const fallbackIds = hasScopeFacts ? [] : statsHostOnly
+      const fallbackSessions = fallbackIds.map((id) => ({ id, kind: 'yield', tool: ct && ct.hostName ? String(ct.hostName) : '' }))
+      const fallbackCount = hasScopeFacts ? 0 : Math.max(fallbackIds.length, statsHidden)
+      const mixedCount = hasScopeFacts ? hostToolSessions.length : fallbackCount
+      const anomalyCount = anomalySessions.length
       const ctMixed = ctVisible === true && mixedCount > 0
-      const ctMixedTitle = ctMixed ? [t.scopesHint, ...mixedSessions.map(scopeLine), diagTitle(stats) || ''].filter(Boolean).join('\n') : ''
+      const ctAnomaly = anomalyCount > 0
+      const titleLines = []
+      if (!hasScopeFacts) titleLines.push(t.scopesLegacyNote)
+      titleLines.push(t.scopesHint)
+      const listedScopes = hasScopeFacts ? ctScopes : fallbackSessions
+      for (const sc of listedScopes) titleLines.push(scopeLine(sc))
+      if (ctAnomaly) titleLines.push(t.scopesAnomalyHint)
+      titleLines.push(diagTitle(stats) || '')
+      const ctTitle = titleLines.filter(Boolean).join('\n')
 
       // ── 头部:一句话说清「哪台机器 / 默认终端 / 命令工具 / 有没有问题」 ──
       const head = h(
@@ -865,11 +961,13 @@ window.__ModuleLoader__.load({
               : h('span', {}, t.loading),
             data ? h('span', { className: 'envd-sep' }, '·') : null,
             ct && ct.name ? h('span', { className: 'envd-mono' }, ct.name) : null,
-            ctMixed
-              ? badge('warn', fmt(t.scopesSummary, { n: mixedCount }), { title: ctMixedTitle })
-              : ctVisible === true
-                ? badge('ok', t.cmdVisible, { title: diagTitle(data.syncStats) })
-                : null,
+            ctAnomaly
+              ? badge('bad', fmt(t.scopesAnomaly, { n: anomalyCount }), { title: ctTitle })
+              : ctMixed
+                ? badge('warn', fmt(t.scopesSummary, { n: mixedCount }), { title: ctTitle })
+                : ctVisible === true
+                  ? badge('ok', t.cmdVisible, { title: ctTitle })
+                  : null,
             ctVisible === false && !ctSandbox ? badge('bad', t.cmdInvisible, { title: ctSub }) : null,
             issues.length ? h('span', { className: 'envd-attn' }, '⚠ ' + fmt(t.countItems, { n: issues.length })) : null,
             data && data.detectedAt

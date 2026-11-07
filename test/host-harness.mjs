@@ -149,32 +149,49 @@ function fakeSandboxPolicy(fallback, bySession = {}) {
   }
 }
 
-/** 带围栏的宿主执行器替身:记录 resolve 收到的请求,execute 返回固定结果。 */
-function fakeSandboxedShell({ mode = 'workspace-write', stdout = 'host-ran\n', denied = false } = {}) {
+/**
+ * 带围栏的宿主执行器替身:记录 resolve 收到的请求,execute 返回固定结果。
+ *
+ * options.className 模拟执行器实现类名(PwshSandboxExecutor / BashSandboxExecutor):
+ * index.js 的委托包装器必须跟**执行器语法族**走,不是跟宿主工具名走。
+ * 返回对象上的 .state 可运行中改:fail='resolve'|'execute'|'result' 让对应阶段抛错,
+ * runnerFailed=true 让结果带「围栏 runner 失败」(命令根本没跑),用来测委托失败分阶段记账。
+ */
+function fakeSandboxedShell({ mode = 'workspace-write', stdout = 'host-ran\n', denied = false, className = '', runnerFailed = false } = {}) {
   const calls = { resolved: [], executed: [] }
-  return {
+  const state = { fail: '', runnerFailed, denied }
+  const shell = {
     calls,
+    state,
     sandboxMode: mode,
     resolve(request) {
       calls.resolved.push(request)
+      if (state.fail === 'resolve') throw new Error('resolver unavailable (injected)')
       return { ...request, onExpiry: 'kill', stdoutMaxBytes: 262144 }
     },
     async execute(spec) {
       calls.executed.push(spec)
+      if (state.fail === 'execute') throw new Error('start failed (injected)')
       return {
-        result: async () => ({
-          exitCode: 0,
-          signal: null,
-          timedOut: false,
-          aborted: false,
-          timeoutMs: spec.timeoutMs,
-          stdout: { text: stdout, truncated: false },
-          stderr: { text: '', truncated: false },
-          sandbox: { mode: (spec.sandboxPolicy && spec.sandboxPolicy.mode) || mode, denied },
-        }),
+        result: async () => {
+          if (state.fail === 'result') throw new Error('result failed (injected)')
+          return {
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            aborted: false,
+            timeoutMs: spec.timeoutMs,
+            stdout: { text: stdout, truncated: false },
+            stderr: { text: '', truncated: false },
+            sandbox: { mode: (spec.sandboxPolicy && spec.sandboxPolicy.mode) || mode, denied: state.denied, runnerFailed: state.runnerFailed },
+          }
+        },
       }
     },
   }
+  // index.js 用 shell.name / id / constructor.name 探测执行器族;夹具用 name 承载类名。
+  if (className) shell.name = className
+  return shell
 }
 
 // ───────────────────────────────────── Cordis ctx 替身 ──
@@ -199,7 +216,8 @@ function makeHarness(options = {}) {
    *   · 被 restrict 掉的**全局工具**在这个作用域里读作「不存在」;
    *   · 对不存在的名字 restrict 直接失败(所以调用方必须先 hasTool 确认)。
    */
-  const toolsFor = (scopeId) => ({
+  const toolsFor = (scopeId) => {
+  const api = {
     register(def) {
       if (state.toolDefs.has(def.name)) throw new Error('duplicate tool ' + def.name)
       state.toolDefs.set(def.name, def)
@@ -226,6 +244,9 @@ function makeHarness(options = {}) {
       if (!deny.length) throw new Error('empty restriction')
       const set = denyOf(scopeId)
       const blocked = options.unrestrictable || []
+      // 真机坑:agent 自己层注册的同名工具,restrict 返回成功却挡不住。
+      // options.restrictNoop(scopeId, deny) 返回 true → 夹具照常返回 disposer,但遮挡不生效。
+      const noop = typeof options.restrictNoop === 'function' ? Boolean(options.restrictNoop(scopeId, deny)) : Boolean(options.restrictNoop)
       // 只记「这次真的新增的」名字:disposer 只能撤销自己这一层遮挡,
       // 不能把别的插件在这期间加的遮挡一起抹掉(真机上 restrict 是可组合的)。
       const added = []
@@ -239,7 +260,7 @@ function makeHarness(options = {}) {
             : blocked.includes(name)
         if (scopeBlocked) throw new Error('scope-local tool ' + name)
         if (!set.has(name)) {
-          set.add(name)
+          if (!noop) set.add(name)
           added.push(name)
         }
       }
@@ -255,7 +276,34 @@ function makeHarness(options = {}) {
         if (i >= 0) state.guards.splice(i, 1)
       }
     },
-  })
+  }
+  /**
+   * 真机语义:`tools.definitions(scope)` 枚举「这个作用域此刻看得见的工具定义」,
+   * 连注册在 agent 祖先层、全局 get 查不到的都算(预设 / 第三方插件发布的命令工具)。
+   * index.js 靠它认出第三方发布名(tenant_bash 之类)和家族。
+   * 夹具返回:全局 register 的定义 + options.shellDefinitions 注入的定义;
+   * 被本作用域 deny 掉的名字不返回(挡住之后定义面也看不到,和真机一致)。
+   * options.definitions === false 模拟老宿主:连方法都不挂,插件必须回退到按名字探可见性。
+   */
+  if (options.definitions !== false) {
+    api.definitions = function definitions() {
+      const denied = scopeId !== null ? denyOf(scopeId) : null
+      const seen = new Set()
+      const defs = []
+      const add = (def) => {
+        const name = def && def.name ? String(def.name) : ''
+        if (!name || seen.has(name)) return
+        if (denied && denied.has(name)) return
+        seen.add(name)
+        defs.push(def)
+      }
+      for (const [, def] of state.toolDefs) add(def)
+      for (const def of options.shellDefinitions || []) add(def)
+      return defs
+    }
+  }
+  return api
+  }
   const tools = toolsFor(null)
   // 模拟 preset 注册的宿主 shell 工具(接管判定靠它)
   for (const name of options.shippedTools || []) {
@@ -268,12 +316,29 @@ function makeHarness(options = {}) {
     })
     state.shipped = (state.shipped || new Set()).add(name)
   }
+  // 模拟 preset / 第三方插件把命令工具发布在 agent 祖先层:每个作用域都看得见,
+  // 但不是「本插件 register 的全局工具」。options.shellDefinitions 是定义原文,
+  // 供 definitions(scope) 枚举 —— 动态识别用例靠它注入 tenant_bash 这类发布名。
+  for (const def of options.shellDefinitions || []) {
+    if (!def || !def.name) continue
+    if (!state.toolDefs.has(def.name)) {
+      state.toolDefs.set(def.name, {
+        name: def.name,
+        description: def.description || '',
+        parameters: def.parameters || { type: 'object', properties: {} },
+        output: def.output || { schema: { type: 'object' }, render: () => [] },
+        execute: typeof def.execute === 'function' ? def.execute : async () => ({}),
+      })
+    }
+  }
   const subprocess = fakeSubprocess(options.subprocess)
   const services = {
     subprocess,
     tools,
     // 宿主 shell 服务替身(默认没有):沙箱用例靠它公布 sandboxMode / 提供 resolve+execute
     shell: options.shell,
+    // 受管的 DSH_* 环境快照(官方 shell 工具同款):默认没有 → 委托不带 dshEnv(安全降级)
+    shellEnv: options.shellEnv,
     // 逐会话沙箱策略替身(默认没有):沙箱用例靠它给出「本会话有效策略」
     sandboxPolicy: options.sandboxPolicy,
     workingDirectory: { defaultDirectory: process.cwd(), ensure: async () => process.cwd() },
@@ -718,6 +783,11 @@ await post(h3, { op: 'setOption', shellTakeover: 'off' })
 await new Promise((r) => setTimeout(r, 100))
 const afterOff = await callApi(h3)
 check('切到只给简报后不再接管', afterOff.json.commandTool.takeover === false, JSON.stringify(afterOff.json.commandTool))
+check(
+  '关闭接管时把 envd_shell 摘掉并记进 disposes(替换/拆建不是静默)',
+  afterOff.json.syncStats.disposes >= 1 && afterOff.json.syncStats.registers >= 1,
+  JSON.stringify({ registers: afterOff.json.syncStats.registers, disposes: afterOff.json.syncStats.disposes }),
+)
 
 // ── 沙箱:能力位 ≠ 本会话有效策略 ──
 // dsh 的 shell.sandboxMode 是**部署默认档**(dsh-pwsh-sandbox 里就是 sandboxPolicy.defaultMode),
@@ -1007,8 +1077,24 @@ check('守卫命中被记账:syncStats.guardDenials === 1', guardStats.guardDeni
 check('guard 不拦我们自己的工具', hGuard.guardReason('envd_shell', hGuard.state.agents[0]) === undefined)
 // 我们的工具在这个作用域不可见时,guard 必须放行宿主 shell —— 绝不制造「两个都调不到」
 hGuard.setScopeDeny('agent-guard', ['envd_shell'])
-check('envd_shell 不可见时 guard 放行宿主 shell(零工具保险)', hGuard.guardReason('bash', hGuard.state.agents[0]) === undefined)
+const guardPassBefore = (await callApi(hGuard)).json.syncStats.guardDenials
+const guardPassReason = hGuard.guardReason('bash', hGuard.state.agents[0])
+const guardPassAfter = (await callApi(hGuard)).json.syncStats.guardDenials
+check('envd_shell 不可见时 guard 放行宿主 shell(零工具保险)', guardPassReason === undefined, String(guardPassReason))
+// 方向二放行是「放行」不是「拒绝」:计数不能涨,否则诊断条会把零工具保险误报成拒绝。
+check('方向二放行不涨计数(放行不是拒绝)', guardPassAfter === guardPassBefore, guardPassBefore + ' → ' + guardPassAfter)
 hGuard.setScopeDeny('agent-guard', [])
+// fact 还没生成(新 agent 首步 / 会话还没登记):仍给可操作拒绝,但不编造替代工具名。
+hGuard.setScopeDeny('agent-ghost', ['envd_shell'])
+const ghostAgent = hGuard.makeAgent('agent-ghost')
+const ghostRefusal = hGuard.guardReason('envd_shell', ghostAgent)
+check(
+  'fact 缺失时给「暂时无法判定」的可操作拒绝(不静默放行、不编造工具名)',
+  typeof ghostRefusal === 'string' && ghostRefusal.includes('不可用') && ghostRefusal.includes('暂时无法判定') && !ghostRefusal.includes('`bash`'),
+  String(ghostRefusal),
+)
+hGuard.setScopeDeny('agent-ghost', [])
+check('guardReady 记录守卫注册成功(失败原因在 guardError)', (await callApi(hGuard)).json.syncStats.guardReady === true, JSON.stringify((await callApi(hGuard)).json.syncStats.guardError))
 
 // ── 学 dsh-ops:tools/change 驱动对账(别的插件晚一步注册 shell 时立刻收敛,不等 5 秒) ──
 const hEvt = makeHarness({ agentIds: ['agent-evt'] })
@@ -1289,6 +1375,11 @@ check(
   JSON.stringify(settledScopes),
 )
 check('syncStats 已端出去', Boolean(settled && settled.syncStats && typeof settled.syncStats.ticks === 'number'), JSON.stringify(settled && settled.syncStats))
+check(
+  '注册尝试数与成功数自洽(registerTries >= registers,没有建了又拆)',
+  Boolean(settled && settled.syncStats && settled.syncStats.registerTries >= settled.syncStats.registers && settled.syncStats.registers >= 1),
+  JSON.stringify(settled && { registerTries: settled.syncStats.registerTries, registers: settled.syncStats.registers }),
+)
 check('接管后简报只说「已接管」', String((await apiSnapshot()).brief).includes('EnvDock 已接管'), String((await apiSnapshot()).brief).split('\n').find((l) => l.includes('命令工具')) || '')
 
 // 8 次终端切换
@@ -1337,6 +1428,16 @@ check('稳态 tick 真的在跑(采样到 ' + ticksAfter + ')', steadyAfter.tick
 check('稳态 20 个 tick 里 register 次数为 0', steadyAfter.registers === steadyBefore.registers, steadyBefore.registers + ' → ' + steadyAfter.registers)
 check('稳态 20 个 tick 里 dispose 次数为 0', steadyAfter.disposes === steadyBefore.disposes, steadyBefore.disposes + ' → ' + steadyAfter.disposes)
 check('稳态 20 个 tick 里 deny 重挂次数为 0', steadyAfter.denyApplies === steadyBefore.denyApplies, steadyBefore.denyApplies + ' → ' + steadyAfter.denyApplies)
+check(
+  '稳态 20 个 tick 里没有新的注册尝试(registerTries 不变)',
+  steadyAfter.registerTries === steadyBefore.registerTries,
+  steadyBefore.registerTries + ' → ' + steadyAfter.registerTries,
+)
+check(
+  '稳态 20 个 tick 里没有新的藏自己/挡宿主动作(ownHides / hostDenyApplies 不变)',
+  steadyAfter.ownHides === steadyBefore.ownHides && steadyAfter.hostDenyApplies === steadyBefore.hostDenyApplies,
+  JSON.stringify({ ownHides: [steadyBefore.ownHides, steadyAfter.ownHides], hostDenyApplies: [steadyBefore.hostDenyApplies, steadyAfter.hostDenyApplies] }),
+)
 check('稳态 20 个 tick 里可见性完全不变', visibleCommands('agent-a').join(',') === visibleBefore, visibleBefore + ' → ' + visibleCommands('agent-a').join(','))
 check('稳态 tick 被记账(steadyTicks 在涨)', steadyAfter.steadyTicks > steadyBefore.steadyTicks, steadyBefore.steadyTicks + ' → ' + steadyAfter.steadyTicks)
 check('稳态没有留下错误', !steadyAfter.lastError, String(steadyAfter.lastError))
@@ -1388,6 +1489,15 @@ phase('固定名被占用')
 check('固定名被占用时没有谎报接管', h9snap.commandTool.takeover === false, JSON.stringify(h9snap.commandTool))
 check('固定名被占用时宿主自带的 bash 仍然可见(没有零工具窗口)', h9visible.includes('bash'), h9visible.join(','))
 check('固定名被占用时留下可读的错误', Boolean(h9snap.syncStats.lastError), String(h9snap.syncStats.lastError))
+// lastError 生命周期:持续故障要持续可见(不是一闪而过),恢复成功后才清空(见 hMiss)。
+const h9a = (await callApi(h9)).json
+await sleep(200)
+const h9b = (await callApi(h9)).json
+check(
+  '名字被占用时 lastError 持续非空且带写入时刻(面板能显示「多久前」)',
+  Boolean(h9a.syncStats.lastError) && Boolean(h9b.syncStats.lastError) && h9b.syncStats.lastErrorAt > 0,
+  JSON.stringify({ lastError: h9b.syncStats.lastError, lastErrorAt: h9b.syncStats.lastErrorAt }),
+)
 check('固定名被占用时不注册自己的工具', h9snap.syncStats.registers === 0, String(h9snap.syncStats.registers))
 
 // ── S2:卸载之后不许再往注册表里塞东西 ──
@@ -1549,8 +1659,8 @@ check(
 )
 const ptcBrief = hPtc.state.brief.text({ scope: hPtc.state.agents[0] })
 check(
-  'PTC 折叠下的简报不自称「已接管」,而是说清宿主工具可用 / envd_shell 已让路',
-  !ptcBrief.includes('已接管') && ptcBrief.includes('已让路') && ptcBrief.includes('bash'),
+  'PTC 折叠下的简报不自称「已接管」:点名宿主工具 bash,并说明 envd_shell 在本会话不可用',
+  !ptcBrief.includes('已接管') && ptcBrief.includes('bash') && ptcBrief.includes('envd_shell'),
   ptcBrief.split('\n').find((l) => l.includes('命令工具')) || '',
 )
 
@@ -1613,6 +1723,526 @@ check(
   multiBrief.includes('已让路') && multiBrief.includes('`bash`'),
   multiBrief.split('\n').find((l) => l.includes('命令工具')) || '',
 )
+// 守卫方向一:替代品必须取**本会话事实里的 hostTool**(bash),不能取全局主 shell(pwsh,
+// 而 pwsh 已被我们挡住)。旧实现拿全局 shippedName 做 hasTool 判定 → 不通过就静默放行,
+// 模型只收到裸 UNKNOWN_TOOL —— 多宿主让路场景下最隐蔽的一条。
+const multiGuardBefore = (await callApi(hMulti)).json.syncStats
+const multiRefusal = hMulti.guardReason('envd_shell', hMulti.state.agents[0])
+const multiGuardAfter = (await callApi(hMulti)).json.syncStats
+check(
+  '多宿主让路:直呼 envd_shell 指路本会话真正可用的 bash(不静默放行)',
+  typeof multiRefusal === 'string' && multiRefusal.includes('bash') && !multiRefusal.includes('暂时无法判定'),
+  String(multiRefusal),
+)
+check(
+  '多宿主让路:守卫方向一命中记账 guardDenials +1',
+  multiGuardAfter.guardDenials === multiGuardBefore.guardDenials + 1,
+  multiGuardBefore.guardDenials + ' → ' + multiGuardAfter.guardDenials,
+)
+check(
+  '多宿主让路:守卫命中后该会话仍只有一个命令工具(bash)',
+  multiVisible().length === 1 && multiVisible()[0] === 'bash',
+  multiVisible().join(','),
+)
+
+// ══════════════════ 本轮大改新增回归(7 类真问题) ══════════════════
+//
+// 下面每个用例都对应一条「修复前会静默出错」的真实故障。夹具先按真机语义补齐:
+//   · tools.definitions(scope):枚举本作用域可见定义(动态识别第三方发布名);
+//   · restrictNoop:restrict 返回成功却挡不住(agent 层同名工具);
+//   · shellDefinitions:preset / 第三方发布在 agent 祖先层的命令工具定义。
+/** 某个作用域此刻真正可用的命令工具名(restrict 掉的读作不存在) */
+const scopeCommands = (h, agentId, names = COMMAND_TOOL_NAMES) => {
+  const view = h.toolsFor(agentId)
+  return names.filter((name) => Boolean(view.get(name)))
+}
+/** 切默认终端并等对账 tick 落地(60s 周期的夹具靠状态变更触发,别干等 interval)。 */
+async function settleShell(h, key, timeoutMs = 8000) {
+  const before = (await callApi(h)).json.syncStats.ticks
+  const res = await post(h, { op: 'setShell', key })
+  if (!res.json || res.json.ok !== true) return { error: 'setShell 失败: ' + res.raw.slice(0, 120) }
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const s = (await callApi(h)).json
+    if (s.syncStats.ticks >= before + 2) return s
+    if (Date.now() > deadline) return s
+    await sleep(10)
+  }
+}
+/** 从检测到的终端里挑一个指定家族的 key(找不到返回 '')。 */
+const terminalKeyOfFamily = (snap, family) => {
+  const term = (snap.terminals || []).find((t) => t.key && t.family === family)
+  return term ? term.key : ''
+}
+
+// ── c) hideOwn 自愈:别人短暂藏住 envd_shell 再放开,必须重新藏住(不能复活绕过沙箱) ──
+//
+// 真机故障:围栏会话里藏自己的工具时,如果那一刻它**本来就不可见**(别的插件先遮了),
+// 旧实现直接记成「已藏」;别人一放开,envd_shell 就在围栏会话里复活 = 无围栏旁路。
+// 而且 scopesSettled 跳过 hideOwn 复检,于是永远不自愈。
+const hHeal = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: [
+    { id: 'agent-heal-free', session: { key: 'heal-free' } },
+    { id: 'agent-heal-locked', session: { key: 'heal-locked' } },
+  ],
+  shell: { sandboxMode: 'workspace-write' },
+  sandboxPolicy: fakeSandboxPolicy('workspace-write', { 'heal-free': 'danger-full-access' }),
+})
+apply(hHeal.ctx, { syncIntervalMs: 25 })
+await post(hHeal, { op: 'setOption', shellTakeover: 'takeover' })
+const healSnap = await pollSnapshot(
+  hHeal,
+  (s) => {
+    const fact = ((s.commandTool || {}).scopes || []).find((x) => x.id === 'agent-heal-locked')
+    return Boolean(fact && fact.kind === 'sandbox-host' && hHeal.toolsFor('agent-heal-locked').get('envd_shell') === null)
+  },
+  6000,
+)
+phase('hideOwn 自愈')
+check(
+  '前置:围栏会话的 envd_shell 已被藏住(kind=sandbox-host)',
+  ((healSnap.commandTool || {}).scopes || []).some((x) => x.id === 'agent-heal-locked' && x.kind === 'sandbox-host'),
+  JSON.stringify((healSnap.commandTool || {}).scopes),
+)
+// 别的插件在这个作用域里先遮住 envd_shell:此刻 EnvDock 一推 restrict 也是「本来就看不见」
+hHeal.setScopeDeny('agent-heal-locked', ['envd_shell'])
+await sleep(150)
+const healAway = (await callApi(hHeal)).json
+check(
+  '看不见期间账本仍然如实:该会话仍有宿主 bash(不是零工具),envd_shell 不可见',
+  Boolean(hHeal.toolsFor('agent-heal-locked').get('bash')) && hHeal.toolsFor('agent-heal-locked').get('envd_shell') === null,
+  'vis=' + scopeCommands(hHeal, 'agent-heal-locked').join(',') + ' kind=' + JSON.stringify((((healAway.commandTool || {}).scopes || []).find((x) => x.id === 'agent-heal-locked') || {}).kind),
+)
+// 放开:envd_shell 重新可见 → 必须立刻重新藏住,否则围栏会话里我们的工具复活
+hHeal.setScopeDeny('agent-heal-locked', [])
+const healedSnap = await pollSnapshot(hHeal, () => hHeal.toolsFor('agent-heal-locked').get('envd_shell') === null, 6000)
+const healedFact = ((healedSnap.commandTool || {}).scopes || []).find((x) => x.id === 'agent-heal-locked')
+check(
+  '别人放开后立刻重新藏住 envd_shell(围栏会话不能被我们的工具复活)',
+  hHeal.toolsFor('agent-heal-locked').get('envd_shell') === null,
+  'vis=' + scopeCommands(hHeal, 'agent-heal-locked').join(',') + ' fact=' + JSON.stringify(healedFact),
+)
+check(
+  '自愈后终局仍是 sandbox-host,且该会话只有一个命令工具(bash)',
+  Boolean(
+    healedFact &&
+      healedFact.kind === 'sandbox-host' &&
+      healedFact.hidesOwn === true &&
+      healedFact.tool === 'bash' &&
+      scopeCommands(hHeal, 'agent-heal-locked').length === 1 &&
+      scopeCommands(hHeal, 'agent-heal-locked')[0] === 'bash',
+  ),
+  JSON.stringify(healedFact) + ' vis=' + scopeCommands(hHeal, 'agent-heal-locked').join(','),
+)
+
+// ── d) 过渡性缺名不永久判死:restrict 说 unknown 不能锁进 badNames ──
+//
+// 真机故障:热重载空窗里宿主 shell 名字短暂消失,restrict 报 unknown;旧实现记进 badNames →
+// 这个作用域永久让路、永久谎报「挡不掉」,名字回来也不会恢复接管。
+const hMiss = makeHarness({ shippedTools: ['bash'], agentIds: ['agent-miss'] })
+apply(hMiss.ctx, { syncIntervalMs: 25 })
+await post(hMiss, { op: 'setOption', shellTakeover: 'takeover' })
+await pollSnapshot(hMiss, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true && hMiss.toolsFor('agent-miss').get('bash') === null, 6000)
+phase('过渡性缺名')
+const bashDef = hMiss.state.toolDefs.get('bash')
+// 宿主 shell 短暂消失:先 off 再 takeover,让下一次 restrict 真的会跑(稳态不会重挂同一掩码)
+hMiss.state.toolDefs.delete('bash')
+await post(hMiss, { op: 'setOption', shellTakeover: 'off' })
+await post(hMiss, { op: 'setOption', shellTakeover: 'takeover' })
+const missSnap = await pollSnapshot(hMiss, (s) => Boolean(s.syncStats) && s.syncStats.transientMisses >= 1, 6000)
+check('名字暂时缺失时记 transientMisses(不是当成「挡不掉」)', missSnap.syncStats.transientMisses >= 1, String(missSnap.syncStats.transientMisses))
+check('过渡缺名不进永久 unrestrictable(不能永久判死)', !(missSnap.syncStats.unrestrictable || []).includes('bash'), JSON.stringify(missSnap.syncStats.unrestrictable))
+check(
+  '过渡缺名留下可读错误(不是静默)',
+  Boolean(missSnap.syncStats.lastError) && missSnap.syncStats.lastErrorAt > 0,
+  JSON.stringify({ lastError: missSnap.syncStats.lastError, lastErrorAt: missSnap.syncStats.lastErrorAt }),
+)
+// 名字回来:必须回到 takeover(真挡住 bash),不是永久让路/永久 unrestrictable
+hMiss.state.toolDefs.set('bash', bashDef)
+hMiss.emit('tools/change')
+const missHealed = await pollSnapshot(
+  hMiss,
+  (s) => {
+    const fact = ((s.commandTool || {}).scopes || []).find((x) => x.id === 'agent-miss')
+    return Boolean(fact && fact.kind === 'takeover' && (fact.hidden || []).includes('bash'))
+  },
+  6000,
+)
+const missFact = ((missHealed.commandTool || {}).scopes || []).find((x) => x.id === 'agent-miss')
+check(
+  '名字回来后回到 takeover 并重新挡住 bash(不是永久让路)',
+  Boolean(missFact && missFact.kind === 'takeover' && (missFact.hidden || []).includes('bash')),
+  JSON.stringify(missFact),
+)
+check(
+  '恢复后 unrestrictable 为空、lastError 被清掉(lastError 生命周期)',
+  (missHealed.syncStats.unrestrictable || []).length === 0 && !missHealed.syncStats.lastError && missHealed.syncStats.lastErrorAt === 0,
+  JSON.stringify({
+    unrestrictable: missHealed.syncStats.unrestrictable,
+    lastError: missHealed.syncStats.lastError,
+    lastErrorAt: missHealed.syncStats.lastErrorAt,
+  }),
+)
+
+// ── e) restrict 成功但没生效(agent 层同名工具挡不住):承认事实,不谎报已挡 ──
+//
+// 真机坑:restrict 只过滤继承面;agent 自己层注册的同名工具挡不掉,restrict 也不报错。
+// 不复查就记成「已挡」→ hidden 谎报、面板 denies 谎报、brief 说「已接管」,模型却同时看得到两个。
+const hNoop = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: ['agent-noop'],
+  restrictNoop: (scopeId, deny) => scopeId === 'agent-noop' && deny.includes('bash'),
+})
+apply(hNoop.ctx, { syncIntervalMs: 60000 })
+await post(hNoop, { op: 'setOption', shellTakeover: 'takeover' })
+const noopSnap = await pollSnapshot(hNoop, (s) => Boolean(s.syncStats) && s.syncStats.denyNoops >= 1, 8000)
+const noopFact = ((noopSnap.commandTool || {}).scopes || []).find((x) => x.id === 'agent-noop')
+phase('restrict 成功但没生效')
+check('restrict 返回成功却仍可见 → 记 denyNoops(不静默)', noopSnap.syncStats.denyNoops >= 1, String(noopSnap.syncStats.denyNoops))
+check('事实带 anomaly(挡了却仍可见),不谎报已挡', Boolean(noopFact && noopFact.anomaly === true), JSON.stringify(noopFact))
+check('hidden 不含没真挡住的名字(bash)', Boolean(noopFact) && !(noopFact.hidden || []).includes('bash'), JSON.stringify(noopFact && noopFact.hidden))
+check('面板用的 denies 也不含 bash(取交集,不谎报全挡)', !(noopSnap.commandTool.denies || []).includes('bash'), JSON.stringify(noopSnap.commandTool.denies))
+const noopBrief = hNoop.state.brief.text({ scope: hNoop.state.agents[0] })
+check(
+  '简报不声称 bash 已被挡住(说它仍然可用或已让路)',
+  !noopBrief.includes('已被 EnvDock 接管(`bash`') && noopBrief.includes('bash') && (noopBrief.includes('仍然可用') || noopBrief.includes('已让路')),
+  noopBrief.split('\n').find((l) => l.includes('命令工具')) || '',
+)
+
+// ── f) 事实按「此刻实际能不能用」推导:宿主 shell 全局有、本会话不可执行 → takeover ──
+//
+// 真机坑:宿主 shell 全局注册(定义面/全局 get 都有),但本会话 executable 为 false;
+// 拿「注册了」当成「能用」会算出 host,而模型手里真正能用的只有 envd_shell。
+const hFactExec = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: ['agent-fact'],
+  executableFor: (scopeId, name) => name !== 'bash',
+})
+apply(hFactExec.ctx, { syncIntervalMs: 25 })
+await post(hFactExec, { op: 'setOption', shellTakeover: 'takeover' })
+const factExecSnap = await pollSnapshot(
+  hFactExec,
+  (s) => {
+    const fact = ((s.commandTool || {}).scopes || []).find((x) => x.id === 'agent-fact')
+    return Boolean(fact && fact.kind === 'takeover' && (fact.hidden || []).includes('bash'))
+  },
+  6000,
+)
+const factExecFact = ((factExecSnap.commandTool || {}).scopes || []).find((x) => x.id === 'agent-fact')
+phase('事实按实际可用推导')
+check(
+  '夹具前置:宿主 bash 全局注册、本会话 executable 无',
+  hFactExec.state.toolDefs.has('bash') && hFactExec.toolsFor('agent-fact').executable('bash') === null,
+  'global=' + Boolean(hFactExec.toolsFor(null).get('bash')) + ' exec=' + String(hFactExec.toolsFor('agent-fact').executable('bash')),
+)
+check(
+  '宿主 bash 本会话不可执行 → 终局 takeover(不是 host),tool=envd_shell',
+  Boolean(factExecFact && factExecFact.kind === 'takeover' && factExecFact.tool === 'envd_shell' && factExecFact.ownVisible === true),
+  JSON.stringify(factExecFact),
+)
+check(
+  '不可执行的宿主 bash 记进 hidden(不是 hostTools):不能把调不到的工具算成可用',
+  Boolean(factExecFact && (factExecFact.hidden || []).includes('bash') && !(factExecFact.hostTools || []).includes('bash')),
+  JSON.stringify(factExecFact),
+)
+
+// ── g/h) 委托失败分阶段记账 + 执行器族决定包装器(不是宿主工具名) ──
+//
+// 真机坑:Windows 官方 base 挂的是 pwsh-sandbox(PowerShell),模型手里的工具却可能是
+// dsh-ops 的 ops_bash(bash)。按工具名选 bash 包装器交给 PowerShell 执行必然 ParserError,
+// 命令根本没跑。包装器必须跟**执行器族**走;失败要分 resolve/启动/结果/策略/runner 记账。
+const failShell = fakeSandboxedShell({ className: 'PwshSandboxExecutor' })
+const hDelegErr = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: [
+    { id: 'agent-err-free', session: { key: 'err-free' } },
+    { id: 'agent-err-locked', session: { key: 'err-locked' } },
+  ],
+  shell: failShell,
+  shellEnv: { collect: () => ({ DSH_SESSION: 'err-session' }) },
+  sandboxPolicy: {
+    resolve(request) {
+      const key = request && request.session ? request.session.key : ''
+      if (key === 'err-locked') {
+        if (failShell.state.fail === 'policy') throw new Error('policy service down (injected)')
+        return { mode: 'workspace-write', workspaceRoot: process.cwd() }
+      }
+      return { mode: 'danger-full-access', workspaceRoot: process.cwd() }
+    },
+  },
+})
+apply(hDelegErr.ctx, { syncIntervalMs: 60000 })
+await post(hDelegErr, { op: 'setOption', shellTakeover: 'takeover' })
+await pollSnapshot(hDelegErr, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true, 8000)
+const errTool = hDelegErr.state.toolDefs.get('envd_shell')
+const errExec = { signal: null, agent: { session: { key: 'err-locked' } } }
+const errStats = async () => (await callApi(hDelegErr)).json.syncStats
+phase('委托失败分阶段 + 执行器族')
+const errFamSnap = (await callApi(hDelegErr)).json
+check(
+  '执行器族按实现类名识别:PwshSandboxExecutor → powershell(不是按宿主工具名 bash)',
+  errFamSnap.syncStats.executorFamily === 'powershell' && errFamSnap.syncStats.executorFamilySource === 'executor',
+  JSON.stringify({ family: errFamSnap.syncStats.executorFamily, source: errFamSnap.syncStats.executorFamilySource }),
+)
+// 目标终端固定成 PowerShell 家族,包装器里不该出现 '-lc'
+const pwshKey = terminalKeyOfFamily(errFamSnap, 'powershell')
+if (pwshKey) await settleShell(hDelegErr, pwshKey)
+const e0 = await errStats()
+failShell.state.fail = 'resolve'
+const errResolve = await errTool.execute({ command: 'echo err-resolve', cwd: process.cwd() }, errExec)
+const e1 = await errStats()
+check(
+  '委托 resolve 阶段抛错:ok:false + 「解析」+ delegateFailures/delegateTries 各 +1',
+  errResolve.ok === false &&
+    errResolve.text.includes('解析') &&
+    e1.delegateFailures === e0.delegateFailures + 1 &&
+    e1.delegateTries === e0.delegateTries + 1 &&
+    e1.delegateCalls === e0.delegateCalls,
+  JSON.stringify({ text: String(errResolve.text).slice(0, 160), tries: [e0.delegateTries, e1.delegateTries], failures: [e0.delegateFailures, e1.delegateFailures] }),
+)
+failShell.state.fail = 'execute'
+const errExecute = await errTool.execute({ command: 'echo err-execute', cwd: process.cwd() }, errExec)
+const e2 = await errStats()
+check(
+  '委托启动阶段抛错:ok:false + 「启动」+ delegateFailures+1',
+  errExecute.ok === false && errExecute.text.includes('启动') && e2.delegateFailures === e1.delegateFailures + 1 && e2.delegateTries === e1.delegateTries + 1,
+  JSON.stringify({ text: String(errExecute.text).slice(0, 160), failures: [e1.delegateFailures, e2.delegateFailures] }),
+)
+failShell.state.fail = 'result'
+const errResult = await errTool.execute({ command: 'echo err-result', cwd: process.cwd() }, errExec)
+const e3 = await errStats()
+check(
+  '委托结果阶段抛错:ok:false + 「执行」+ delegateFailures+1',
+  errResult.ok === false && errResult.text.includes('执行') && e3.delegateFailures === e2.delegateFailures + 1 && e3.delegateCalls === e2.delegateCalls,
+  JSON.stringify({ text: String(errResult.text).slice(0, 160), failures: [e2.delegateFailures, e3.delegateFailures], calls: [e2.delegateCalls, e3.delegateCalls] }),
+)
+failShell.state.fail = 'policy'
+const errPolicy = await errTool.execute({ command: 'echo err-policy', cwd: process.cwd() }, errExec)
+const e4 = await errStats()
+check(
+  '本会话 sandboxPolicy 不可得 → 拒绝委托(不拿部署默认档冒充)',
+  errPolicy.ok === false && errPolicy.text.includes('策略不可得') && e4.delegateFailures === e3.delegateFailures + 1,
+  JSON.stringify({ text: String(errPolicy.text).slice(0, 160), failures: [e3.delegateFailures, e4.delegateFailures] }),
+)
+failShell.state.fail = ''
+failShell.state.runnerFailed = true
+const errRunner = await errTool.execute({ command: 'echo err-runner', cwd: process.cwd() }, errExec)
+const e5 = await errStats()
+check(
+  'runner 失败:命令根本没跑 → ok:false + delegateCalls+1(结果拿到了,但没有执行)',
+  errRunner.ok === false && errRunner.text.includes('围栏 runner 失败') && e5.delegateCalls === e4.delegateCalls + 1 && e5.delegateFailures === e4.delegateFailures,
+  JSON.stringify({ text: String(errRunner.text).slice(0, 160), calls: [e4.delegateCalls, e5.delegateCalls] }),
+)
+failShell.state.runnerFailed = false
+const errOk = await errTool.execute({ command: 'echo err-ok', cwd: process.cwd() }, errExec)
+const e6 = await errStats()
+const errSpec = failShell.calls.executed[failShell.calls.executed.length - 1]
+check(
+  '成功委托:ok:true,包装器按执行器族写(PowerShell:$env:ENVD_CMD,不是 -lc)',
+  errOk.ok === true &&
+    String(errSpec.command).includes('$env:ENVD_CMD') &&
+    !String(errSpec.command).includes('-lc') &&
+    errSpec.env.ENVD_CMD === 'echo err-ok' &&
+    !String(errSpec.command).includes('echo err-ok'),
+  JSON.stringify({ text: String(errOk.text).slice(0, 120), command: String(errSpec && errSpec.command).slice(0, 200) }),
+)
+check(
+  '委托请求带 dshEnv(官方 shell 工具同款,subprocess 不会剥掉 DSH_* 快照)',
+  Boolean(errSpec.dshEnv) && errSpec.dshEnv.DSH_SESSION === 'err-session',
+  JSON.stringify(errSpec.dshEnv),
+)
+check(
+  '最终计数自洽:delegateTries 6 / delegateFailures 4 / delegateCalls 2',
+  e6.delegateTries === 6 && e6.delegateFailures === 4 && e6.delegateCalls === 2,
+  JSON.stringify({ tries: e6.delegateTries, failures: e6.delegateFailures, calls: e6.delegateCalls }),
+)
+
+// h-2) BashSandboxExecutor → bash 包装器(含 -lc,不是 $env:ENVD_CMD)
+const bashShell = fakeSandboxedShell({ className: 'BashSandboxExecutor' })
+const hFamBash = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: [
+    { id: 'agent-bf-free', session: { key: 'bf-free' } },
+    { id: 'agent-bf-locked', session: { key: 'bf-locked' } },
+  ],
+  shell: bashShell,
+  sandboxPolicy: fakeSandboxPolicy('workspace-write', { 'bf-free': 'danger-full-access' }),
+})
+apply(hFamBash.ctx, { syncIntervalMs: 60000 })
+await post(hFamBash, { op: 'setOption', shellTakeover: 'takeover' })
+await pollSnapshot(hFamBash, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true, 8000)
+const bfSnap0 = (await callApi(hFamBash)).json
+const bashKey = terminalKeyOfFamily(bfSnap0, 'bash')
+check(
+  '执行器族按实现类名识别:BashSandboxExecutor → bash',
+  bfSnap0.syncStats.executorFamily === 'bash' && bfSnap0.syncStats.executorFamilySource === 'executor',
+  JSON.stringify({ family: bfSnap0.syncStats.executorFamily, source: bfSnap0.syncStats.executorFamilySource }),
+)
+if (bashKey) await settleShell(hFamBash, bashKey)
+const bfTool = hFamBash.state.toolDefs.get('envd_shell')
+const bfOk = await bfTool.execute({ command: 'echo bf-ok', cwd: process.cwd() }, { signal: null, agent: { session: { key: 'bf-locked' } } })
+const bfSpec = bashShell.calls.executed[bashShell.calls.executed.length - 1]
+check(
+  'bash 执行器 + bash 目标终端:包装器用 -lc / "$ENVD_CMD"(不是 PowerShell 的 & + $env:)',
+  bfOk.ok === true && String(bfSpec.command).includes('-lc') && String(bfSpec.command).includes('"$ENVD_CMD"') && !String(bfSpec.command).includes('$env:ENVD_CMD'),
+  JSON.stringify({ text: String(bfOk.text).slice(0, 120), command: String(bfSpec && bfSpec.command).slice(0, 200) }),
+)
+
+// ── i) 动态识别第三方发布名(tools.definitions),并排除文件工具 ──
+const tenantBashDef = {
+  name: 'tenant_bash',
+  description: 'Run a Bash command in the tenant workspace',
+  parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+}
+const readFilesDef = {
+  name: 'ops_read_files',
+  description: 'Read files from the workspace',
+  parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+}
+// i-1:认不出的发布名 + 作用域私有挡不掉 → 让路,brief 点名 tenant_bash
+const hDyn = makeHarness({
+  shippedTools: [],
+  agentIds: ['agent-dyn'],
+  shellDefinitions: [tenantBashDef, readFilesDef],
+  unrestrictableFor: (scopeId, name) => name === 'tenant_bash',
+})
+apply(hDyn.ctx, { syncIntervalMs: 25 })
+await post(hDyn, { op: 'setOption', shellTakeover: 'takeover' })
+const dynSnap = await pollSnapshot(
+  hDyn,
+  (s) => {
+    const fact = ((s.commandTool || {}).scopes || []).find((x) => x.id === 'agent-dyn')
+    return Boolean(fact && fact.kind === 'yield' && fact.hostTool === 'tenant_bash')
+  },
+  6000,
+)
+const dynFact = ((dynSnap.commandTool || {}).scopes || []).find((x) => x.id === 'agent-dyn')
+const dynTool = (dynSnap.syncStats.runtimeShellTools || []).find((t) => t.name === 'tenant_bash')
+phase('动态 shell 识别')
+check(
+  'tenant_bash 被识别为宿主命令工具(bash 家族、learned,来自 definitions)',
+  Boolean(dynTool && dynTool.family === 'bash' && dynTool.learned === true),
+  JSON.stringify(dynSnap.syncStats.runtimeShellTools),
+)
+check(
+  'ops_read_files(有 path 无 command)不被当成 shell 工具',
+  !(dynSnap.syncStats.runtimeShellTools || []).some((t) => t.name === 'ops_read_files'),
+  JSON.stringify(dynSnap.syncStats.runtimeShellTools),
+)
+check(
+  'tenant_bash 挡不掉 → 让路:模型手里只剩它,envd_shell 被藏',
+  Boolean(dynFact && dynFact.kind === 'yield' && dynFact.tool === 'tenant_bash' && dynFact.hidesOwn === true),
+  JSON.stringify(dynFact),
+)
+check(
+  'ops_read_files 不被遮挡(还在工具表里)',
+  Boolean(hDyn.toolsFor('agent-dyn').get('ops_read_files')),
+  'vis=' + scopeCommands(hDyn, 'agent-dyn', ['envd_shell', 'tenant_bash', 'ops_read_files']).join(','),
+)
+const dynBrief = hDyn.state.brief.text({ scope: hDyn.state.agents[0] })
+check(
+  '让路简报点名 tenant_bash(按它自己的 bash 语法教,不是默认终端语法)',
+  dynBrief.includes('tenant_bash') && dynBrief.includes('已让路') && dynBrief.includes('bash / sh 语法'),
+  dynBrief.split('\n').find((l) => l.includes('命令工具')) || '',
+)
+// i-2:同一个发布名挡得掉 → 接管并遮挡它(证明「识别」不是只认不挡)
+const hDynTaken = makeHarness({
+  shippedTools: [],
+  agentIds: ['agent-dyn2'],
+  shellDefinitions: [tenantBashDef, readFilesDef],
+})
+apply(hDynTaken.ctx, { syncIntervalMs: 25 })
+await post(hDynTaken, { op: 'setOption', shellTakeover: 'takeover' })
+const dynTakenSnap = await pollSnapshot(
+  hDynTaken,
+  (s) => {
+    const fact = ((s.commandTool || {}).scopes || []).find((x) => x.id === 'agent-dyn2')
+    return Boolean(fact && fact.kind === 'takeover' && (fact.hidden || []).includes('tenant_bash'))
+  },
+  6000,
+)
+const dynTakenFact = ((dynTakenSnap.commandTool || {}).scopes || []).find((x) => x.id === 'agent-dyn2')
+check(
+  'tenant_bash 挡得掉 → 接管并把它记进 hidden(动态识别的名字真的被遮挡)',
+  Boolean(dynTakenFact && dynTakenFact.kind === 'takeover' && dynTakenFact.tool === 'envd_shell' && (dynTakenFact.hidden || []).includes('tenant_bash')),
+  JSON.stringify(dynTakenFact),
+)
+check(
+  '动态识别不误伤文件工具:ops_read_files 仍然可见',
+  Boolean(hDynTaken.toolsFor('agent-dyn2').get('ops_read_files')) && hDynTaken.toolsFor('agent-dyn2').get('tenant_bash') === null,
+  'vis=' + scopeCommands(hDynTaken, 'agent-dyn2', ['envd_shell', 'tenant_bash', 'ops_read_files']).join(','),
+)
+// i-3:老宿主没有 tools.definitions → 回退到按名字探可见性,现有行为不能坏
+const hNoDefs = makeHarness({ shippedTools: ['bash'], agentIds: ['agent-nd'], definitions: false })
+apply(hNoDefs.ctx, { syncIntervalMs: 25 })
+await post(hNoDefs, { op: 'setOption', shellTakeover: 'takeover' })
+const ndSnap = await pollSnapshot(hNoDefs, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true && hNoDefs.toolsFor('agent-nd').get('bash') === null, 6000)
+check(
+  '老宿主没有 tools.definitions:回退按名字探可见性,接管照常(没坏)',
+  Boolean(ndSnap.commandTool && ndSnap.commandTool.takeover === true) && hNoDefs.toolsFor('agent-nd').get('bash') === null,
+  JSON.stringify(ndSnap.commandTool),
+)
+check(
+  '老宿主路径不谎报 learned(只能按内置名单认)',
+  ndSnap.syncStats.hasExecutableApi === true && !(ndSnap.syncStats.runtimeShellTools || []).some((t) => t.name === 'bash' && t.learned === true),
+  JSON.stringify({ hasExecutableApi: ndSnap.syncStats.hasExecutableApi, runtimeShellTools: ndSnap.syncStats.runtimeShellTools }),
+)
+
+// ── b) 守卫卸载 + 方向二放行不涨计数 + fact 缺失文案(在上面 hGuard 已补) ──
+// 守卫 disposer 必须进 cleanup:卸载后 h.state.guards 里不能留着它(否则热重载后两个守卫叠加)。
+const hGuardDrop = makeHarness({ shippedTools: ['bash'], agentIds: ['agent-gd'] })
+apply(hGuardDrop.ctx, { syncIntervalMs: 60000 })
+await post(hGuardDrop, { op: 'setOption', shellTakeover: 'takeover' })
+const guardDropSnap = await pollSnapshot(hGuardDrop, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true, 8000)
+phase('守卫生命周期')
+check('守卫注册成功:guardReady=true 且 guards 里有 1 个', Boolean(guardDropSnap.syncStats.guardReady) && hGuardDrop.state.guards.length === 1, JSON.stringify({ ready: guardDropSnap.syncStats.guardReady, error: guardDropSnap.syncStats.guardError, n: hGuardDrop.state.guards.length }))
+for (const { dis } of hGuardDrop.state.effects) {
+  try {
+    if (typeof dis === 'function') dis()
+  } catch {}
+}
+check('卸载后守卫被摘掉(state.guards.length===0,不残留)', hGuardDrop.state.guards.length === 0, String(hGuardDrop.state.guards.length))
+
+// ── j) steadyNow / steadySinceAt:稳态是**状态**,不是累计量 ──
+//
+// 真机坑:面板拿 steadyTicks > 0 当「此刻稳态」,于是一次瞬态故障之后永远显示「稳态」。
+const hSteady = makeHarness({ shippedTools: ['bash'], agentIds: ['agent-st'] })
+apply(hSteady.ctx, { syncIntervalMs: 60000 })
+await post(hSteady, { op: 'setOption', shellTakeover: 'takeover' })
+await pollSnapshot(hSteady, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true, 8000)
+// 触发一次状态写入,让对账落到「稳态 tick」(60s 周期不能干等)
+const steadyTicksBefore = (await callApi(hSteady)).json.syncStats.ticks
+await post(hSteady, { op: 'setOption', injectBrief: true })
+for (let i = 0; i < 800; i++) {
+  const s = (await callApi(hSteady)).json
+  if (s.syncStats.ticks >= steadyTicksBefore + 2) break
+  await sleep(10)
+}
+const steadyOn = (await callApi(hSteady)).json
+phase('steadyNow 生命周期')
+check(
+  '稳态时 steadyNow===true 且 steadySinceAt>0(状态与累计量分开)',
+  steadyOn.syncStats.steadyNow === true && steadyOn.syncStats.steadySinceAt > 0,
+  JSON.stringify({ steadyNow: steadyOn.syncStats.steadyNow, steadySinceAt: steadyOn.syncStats.steadySinceAt, steadyTicks: steadyOn.syncStats.steadyTicks }),
+)
+// 强制一次完整对账:切到另一个家族的目标终端(签名变化 → 走完整对账,本 tick 不是稳态)
+const steadySnap0 = (await callApi(hSteady)).json
+const otherFamily = steadySnap0.shell.family === 'powershell' ? 'bash' : 'powershell'
+const otherKey = terminalKeyOfFamily(steadySnap0, otherFamily) || terminalKeyOfFamily(steadySnap0, 'cmd')
+const steadyTicksBefore2 = steadySnap0.syncStats.ticks
+if (otherKey) await settleShell(hSteady, otherKey)
+for (let i = 0; i < 800; i++) {
+  const s = (await callApi(hSteady)).json
+  if (s.syncStats.ticks >= steadyTicksBefore2 + 2) break
+  await sleep(10)
+}
+const steadyFull = (await callApi(hSteady)).json
+check(
+  '强制一次完整对账后 steadyNow===false(不能拿累计量冒充状态)',
+  steadyFull.syncStats.steadyNow === false && steadyFull.syncStats.ticks > steadyTicksBefore2,
+  JSON.stringify({ steadyNow: steadyFull.syncStats.steadyNow, steadySinceAt: steadyFull.syncStats.steadySinceAt, lastSig: steadyFull.syncStats.lastSig, ticks: steadyFull.syncStats.ticks }),
+)
 
 // 收掉回归用例的 fixture
 for (const { dis } of [
@@ -1628,6 +2258,17 @@ for (const { dis } of [
   ...h13.state.effects,
   ...hPtc.state.effects,
   ...hMulti.state.effects,
+  // 本轮新增的夹具(守卫卸载用例 hGuardDrop 已就地 dispose,不重复列)
+  ...hHeal.state.effects,
+  ...hMiss.state.effects,
+  ...hNoop.state.effects,
+  ...hFactExec.state.effects,
+  ...hDelegErr.state.effects,
+  ...hFamBash.state.effects,
+  ...hDyn.state.effects,
+  ...hDynTaken.state.effects,
+  ...hNoDefs.state.effects,
+  ...hSteady.state.effects,
 ]) {
   try {
     if (typeof dis === 'function') dis()
