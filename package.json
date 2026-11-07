@@ -29,7 +29,7 @@
     "./icon": "./icon.svg"
   },
   "scripts": {
-    "test": "node test/parsers.mjs && node test/i18n-check.mjs && node test/host-harness.mjs"
+    "test": "node test/parsers.mjs && node test/i18n-check.mjs && node test/host-harness.mjs && node test/panel-render.mjs"
   },
   "files": [
     "index.js",

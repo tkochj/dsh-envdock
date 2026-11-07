@@ -117,7 +117,7 @@ The `envd` tool:
 - The host command tool is `pwsh` / `bash` etc. When your default terminal is a different family, EnvDock registers a stable `envd_shell` and hides the host shells.
 - Same family: EnvDock does nothing and adds no duplicate tool.
 - Sandbox is judged **per session**, not by the deployment default: the executor's `sandboxMode` is only the deployment default; the effective policy comes from `sandboxPolicy.resolve({ session })`. EnvDock takes over directly only when this session resolves to `danger-full-access`; a confined session does not disable takeover for other sessions (confined sessions keep the host command tool).
-- **A scope-private host shell cannot be masked** — when the host tool is mounted in a scope-private layer (dsh-ops mounts `ops_bash` per session), `restrict` cannot hide it, so EnvDock hides its own `envd_shell` instead. The three plans (mask the host shell / yield / sandbox-host) are mutually exclusive, so no session ever ends up with zero command tools.
+- **A scope-private host shell cannot be masked** — when the host tool is mounted in a scope-private layer (dsh-ops mounts `ops_bash` per session), `restrict` cannot hide it, so EnvDock hides its own `envd_shell` instead. The decision is **per scope**: with the global `pwsh` plus a per-session `ops_bash`, each session only masks the host shells it actually saw; if an unmaskable one is still there, EnvDock yields, so `envd_shell` never coexists with a host tool. The three plans (mask the host shell / yield / sandbox-host) are mutually exclusive, so no session ever ends up with zero command tools.
 - **A hidden command tool gives an actionable refusal** (`tools.guard`): a hidden host shell says "EnvDock took over, use `envd_shell`"; conversely, a hidden `envd_shell` in a yield / sandbox session says "use the host's own shell". Neither degrades into a bare `UNKNOWN_TOOL`; if the replacement is not visible in that scope the guard stays silent, so you never end up with two dead ends.
 - If registration fails or the name is taken, EnvDock keeps the host tool instead of leaving you without any command tool.
 
@@ -165,7 +165,7 @@ The three plans are mutually exclusive, so no session ever has both tools hidden
 EnvDock reconciles per session rather than declaring one global takeover state. N counts the sessions that are **not** on direct takeover — their model runs the host's own command tool (the reasons above: yield, or sandbox-host). So a machine with some sessions on `envd_shell` and others on the host tool is normal; the panel says it per session instead of overstating for them.
 
 - Hovering the badge shows the per-session detail: the first 8 characters of the session id · outcome (takeover / no takeover / yield / sandbox-host) · the tool actually in effect, plus takeover diagnostics (register / dispose / deny, delegate / guard-refusal / yield-tick counters).
-- `/envdock-api` exposes the same facts as `commandTool.scopes`: `kind`, `tool`, `hidden` (masks actually in effect), `hidesOwn`, `confined`, `mode`.
+- `/envdock-api` exposes the same facts as `commandTool.scopes`: `kind`, `tool`, `hostTool` (the host tool actually visible in that session), `hidden` (masks actually in effect), `hidesOwn`, `confined`, `mode`.
 - With no such sessions the header keeps the plain "model can see it" OK badge (all sessions on direct takeover).
 
 **Why is there no `envd_shell` in a sandbox-confined session?**

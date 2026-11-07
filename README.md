@@ -142,7 +142,7 @@ dsh web
 - 与宿主同族时**什么都不做**，不会重复造工具。
 - **沙箱按会话判，不按部署默认档判**：dsh 的执行器公布 `sandboxMode`（那是**部署默认档**），真实策略要逐会话 `sandboxPolicy.resolve({ session })`。只有本会话解析出 `danger-full-access` 时 EnvDock 才直接接管；一个会话被围栏不影响别的会话（`read-only` / `workspace-write` 的会话保留宿主命令工具）。
 - **认得出 dsh-ops 的 `ops_bash`**（cordis 模式下顶替官方 shell）：它按 bash 家族参与接管判定，不会被漏认成「两个命令工具并列」。
-- **宿主 shell 挡不掉的会话自动让路**：宿主把 `ops_bash` 这类工具注册在作用域私有层时，`restrict` 实测挡不掉它；EnvDock 反过来藏自己的 `envd_shell`，该会话只留宿主那一个命令工具。三种计划（遮挡宿主 / 让路 / 沙箱让路）互斥，任何会话都不会零工具。
+- **宿主 shell 挡不掉的会话自动让路**：宿主把 `ops_bash` 这类工具注册在作用域私有层时，`restrict` 实测挡不掉它；EnvDock 反过来藏自己的 `envd_shell`，该会话只留宿主那一个命令工具。判定按**作用域**：官方 `pwsh` 全局注册、`ops_bash` 按会话发布时，每个会话只挡它自己真见过的宿主 shell，挡不掉的那个还在就让路——不会出现 `envd_shell` 与宿主工具并列。三种计划（遮挡宿主 / 让路 / 沙箱让路）互斥，任何会话都不会零工具。
 - **工具表一变就立刻对账**（监听 `tools/change`，同一轮变更合并成一次）：别的插件晚一步注册或撤销 shell 时，遮挡是立即收敛，不用等 5 秒轮询。
 - **被藏掉的命令工具直呼时给可操作拒绝**（`tools.guard`）：宿主 shell 被藏时告诉你「已由 EnvDock 接管，改用 `envd_shell`」；反过来，让路 / 沙箱会话里 `envd_shell` 被藏后仍被直呼时，会告诉你「改用宿主自带的那个 shell」。都不是没头没尾的 `UNKNOWN_TOOL`；替代工具在那个作用域不可见时守卫放行，绝不制造两个都调不到。
 - 注册失败或被同名工具占用时，EnvDock 放弃接管并保留宿主工具，不会让你一个命令工具都没有。
@@ -195,7 +195,7 @@ Remove-Item ~/.dsh/envdock.json
 EnvDock 逐会话对账，不搞「全局接管成功 / 失败」一刀切。N 是当前**没有走直连接管**的会话数——这些会话的模型拿到的是宿主自带的命令工具（原因见上一条：让路，或沙箱让路）。所以同一台机器上一部分会话用 `envd_shell`、一部分会话用宿主工具是正常状态，面板按会话说，才不会替这些会话说谎。
 
 - 悬停这个 badge 能看到逐会话明细：会话 id 前 8 位 · 终局（直连接管 / 未接管 / 让路 / 沙箱让路）· 实际生效的工具名，以及接管诊断（注册 / 拆除 / 遮挡，委托 / 守卫拒绝 / 让路轮次等计数）。
-- `/envdock-api` 的 `commandTool.scopes` 就是面板读的那份事实：`kind`、`tool`、`hidden`（实际生效的遮挡）、`hidesOwn`、`confined`、`mode`。
+- `/envdock-api` 的 `commandTool.scopes` 就是面板读的那份事实：`kind`、`tool`、`hostTool`（该会话里实际可见的宿主工具）、`hidden`（实际生效的遮挡）、`hidesOwn`、`confined`、`mode`。
 - 没有这种会话时头部只挂「模型可见」的 ok badge（全是直连接管）。
 
 **沙箱会话为什么没有 `envd_shell`？**
