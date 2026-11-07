@@ -28,6 +28,10 @@ Windows 上做开发时，机器上往往并排躺着好几套 Node / Python / G
 - 版本管理器与工具版本**并行**：装了 nvm + conda + pyenv 的机器上，一条 `list` 最长 8s，原来串在所有工具版本后面。
 - 并发探测只跑一份：连点「重新探测」不会叠出两倍的子进程。
 - PATH 失效目录的**真实数量**单独记（`missingCount`），面板不把截断后的 12 显示成总数。
+- **缓存链**：状态文件按 `mtime+size` 缓存解析（简报每个模型请求都要读一次 state，不再每次 `readFileSync`）；`detect()` 的结果缓存 **45 秒**（普通 GET 命中即复用，不再每次点开面板都全量扫 PATH、跑版本管理器 `list`）。
+- **选择性失效**：只有影响探测结果的写入（`defaultShell` / `customShell` / `selections` / `customTools`）才 `invalidateDetection()`；改 `allowLan` 之类的选项不再让面板白跑一次全量重扫。接管状态变更仍然立刻触发对账（不等 5 秒 tick）。
+- **每 tick 复用工具定义快照**：同一 turn 里 `tools.definitions()` 只枚举一次（`defsSet` / `defsStamp`），可见性快照在同一 tick 内复用（`visDirty` 变化才重探）；`seenShells` / `learnedShells` / 每个作用域的 `hostSeen` 有界（各 64 条），插件反复换名也不会让候选遍历与 API 载荷线性膨胀。
+- `syncStats.detections` / `lastDetectMs` 记录探测次数与最近一次探测耗时——面板据此证明「没有反复全量重扫」。
 
 ### 「重新探测」问的是系统，不是 dsh 启动那一刻的快照
 
@@ -51,14 +55,14 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 
 ## 终端接替
 
-- **宿主自带哪个 shell 是「查出来」的，不是写死的**。两路认：①宿主提供 `tools.definitions` 时枚举工具定义，按名字里的家族 token（`ops_bash`、`tenant_pwsh` 之类）和「描述提到 bash / PowerShell / cmd / WSL 且参数里有 `command`」认家族（`shellFamilyFromDefinition`），认出的名字进运行态 `rt.learnedShells`；②把已知候选名在全局与每个 agent 作用域里逐个 `tools.get(name, agent)` 探一遍（不传 agent 只见全局视图，这是踩过的坑；有 `tools.executable(name, agent)` 时优先用它）。谁在，宿主就是哪个家族。名字认得出、家族认不出 → 让路，不猜语法。
+- **宿主自带哪个 shell 是「查出来」的，不是写死的**。两路认：①宿主提供 `tools.definitions` 时枚举工具定义，按名字里的家族 token（`ops_bash`、`tenant_pwsh` 之类）和「描述提到 bash / PowerShell / cmd / WSL 且参数里有 command 类字段（`command` / `cmd` / `script` / `commandline`）」认家族（`shellFamilyFromDefinition`），认出的名字进运行态 `rt.learnedShells`；②把已知候选名在全局与每个 agent 作用域里逐个 `tools.get(name, agent)` 探一遍（不传 agent 只见全局视图，这是踩过的坑；有 `tools.executable(name, agent)` 时优先用它）。**只有命令参数不够、名字带 cmd 也不够**：`run_cmd`（task 参数）、`wc_cmd_palette`（UI 面板）必须被排除，否则接管会静默挡掉无关工具。谁在，宿主就是哪个家族；名字认得出、家族认不出 → 让路，不猜语法。
 - **默认终端与宿主同族 → 什么都不做**，不重复造工具、不遮挡。
 - **固定名注册 + 占名不认领**：接管的命令工具固定叫 `envd_shell`（切终端只改执行方式，不拆建、不留空窗）；同名已被别的插件注册 → 报错并放弃接管，绝不认领别人的工具。判断「是不是我这一份」用**登记身份**（`tools.get(name) === 我注册的那个定义对象`，dsh-ops 的 publication ownership 是同一口径），不只看名字——同名工具被别人顶掉时，名字还在不代表还是我们的。
 - 注册后验证「模型看得见」，不是看 `register()` 有没有抛错；各 agent 作用域能不能看见由遮挡层逐个处理。**可执行面优先**：有 `tools.executable(name, agent)` 就用它判「这一单能调」，否则回落 `tools.get`——`ptc` 模式下模型直呼只允许 `run_code`，拿 `get` 判会把一个调不了的替代工具当成就绪，于是把真正能用的宿主工具藏掉。本机这一代 dsh-tools（0.2.1-rc.2）不提供 `tools.executable`，所以「可执行面」并非处处可用（`hasExecutableApi` 把这件事写进诊断）；PTC 折叠下模型直呼还可能被折叠进 `run_code`，那种调用连可见性探针都看不到——「不可执行时放行」不是已有保障。
 - **注册失败绝不遮挡宿主工具**：宁可放弃接管，也不让模型一个命令工具都没有。（早期版本在这里把自己锁死过：`bash` 被遮、`pwsh` 被 deny，手上没有任何命令通道。）
-- **沙箱按会话判，不按能力位判**：dsh 的 `ctx.shell` 是 ShellExecutor。可围栏的实现会公布 `sandboxMode`——但那是**部署默认档**（`dsh-pwsh-sandbox` 里就是 `sandboxPolicy.defaultMode`），不是本会话的有效策略。拿它当事实会在 `danger-full-access` 的会话里谎报围栏、把接管永久锁死。正确口径（与 `dsh-tool-pwsh` 一致）：能力位 = 执行器会不会围栏；有效策略 = 逐会话 `ctx.sandboxPolicy.resolve({ session })`。只有 `confined === true`（或策略不可知）才拦住 EnvDock 自己的 spawn。**只有至少一个会话证明无围栏时才注册 `envd_shell`**；所有会话都被围栏时干脆不注册（注册了也只能被自己藏起来，还多一次拆建），这时每个会话的终局都是「未接管」（`host`）。一个会话被围栏不影响别的会话，EnvDock 按作用域决定遮宿主的 shell 还是遮自己的 `envd_shell`（两份掩码互斥）；`sandbox-host` 这个终局只出现在「有会话无围栏 + 本会话被围栏」的混合部署里。
-- **宿主 shell 记忆按作用域，且是历史事实**：每个作用域记它自己真的见过的宿主 shell（`cur.hostSeen`），被挡住之后记忆仍在——否则每 5 秒会在「遮住 → 看不见 → 放开 → 又看见」之间来回抖。但**不能用全局记忆**：那会把「只在别的会话里注册的 `pwsh`」带进这个会话，`mask` 一旦非空就跳过让路分支，模型手里出现两个命令工具（旧构建的历史观测里就是这样出问题的）。
-- **作用域私有的遮挡失败不株连**：某个作用域挡不掉的 shell 名只记在那个作用域（`cur.badNames`），别的挡得掉的作用域继续挡——否则「一个会话挡不掉」会让别的会话永久漏挡。`restrict` 成功返回后必须**复读可见性**（agent 自己层注册的同名工具挡不掉，`restrict` 也不报错）：仍可见的进 `badNames` 并计 `denyNoops`，不记成已挡；整体抛错时退化为逐个挡，能挡几个挡几个。过渡性缺名（`restrict` 报 unknown、但此刻本来也看不见）进 30 秒重试窗口（`transientMisses`），不锁进黑名单造成永久让路。
+- **沙箱按会话判，不按能力位判**：dsh 的 `ctx.shell` 是 ShellExecutor。可围栏的实现会公布 `sandboxMode`——但那是**部署默认档**（`dsh-pwsh-sandbox` 里就是 `sandboxPolicy.defaultMode`），不是本会话的有效策略。拿它当事实会在 `danger-full-access` 的会话里谎报围栏、把接管永久锁死。正确口径（与 `dsh-tool-pwsh` 一致）：能力位 = 执行器会不会围栏；有效策略 = 逐会话 `ctx.sandboxPolicy.resolve({ session })`，而且是**三态**：`true` 确定围栏 / `false` 确定无围栏 / `null` 策略不可知。合法策略是**闭集** `read-only` / `workspace-write` / `danger-full-access`：resolve 返回 `{}`、空 mode 或闭集之外的值一律按「不可知」处理，**绝不回落到部署默认档**（回落会让围栏会话被当成无围栏直接 spawn）。`null` 绝不压成 `false`：执行层按「有围栏」保守处理，plan 也不去遮宿主；反过来，执行器自称不围栏、但策略服务明确说本会话受围栏时，EnvDock 仍然拒绝自己 spawn / 委托。**只有至少一个会话证明无围栏时才注册 `envd_shell`**；所有会话都被围栏（或全都不可知）时干脆不注册（注册了也只能被自己藏起来，还多一次拆建），这时每个会话的终局都是「未接管」（`host`），`sandboxBlocked` = 没有任何会话**确认**无围栏。一个会话被围栏不影响别的会话，EnvDock 按作用域决定遮宿主的 shell 还是遮自己的 `envd_shell`（两份掩码互斥）；`sandbox-host` 这个终局只出现在「有会话无围栏 + 本会话被围栏」的混合部署里。
+- **宿主 shell 记忆按作用域，且是历史事实**：每个作用域记它自己真的见过的宿主 shell（`cur.hostSeen`），被挡住之后记忆仍在——否则每 5 秒会在「遮住 → 看不见 → 放开 → 又看见」之间来回抖。但**不能用全局记忆**：那会把「只在别的会话里注册的 `pwsh`」带进这个会话，`mask` 一旦非空就跳过让路分支，模型手里出现两个命令工具（旧构建的历史观测里就是这样出问题的）。同时判定要**有活证**：`shippedName` 必须此刻真的可见（或仍在我们自己的掩码里）才算数——见过之后宿主撤回了工具，就立刻接管兜底，不会永远以为「与宿主同族」而不干活；从没见过宿主时给约 60 秒宽限，避免和晚注册的宿主插件抢（抢了就是先建后拆）。
+- **作用域私有的遮挡失败不株连**：某个作用域挡不掉的 shell 名只记在那个作用域（`cur.badNames`），别的挡得掉的作用域继续挡——否则「一个会话挡不掉」会让别的会话永久漏挡。`badNames` 带约 30 秒过期（到期自动重试，不是永久判死）。`restrict` 成功返回后必须**复读可见性**（agent 自己层注册的同名工具挡不掉，`restrict` 也不报错）：仍可见的进 `badNames` 并计 `denyNoops`，不记成已挡；整体抛错时退化为逐个挡，能挡几个挡几个。过渡性缺名（`restrict` 报 unknown、但此刻本来也看不见）进 30 秒重试窗口（`transientMisses`），同样不锁进黑名单造成永久让路。
 - **让路与自愈**：宿主工具挡不掉或家族认不出、而它此刻确实还在 → 藏自己的 `envd_shell` 让路，同时仍挡住本作用域挡得掉的其它宿主 shell，模型最后只剩那个挡不掉的宿主工具。`hideOwn` 只认「真推了 `restrict` 且复读确认不可见」的记账（`ownHides`）；`scopesSettled` 会复检「计划要藏、此刻却可见」并重挂——围栏 / 让路会话里 `envd_shell` 不会因为别的层放开遮挡而复活（复活就等于绕过沙箱）。已遮挡作用域里 `envd_shell` 一旦不可见，立刻把宿主 shell 还回去（宁可两个，也不制造零工具）。
 
 ## 与 dsh-ops 的兼容与借鉴
@@ -73,7 +77,7 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 **借鉴（都是 dsh-ops 已经踩过的坑）**
 
 1. **事件驱动对账**：监听 `tools/change`，用一个 40ms 的合并定时器触发对账；别的插件晚一步注册/撤销 shell 时立刻收敛，而不是等下一个 5 秒 tick。5 秒 tick 保留为兜底（旧宿主没有该事件、或事件不完整时仍然正确）。对账期间置 `mutating` 标志，自己的 `register/restrict` 派发的 `tools/change` 不再触发下一轮——这就是 dsh-ops 用 `withToolChange` 表达的作用域归属。
-2. **mask + refusal 同权（双向）**：被藏掉的命令工具仍可能被上一步捕获的工具表直呼。注册一个 `tools.guard`：宿主 shell 被藏 → 「已由 EnvDock 接管，请用 `envd_shell`，语法见简报」；`envd_shell` 被藏（让路 / 沙箱）→ 指路该会话里真的可见的宿主工具，原因取自逐会话事实（沙箱围栏 / 宿主 shell 作用域私有）。守卫必须比遮挡更保守：替代品判不出「此刻能不能用」时给「暂时无法判定」，不编造工具名；宿主没有 `tools.executable` 时只能按可见性判，PTC 折叠下直呼可能被折叠进 `run_code` —— 守卫是可操作提示，不是安全边界。
+2. **mask + refusal 同权（双向）**：被藏掉的命令工具仍可能被上一步捕获的工具表直呼。注册一个 `tools.guard`：宿主 shell 被藏 → 「已由 EnvDock 接管，请用 `envd_shell`，语法见简报」；`envd_shell` 被藏（让路 / 沙箱）→ 指路该会话里真的可见的宿主工具，原因取自逐会话事实（沙箱围栏 / 宿主 shell 作用域私有 / 策略不可知）。守卫必须比遮挡更保守：替代品判不出「此刻能不能用」时给「暂时无法判定」，不编造工具名；宿主没有 `tools.executable` 时只能按可见性判，PTC 折叠下直呼可能被折叠进 `run_code` —— 守卫是可操作提示，不是安全边界。**dsh-ops 0.5.0 可能先手**：它自己的 `tools/pre-execute` deny / guard 在前，调用根本走不到 EnvDock，方向二的文案不一定出现、`guardDenials` 也可能一直是 0——这是正常的，不能当作「守卫失效」。
 3. **登记身份，不只看名字**：`tools.get(name) === 我注册的那个定义对象` 才算我们的工具。同名工具被别的层盖住时，名字还在不代表还是我们的；这时候绝不能拿它当「已接管」去挡宿主。
 4. **可执行面优先（有则用，无则退）**：`tools.get` 是注册表视图，`tools.executable(name, agent)` 才是「这一单能不能调」（`ptc` 折叠、按步捕获）。有该方法时判后者，旧宿主没有时只能回落前者——本机这一代 dsh-tools（0.2.1-rc.2）不提供 `tools.executable`，所以「可执行面」并非处处可用，`hasExecutableApi` 把这件事写进诊断。
 
@@ -81,17 +85,36 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 
 dsh-ops 的 `ops_bash` 同样走 `ctx.subprocess`（没有 `sandboxPolicy` 入口），所以 EnvDock 自己 spawn 时的沙箱闸门必须原样保留：围栏会话绝不直连，只能委托宿主执行器或拒绝。
 
-另外，委托的包装串必须跟**宿主执行器**的语法族走（`executorFamily`：先看 `ctx.shell` 对象/类名，判不出按平台默认，win32 是 PowerShell、其余平台是 bash），不能跟模型手里的命令工具名走：Windows 官方 base 的执行器是 pwsh-sandbox（PowerShell），而工具可能是 bash 家族的 `ops_bash`，按工具名写 bash 包装器交给 PowerShell 执行必然 ParserError，命令根本没跑。执行器不在、判成 cmd、或拿不到本会话 policy 时拒绝委托，不拿部署默认档冒充。
+另外，委托必须**安全**：包装串跟**宿主执行器**的语法族走（`executorFamily`：先看 `ctx.shell` 对象/类名，判不出按平台默认，win32 是 PowerShell、其余平台是 bash，并把 `source` 报给诊断），而且命令数据从不拼进命令行。支持矩阵只覆盖 **bash / PowerShell 目标**：
+
+- bash 目标：用户命令 base64 后放环境变量 `ENVD_CMD`（纯 base64，无空格/引号/通配符），宿主命令行里跑 `printf %s $ENVD_CMD | base64 -d | bash -s`；载荷超过 ~30KB（环境变量上限）就拒绝。
+- PowerShell 目标：`-NoLogo -NoProfile -NonInteractive -EncodedCommand <UTF-16LE base64>`，前缀 `$ProgressPreference='SilentlyContinue';` 抑制 5.1 嵌套启动时的 progress→CLIXML stderr 噪音；超过 Windows 命令行上限（~24KB 编码后）就拒绝。
+- **cmd / WSL / 自定义终端目标一律拒绝**：实测 PowerShell 5.1 会吞掉参数里的双引号（命令语义被静默改写），MSYS 宿主会把 cmd 的 `/d /s /c` 改写成路径（命令根本没跑）。宁可拒绝，也不让模型拿到「看起来成功」的假结果。
+
+执行器不在、判成 cmd、缺会话信息、policy 为 `null` 或 mode 不在闭集时同样拒绝委托，不拿部署默认档冒充。`result` 必须是对象：空 / 非对象算失败；`aborted` 返回 `ok:false`。计数上，进入委托路径记 `delegateTries`，目标/执行器不支持记 `delegateRefusals`，只有拿到合法 result 才记 `delegateCalls`。
 
 ## 状态与面板 API
 
 - 状态文件 `~/.dsh/envdock.json` 原子写：先写同目录临时文件再 rename，进程中途被杀不会留下半截 JSON。
 - 真的损坏时回落到全自动、把原文件备份成 `envdock.json.corrupt`，并在面板健康检查里给一条 issue（改一次设置即写回正常文件）。
 - **非法选项写不进去**：`setShell` 只接受真实探测到的终端名（`auto` 或某个终端 key）；`setOption` 只认白名单（`injectBrief` / `allowLan` 一律归一成布尔，`shellTakeover` 只认 `auto` / `takeover` / `off`），手滑的 key/字符串不会再永久写进状态文件。
-- 面板 API 默认只放行 loopback：数据含本机绝对路径与终端，局域网访问要在面板里显式打开（`allowLan`）。例外只有一个——**从局域网打开「允许局域网访问」这个开关本身是放行的**，否则提示里让你去打开它，请求却先被 403 掉，成了死循环。
-- `/envdock-api` 的 `commandTool.scopes` 逐会话给终局：`kind` ∈ `takeover` / `host` / `yield` / `sandbox-host`，字段 `tool` / `hostTool` / `hostTools` / `ownVisible` / `hideOwnPlanned` / `visible` / `hidden` / `leaked` / `hidesOwn` / `confined` / `mode` / `anomaly`。事实按「此刻实际能不能用」现测推导（不按计划意图）：`anomaly` = 零命令工具 / 接管下宿主仍可见 / 挡了却仍可见。`hostOnlyScopes` / `sandboxHiddenScopes` / `scopeAnomalies` 都从这份事实推导。
-- 诊断计数（`syncStats`）：`registerTries` / `registers` / `disposes`、`delegateTries` / `delegateCalls` / `delegateFailures`、`ownHides` / `hostDenyApplies` / `denyNoops` / `transientMisses`、`yieldTicks`、`guardDenials` / `guardReady` / `guardError`、`steadyNow` / `steadySinceAt` / `steadyTicks` / `lastErrorAt`、`executorFamily` / `executorFamilySource`、`runtimeShellTools` / `hasExecutableApi`、`scopeAnomalies`。`steadyNow` 是状态，`steadyTicks` 是累计量——面板不能拿累计量冒充「现在稳态」。
-- 面板头部按会话汇总：有异常会话挂「N 个会话命令工具异常」（红），否则混合时挂「N 个会话用宿主工具」（黄），全部直连接管才挂「模型可见」；title 列出**全部**会话（含直连接管）与诊断计数。旧版 API（没有 `commandTool.scopes`）用 `hostOnlyScopes` / `sandboxHiddenScopes` 兜底，并在 title 里注明「旧版构建」。
+- 面板 API 默认只放行 loopback：数据含本机绝对路径与终端。打开「允许局域网访问」（`allowLan`）后**局域网只能读**（GET）；所有写操作只允许本机，唯一例外是同源页面把 `allowLan` **关掉**（`Origin` 的 host 必须与 `Host` 一致，避免任意网页替用户关掉）。理由：写操作能改默认终端 argv，等于把命令注入面开到局域网。
+- **API 加固**：请求体 >1 MB 时先把请求读完再回 413（直接 `destroy` 会让客户端看到 `ECONNRESET`，既不是 413 也不可诊断）；`sec-fetch-site: cross-site` 一律 403；本机请求但 `Origin` 不是回环也 403；`isLoopbackHost` 严格匹配（`localhost` / `::1` / `127.0.0.0/8`，`127.0.0.1.evil.example` 不算）；非 GET / POST 回 405，坏 JSON 回 400。
+- `/envdock-api` 的 `commandTool.scopes` 逐会话给终局：`kind` ∈ `takeover` / `host` / `yield` / `sandbox-host`，字段 `tool` / `hostTool` / `hostTools` / `ownVisible` / `ownNameVisible` / `ownOurs` / `hideOwnPlanned` / `visible` / `hidden` / `leaked` / `hidesOwn` / `confined`（三态）/ `policyKnown` / `mode` / `anomaly`。事实按「此刻实际能不能用」现测推导（不按计划意图）：`anomaly` = 零命令工具 / 接管下宿主仍可见 / 挡了却仍可见 / 同名工具不是我们登记的。`hostOnlyScopes` / `sandboxHiddenScopes` / `scopeAnomalies` 都从这份事实推导。`sandbox.scopes` 同样带 `confined` 三态与 `policyKnown`。
+- 诊断计数（`syncStats`）：`registerTries` / `registers` / `disposes`、`delegateTries` / `delegateCalls` / `delegateFailures` / `delegateRefusals`、`ownHides` / `hostDenyApplies` / `denyNoops` / `transientMisses`、`yieldTicks`、`guardDenials` / `guardReady` / `guardError`、`steadyNow` / `steadyPrev` / `steadySinceAt` / `steadyTicks` / `lastErrorAt`、`detections` / `lastDetectMs`、`executorFamily` / `executorFamilySource`、`runtimeShellTools` / `hasExecutableApi`、`scopeAnomalies`。`steadyNow` 是状态、`steadyPrev` 是上一轮状态、`steadyTicks` 只是累计量——面板不能拿累计量冒充「现在稳态」。委托三兄弟的语义：进入委托路径 +1 try，目标 / 执行器不支持 +1 refusal，只有拿到合法 result 才 +1 call。
+- 面板头部只挂**一个** badge：异常（红）> 混合（黄「N 个会话用宿主工具」）> 直连接管（绿「模型可见」）> 未接管（灰，含「沙箱」）。「混合」必须是真混合（部分 takeover + 部分未接管）；全部会话都未接管时是灰「未接管」而不是黄色告警。新旧 API 按「`commandTool.scopes` 字段在不在」判：新构建零会话给 `scopes: []`（面板写「当前无会话」），旧构建没有该字段才用 `hostOnlyScopes` / `sandboxHiddenScopes` 兜底并把两者相加、文案写「约 N 个」，同时在 title 注明「旧版构建」。
+
+## 面板结构
+
+`client.js` 的 `EnvDockPanel` 是单屏五块（**只在 Web 有**：`dsh.client.platform` 只注册 `web`；`tui` / `headless` 装得上但没有面板，简报与 `envd` 工具照常生效）：
+
+1. **头部一行**：标题 + 当前终端与版本 + **一个**状态 badge（异常红 / 混合黄 / 直连接管绿 / 未接管灰）+ 问题数 +「重新探测」。
+2. **置顶「命令工具 / 接管」卡片**：终端 chips；状态行 = 状态词 chip + 当前命令工具名 + 执行器族（`executorFamily`，`source=platform` 标「平台默认」）+ 接管模式 chips（自动 / 总是接管 / 只给简报）；真有围栏会话、或执行器具备围栏能力时才挂沙箱下接管 chips（委托执行 / 直接拒绝）。逐会话行最多 5 行（**异常优先**，超出折叠成「还有 N 个 /（A 个异常）」），异常行行尾给原因；「已识别宿主命令工具」chips 来自 `syncStats.runtimeShellTools`（`learned` 带标记）；诊断折叠区默认收起、有问题自动展开（`diagUser` 三态：未设置=跟随 auto，点过就听用户的），红色只给 error 级。
+3. **工具链**（含版本管理器与自定义工具入口）：路径点击即复制，多版本折叠成「N 个版本」。
+4. **健康检查 / 环境简报**：都默认折叠成一行；健康检查只在有问题时渲染。
+5. **底部一行**：简报注入开关（`!data` 时不渲染，避免 403 时显示假「关闭」）、允许局域网访问开关（403 时仍可点）、复制反馈（`role=status`，`aria-live`）。
+
+面板每 15 秒静默拉一次 `/envdock-api`，只在 `document.visibilityState === 'visible'` 时拉；payload 比较前剔除 `ticks` / `steadyTicks` / `steadySinceAt` / `lastAt` / `lastErrorAt` 等易变键（否则每个 tick 都会被当成「有变化」重渲染）。复制优先 `navigator.clipboard`，局域网 http 退到 `textarea + execCommand('copy')`，失败给可见提示。
 
 ## 健康检查
 
@@ -131,7 +154,7 @@ test/host-harness.mjs  Host 半边运行时夹具（替身服务，全链路）
 test/panel-render.mjs  面板渲染回归（极简 React 替身，零依赖）
 ```
 
-Host 半边**不 import 任何 `@deepseek-ai/*` 包**（本地目录安装是 link 检出，包内 import 解析不到 profile 的 node_modules），只用 `node:` 内置模块；命令探测走宿主的 `subprocess` 服务（只跑 `--version` 之类的只读探测，继承 dsh 的工作目录语义）。**接管出来的命令工具默认也走 `subprocess`，而且是唯一的安全理由**：`subprocess.spawn` 没有 `sandboxPolicy` 入口，所以围栏会话绝不自己 spawn。围栏下的降级路径是**委托**：把命令交给带围栏的 `ctx.shell`（`resolve` + `execute`，命令经 `ENVD_CMD` 环境变量传入，避免三层引号），围栏挂在宿主进程上、子终端继承，`sandbox.denied` 也如实回显给模型。
+Host 半边**不 import 任何 `@deepseek-ai/*` 包**（本地目录安装是 link 检出，包内 import 解析不到 profile 的 node_modules），只用 `node:` 内置模块；命令探测走宿主的 `subprocess` 服务（只跑 `--version` 之类的只读探测，继承 dsh 的工作目录语义）。**接管出来的命令工具默认也走 `subprocess`，而且是唯一的安全理由**：`subprocess.spawn` 没有 `sandboxPolicy` 入口，所以围栏会话绝不自己 spawn。围栏下的降级路径是**委托**：把命令交给带围栏的 `ctx.shell`（`resolve` + `execute`，命令数据经 base64 通道传入——bash 目标 `ENVD_CMD`、PowerShell 目标 `-EncodedCommand`，宿主命令行里不出现用户命令），围栏挂在宿主进程上、子终端继承，`sandbox.denied` 也如实回显给模型。
 
 ## 已知边界
 
@@ -142,8 +165,12 @@ Host 半边**不 import 任何 `@deepseek-ai/*` 包**（本地目录安装是 li
 - 版本探测依赖宿主 `subprocess` 服务；没有它时只做 PATH 扫描，版本列显示「版本未知」。
 - 接管后的命令工具是**精简执行器**：单次前台、输出截断、支持 `cwd` / `timeoutMs`；没有后台作业、没有 tail 落盘文件、没有 `sandbox_permissions` 升级参数。要这些能力就切回「只给简报」用宿主自带的。围栏会话下它按「沙箱下接管」选项工作：`delegate`（默认）= 命令还没被摘掉时经带围栏的宿主执行器执行（包装串按 `executorFamily`；缺本会话 policy / 族不支持时拒绝），`refuse` = 不接管（等价「只给简报」）；稳态围栏会话里根本没有 `envd_shell`。
 - 宿主命令工具的家族靠名字 token / 描述启发式认：认不出家族的不遮挡、不教语法，该会话让路，模型沿用工具表里那个工具的原始用法。
-- 拒绝守卫是「可操作提示」，不是安全边界：没有 `tools.executable` 时只能按可见性判；PTC 折叠下模型直呼可能被折叠进 `run_code`，守卫看不到那次调用。
-- 全部会话都被围栏时不注册 `envd_shell`（每个会话都是 `host` / 未接管）；`sandbox-host` 只在混合部署（至少一个无围栏会话 + 本会话被围栏）里出现。
+- 拒绝守卫是「可操作提示」，不是安全边界：没有 `tools.executable` 时只能按可见性判；PTC 折叠下模型直呼可能被折叠进 `run_code`；dsh-ops 0.5.0 还可能先用自己的 `tools/pre-execute` deny / guard 拦掉，EnvDock 方向二的文案不一定出现（`guardDenials` 甚至可能一直是 0）。
+- 全部会话都被围栏时不注册 `envd_shell`（每个会话都是 `host` / 未接管），头部是灰色 badge；`sandbox-host` 只在混合部署（至少一个无围栏会话 + 本会话被围栏）里出现；策略不可知（`confined: null`）按「有围栏」保守处理。
 - 围栏下的委托按阶段记账（解析 / 启动 / 执行 → `delegateFailures`）：执行器 runner 不可用时 `ok:false` 并在输出里标 `[sandbox]`，不伪装成「命令跑完但失败」。
+- 委托执行只支持 **bash / PowerShell 目标**：cmd / WSL / 自定义终端目标没有安全路径（命令会静默不执行），一律拒绝。PowerShell 5.1 作为宿主仍然安全——命令走 `-EncodedCommand` / `ENVD_CMD` 的数据通道，不拼命令行；但 cmd 目标就是不支持委托。
 - 工作目录取**当前会话的工作目录**（不是 dsh 进程 cwd）。
-- 版本探测结果缓存在内存里 10 分钟（key 含 mtime+size），升级二进制会自动重测；纯环境切换（比如 `nvm use` 换了另一个路径）也是新路径 → 天然重测。
+- 探测结果在内存里缓存 45 秒，只有默认终端 / 自定义终端 / 默认版本 / 自定义工具的写入会让它立即失效；「重新探测」强制重扫并清空版本号缓存（版本号本身缓存 10 分钟，key 含 mtime+size）。
+- 宿主命令工具必须**此刻真的可见**（或仍在我们自己的遮挡里）才算存在：见过之后又消失会立刻接管兜底；从没见过宿主时给约 60 秒宽限，避免和晚注册的宿主插件抢。
+- 面板只在 `web` profile 注册；npm 上发布的版本可能滞后（当前是 0.1.0），要本轮功能请用本地目录 / Git 安装或等 0.3.0 发布。
+- 面板每 15 秒静默轮询一次（仅页面可见时），数据最多滞后一个周期；payload 比较会剔除易变计数，所以计数变化本身不一定触发重渲染。

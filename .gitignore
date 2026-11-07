@@ -13,3 +13,6 @@ desktop.ini
 
 # test artifacts
 coverage/
+
+# npm pack artifacts
+*.tgz

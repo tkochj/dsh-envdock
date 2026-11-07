@@ -209,9 +209,12 @@ function writeState(patch) {
     stateCorrupt = null
     // 内存缓存跟着失效:下一次读必须看到刚写的内容
     invalidateStateCache()
-    // 状态变了(自定义工具 / 默认版本 / 选项),下一趟探测必须重扫,
-    // 不能继续把 45 秒前的旧快照端给面板。
-    invalidateDetection()
+    // 只有**影响探测结果**的写入才作废探测缓存。以前任何 setOption(如 allowLan)都作废,
+    // 面板上点一下开关就白跑一次全 PATH 重扫 + 版本管理器 list。
+    const affectsDetection = ['defaultShell', 'customShell', 'selections', 'customTools'].some((key) =>
+      Object.prototype.hasOwnProperty.call(patch || {}, key),
+    )
+    if (affectsDetection) invalidateDetection()
     // 接管状态也要立刻重算:否则面板上点了「只给简报」,还要等下一个 5 秒 tick 才生效。
     try {
       if (notifyStateChange) notifyStateChange()
@@ -604,6 +607,8 @@ const SHELL_TOOL_FAMILY = {
 /** 发现顺序:先看宿主最可能自带的那个。 */
 const SHELL_TOOL_ORDER = IS_WIN ? ['pwsh', 'powershell', 'cmd', 'bash', 'ops_bash'] : ['bash', 'zsh', 'sh', 'ops_bash']
 const SHELL_TOOL_NAMES = Object.freeze(Object.keys(SHELL_TOOL_FAMILY))
+/** 宿主沙箱策略的合法闭集:resolve 出别的值一律按「策略不可知」保守处理 */
+const SANDBOX_MODES = new Set(['read-only', 'workspace-write', 'danger-full-access'])
 
 /**
  * 名字里的家族 token:用来认 `ops_bash` 之外的第三方发布名(`tenant_bash`、`pwsh_sandbox` 之类)。
@@ -637,10 +642,18 @@ function shellFamilyByName(name) {
 function shellFamilyFromDefinition(definition) {
   const name = definition && definition.name ? String(definition.name) : ''
   if (!name || name === ENVD_SHELL_NAME) return ''
+  // 内置名单里的名字直接认(官方 pwsh/bash、dsh-ops 的 ops_bash)。
+  const exact = SHELL_TOOL_FAMILY[name.toLowerCase()]
+  if (exact) return exact
+  const props = definition && definition.parameters && definition.parameters.properties
+  // 名字里带 shell token **不等于**命令工具:`run_cmd`(任务参数)、`wc_cmd_palette`(UI 面板)
+  // 这类名字会被误认成宿主 shell → 接管时静默挡掉无关工具。必须同时有命令参数。
+  const hasCommandParam = Boolean(
+    props && (typeof props.command === 'object' || typeof props.cmd === 'object' || typeof props.script === 'object' || typeof props.commandline === 'object'),
+  )
+  if (!hasCommandParam) return ''
   const named = shellFamilyByName(name)
   if (named) return named
-  const props = definition && definition.parameters && definition.parameters.properties
-  if (!props || typeof props.command !== 'object') return ''
   const text = String(definition.description || '')
   if (/(?:^|[^a-z])(?:bash|gitbash|msys)(?:[^a-z]|$)/i.test(text) || /\b(?:sh|zsh|fish)\b/i.test(text)) return 'bash'
   if (/pwsh|powershell/i.test(text)) return 'powershell'
@@ -792,6 +805,16 @@ function createRuntime() {
     scopeToolFacts: [],
     /** 运行时学到的宿主命令工具名 → 家族(含 ops_* / 第三方发布名)—— 名字被挡住后仍要记得 */
     learnedShells: new Map(),
+    /** 注册失败后的重试原因: 'taken'(同名被占) / 'error'(其它)。tools/change 可提前解除退避 */
+    retryReason: '',
+    /** 事件驱动对账要求跳过 30s 退避 */
+    retryNow: false,
+    /** 上一次真正探测的 at(缓存命中不计数) */
+    lastDetectionAt: 0,
+    /** 是否真的见过宿主命令工具(见过之后再消失 → 立即兜底注册 envd_shell) */
+    everSawHost: false,
+    /** 实例启动时刻(用于「首次见到宿主」的宽限期) */
+    startedAt: Date.now(),
   }
 }
 
@@ -1068,7 +1091,12 @@ const MANAGERS = [
   },
 ]
 
-async function detectVersionManagers(runner) {
+const MANAGER_CACHE_TTL_MS = 10 * 60_000
+const MANAGER_CACHE_MAX = 8
+let managerCacheSeq = 0
+const managerCaches = new Map()
+
+async function detectVersionManagers(runner, force) {
   const present = []
   for (const spec of MANAGERS) {
     let commandPath = null
@@ -1091,6 +1119,19 @@ async function detectVersionManagers(runner) {
       spec,
       entry: { key: spec.key, label: spec.label, tool: spec.tool, command: commandPath, roots, versions: [], active: null, listed: false },
     })
+  }
+  // 版本管理器的 list 是这里最贵的部分(装了 nvm/conda/pyenv 时单条可到秒级)。
+  // 用「可执行文件 + 根目录 + mtime/size」当签名缓存 10 分钟:面板 45s 一次探测不会再把它们全部重跑。
+  const signature = present
+    .map(({ entry }) => String(entry.command || '') + '|' + entry.roots.join(';') + '|' + (entry.command ? statSignature(entry.command) : ''))
+    .join('\n')
+  // 缓存按 runner 实例隔离:同一进程里测试夹具/多代插件各有自己的执行器,
+  // 只按机器 PATH 缓存会让「无 subprocess」的夹具读到上一代的结果。
+  if (runner && !runner.__envdockCacheId) runner.__envdockCacheId = ++managerCacheSeq
+  const cacheId = runner ? runner.__envdockCacheId : 0
+  const cached = managerCaches.get(cacheId)
+  if (!force && cached && cached.key === signature && Date.now() - cached.at < MANAGER_CACHE_TTL_MS) {
+    return JSON.parse(JSON.stringify(cached.value))
   }
   // 并行跑各自的 list(+ active):串行在装了 nvm+conda+pyenv 的机器上会拖到十几秒
   await Promise.all(
@@ -1124,7 +1165,10 @@ async function detectVersionManagers(runner) {
       }
     }),
   )
-  return present.map((p) => p.entry)
+  const result = present.map((p) => p.entry)
+  managerCaches.set(cacheId, { key: signature, at: Date.now(), value: JSON.parse(JSON.stringify(result)) })
+  if (managerCaches.size > MANAGER_CACHE_MAX) managerCaches.delete(managerCaches.keys().next().value)
+  return result
 }
 
 /** 多版本候选:同一个工具在磁盘上找到的所有可执行文件。 */
@@ -1364,7 +1408,7 @@ async function detect(ctx, runner, state, force) {
     // 版本管理器:必须在场才算,并让它自己报版本/激活项。
     // 与工具版本并行 —— 装了 nvm+conda+pyenv 的机器上它一条 list 最长 8s,串在后面会把刷新拖成十几秒。
     tasks.push(
-      detectVersionManagers(runner)
+      detectVersionManagers(runner, force)
         .then((list) => {
           versionManagers = list
         })
@@ -1547,31 +1591,33 @@ function shellInvocation(shell, line) {
  */
 function delegatedInvocation(hostFamily, shell, line) {
   if (!shell || !shell.path) return null
-  // 宿主语法下「引用整条命令」的写法(展开成一个参数,不会被二次分词)
-  const ref = hostFamily === 'powershell' ? '$env:ENVD_CMD' : hostFamily === 'bash' ? '"$ENVD_CMD"' : null
-  if (!ref) return null
-  let argv = null
-  if (shell.family === 'custom') {
-    let tpl = shell.args
-    if (typeof tpl === 'string') tpl = tpl.split(' ').filter(Boolean)
-    const args = Array.isArray(tpl) && tpl.length ? tpl.map(String) : ['-c', '{command}']
-    argv = args.some((a) => a.includes('{command}'))
-      ? [shell.path, ...args.map((a) => (a.includes('{command}') ? ref : a))]
-      : [shell.path, ...args, ref]
-  } else if (shell.family === 'cmd') argv = [shell.path, '/d', '/s', '/c', ref]
-  else if (shell.family === 'bash') argv = [shell.path, '-lc', ref]
-  else if (shell.family === 'wsl') argv = [shell.path, 'bash', '-lc', ref]
-  else argv = [shell.path, '-NoLogo', '-NoProfile', '-Command', ref]
-
-  if (hostFamily === 'powershell') {
-    // 变量引用必须裸放(否则被当成字面量);其余参数一律单引号,内部单引号翻倍。
-    const parts = argv.map((part) => (part === ref ? ref : "'" + String(part).replace(/'/g, "''") + "'"))
-    return '& ' + parts.join(' ') + '; exit $LASTEXITCODE'
+  if (hostFamily !== 'powershell' && hostFamily !== 'bash') return null
+  const family = String(shell.family || '')
+  // 只支持 bash / powershell 目标:它们的命令可以用「无引号 base64 载荷」安全传输。
+  // cmd / wsl / 自定义终端拒绝委托 —— 实测 PowerShell 5.1 会吞掉参数里的双引号
+  // (命令语义被静默改写),而 MSYS 宿主会把 cmd 的 /d /s /c 改写成路径(命令根本没跑)。
+  const quote = (value) => {
+    if (hostFamily === 'powershell') return "'" + String(value).replace(/'/g, "''") + "'"
+    return "'" + String(value).replace(/'/g, "'\\''") + "'"
   }
-  // bash 宿主:单引号包裹,内部单引号用 '\'' 断开
-  const shq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'"
-  const parts = argv.map((part) => (part === ref ? ref : shq(part)))
-  return parts.join(' ') + '; exit $?'
+  const finish = (argv) => {
+    const parts = argv.map((part) => quote(part))
+    return { command: (hostFamily === 'powershell' ? '& ' : '') + parts.join(' ') + '; exit ' + (hostFamily === 'powershell' ? '$LASTEXITCODE' : '$?') }
+  }
+  if (family === 'bash') {
+    // 命令走环境变量(纯 base64:无空格/引号/通配符),目标 bash 自己解码后执行。
+    // 这样宿主命令行里永远不出现用户命令,PowerShell 5.1 的引号吞噬 bug 无从触发。
+    const payload = Buffer.from(String(line), 'utf8').toString('base64')
+    if (payload.length > 30000) return null // 环境变量也有上限(约 32KB)
+    const script = 'printf %s $ENVD_CMD | base64 -d | bash -s'
+    return { ...finish([shell.path, '-lc', script]), envValue: payload }
+  }
+  if (family === 'cmd' || family === 'wsl' || family === 'custom') return null
+  // powershell 目标:用 -EncodedCommand(UTF-16LE base64),命令行里没有引号,5.1/7 都正确。
+  // 前缀 $ProgressPreference 抑制 5.1 嵌套启动时的 progress→CLIXML 噪音(会污染 stderr)。
+  const encoded = Buffer.from("$ProgressPreference='SilentlyContinue'; " + String(line), 'utf16le').toString('base64')
+  if (encoded.length > 24000) return null // Windows 命令行上限 32767
+  return finish([shell.path, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded])
 }
 
 // ─────────────────────────────────────────────────────── 健康检查 ──
@@ -1717,7 +1763,9 @@ function brief(detection, state, probeIn, runtime) {
           : sessionless
             ? ';宿主执行器带沙箱能力(部署默认 ' + (commandState.sandboxMode || '未知') + '),各会话有效策略见 scopes'
             : ';宿主执行器带沙箱能力(部署默认 ' + (commandState.sandboxMode || '未知') + '),本会话策略未知(以工具表为准)'
-    const ownVisible = Boolean(commandState.takeover && commandState.visible)
+    // 同名工具不一定是我们的:名字可见但登记身份不对时,不能说「EnvDock 已接管」。
+    const scopeOwnOurs = !scopeFact || scopeFact.ownOurs !== false
+    const ownVisible = Boolean(commandState.takeover && commandState.visible && scopeOwnOurs)
     const usableHost = hostName && visible(hostName) ? hostName : ''
     if (commandState.sandbox && commandState.sandboxConfined === true) {
       // 本会话真被围栏:模型唯一能用的是宿主工具 —— 语法也必须按宿主工具教,
@@ -1727,7 +1775,12 @@ function brief(detection, state, probeIn, runtime) {
           (usableHost ? hostLabel(usableHost) : '见工具表') +
           (usableHost ? sandboxLine : '') +
           ':EnvDock 不接管(接管会绕过沙箱),以工具表里那个工具为准' +
-          (usableHost && familyOf(runtime, usableHost) ? '' : '(它的语法见工具表,不要按默认终端写)'),
+          (usableHost && familyOf(runtime, usableHost) ? '' : '(它的语法见工具表,不要按默认终端写)') +
+          (usableHost
+            ? ''
+            : ';若工具表里此刻只有 `' +
+              ENVD_SHELL_NAME +
+              '`,它在这个围栏会话里会拒绝或委托执行(不会绕过沙箱),下一轮对账会把宿主工具换回来'),
       )
       if (usableHost) pushSyntax(familyOf(runtime, usableHost))
     } else if (ownVisible && (!factKind || factKind === 'takeover')) {
@@ -1753,7 +1806,11 @@ function brief(detection, state, probeIn, runtime) {
           (usableHost ? hostLabel(usableHost) : '见工具表') +
           (usableHost ? sandboxLine : '') +
           ';EnvDock 没有接管这个会话' +
-          (commandState.takeover ? '(`' + ENVD_SHELL_NAME + '` 在本会话不可用:被工具折叠或遮挡,不要直呼它)' : ''),
+          (commandState.takeover
+            ? '(`' +
+              ENVD_SHELL_NAME +
+              '` 在本会话不可用:被工具折叠、遮挡,或不是 EnvDock 登记的那一份同名工具;不要直呼它)'
+            : ''),
       )
       if (usableHost) pushSyntax(familyOf(runtime, usableHost))
     } else if (factKind === 'yield' && !ownVisible) {
@@ -1835,7 +1892,7 @@ function brief(detection, state, probeIn, runtime) {
     lines.push('- 注意:')
     for (const issue of issues.slice(0, 3)) lines.push('  · [' + issue.level + '] ' + issue.title + ' — ' + String(issue.detail).slice(0, 160))
   }
-  lines.push('- 未列出的工具仍可用 `envd` 工具按名字解析(resolve),不要用 where/which 反复试探。')
+  lines.push('- `envd` 工具只能解析上面已探测到的工具;没列出的不在探测范围内(需要时用 `command -v` / `Get-Command` 自行确认,别用 `envd` 试探)。')
   return lines.join('\n')
 }
 
@@ -1845,11 +1902,23 @@ function textBlock(text) {
   return [{ type: 'text', text }]
 }
 
-/** 请求是否来自本机。面板会暴露本机绝对路径,默认不外放。 */
+/** 严格判断一个主机名/IP 字面量是不是回环(不做前缀匹配:`127.0.0.1.evil` 不算)。 */
+function isLoopbackHost(host) {
+  const value = String(host || '')
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '')
+  if (!value) return false
+  if (value === '::1' || value === 'localhost') return true
+  const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value)
+  if (!m) return false
+  return m.slice(1).every((part) => Number(part) <= 255)
+}
+
+/** 请求是否来自本机。空地址按**非**本机处理(拿不到来源就不该放行)。 */
 function isLoopback(req) {
   const raw = String((req && req.socket && (req.socket.remoteAddress || req.socket.address && req.socket.address().address)) || '')
   const addr = raw.startsWith('::ffff:') ? raw.slice(7) : raw
-  return addr === '' || addr === '::1' || addr === '127.0.0.1' || addr.startsWith('127.')
+  return isLoopbackHost(addr)
 }
 
 function envdTool(ctx, getDetection, getState, forceRefresh, isVisible, runtime, gateFor, hasToolFor) {
@@ -1873,6 +1942,8 @@ function envdTool(ctx, getDetection, getState, forceRefresh, isVisible, runtime,
       },
       gate: () => (typeof gateFor === 'function' ? gateFor(agent) : null),
       agentId: agent ? String(agent.id) : '',
+      // 没有 agent 就没有「本会话」这个概念:和 /envdock-api 一样只报全局视图并指路 scopes
+      sessionless: !agent,
     }
   }
   const definition = {
@@ -2030,12 +2101,28 @@ function commandTool(ctx, activeShell, gateFor, hostFamilyOf, stats) {
     }
     // 能力位不在(执行器根本不会围栏)时委托没有意义,也不该由这里兜底
     if (gate && gate.capable === false) return null
+    if (stats && typeof stats === 'object') stats.delegateTries = (Number(stats.delegateTries) || 0) + 1
+    const refuse = (reason) => {
+      if (stats && typeof stats === 'object') stats.delegateRefusals = (Number(stats.delegateRefusals) || 0) + 1
+      return { ok: false, text: '[sandbox] ' + reason + ';请改用宿主自带的命令工具' }
+    }
     const hostFamily = typeof hostFamilyOf === 'function' ? String(hostFamilyOf(agent) || '') : ''
     // 只认能确定包装语法的两种宿主执行器;别的(cmd/wsl/未知)拒绝,绝不猜。
-    if (hostFamily !== 'powershell' && hostFamily !== 'bash') return null
-    const command = delegatedInvocation(hostFamily, shell, line)
-    if (!command) return null
-    if (stats && typeof stats === 'object') stats.delegateTries = (Number(stats.delegateTries) || 0) + 1
+    if (hostFamily !== 'powershell' && hostFamily !== 'bash') {
+      return refuse('宿主执行器的语法族无法安全包装(cmd/未知),EnvDock 拒绝委托执行')
+    }
+    if (gate && gate.capable === false) {
+      return refuse('宿主执行器自称不围栏,委托无法保证围栏生效')
+    }
+    const invocation = delegatedInvocation(hostFamily, shell, line)
+    if (!invocation) {
+      return refuse(
+        '目标终端(' +
+          String((shell && shell.family) || 'unknown') +
+          ')不支持安全委托执行(当前只支持 bash / PowerShell 目标;cmd/WSL/自定义终端请用宿主工具)',
+      )
+    }
+    const command = invocation.command
     const policies = ctx.get('sandboxPolicy')
     const session = agent.session
     let policy = null
@@ -2044,12 +2131,12 @@ function commandTool(ctx, activeShell, gateFor, hostFamilyOf, stats) {
     } catch {
       policy = null
     }
-    if (!policy) {
-      // 拿不到本会话 policy 时不能委托:那等于用部署默认档执行,可能绕过本会话围栏
+    if (!policy || !SANDBOX_MODES.has(String(policy.mode || ''))) {
+      // 拿不到/拿到非法 policy 时不能委托:那等于用部署默认档执行,可能绕过本会话围栏
       if (stats && typeof stats === 'object') stats.delegateFailures = (Number(stats.delegateFailures) || 0) + 1
-      return { ok: false, text: '[sandbox] 本会话沙箱策略不可得,EnvDock 拒绝委托执行(不拿部署默认档冒充);请改用宿主自带的命令工具' }
+      return { ok: false, text: '[sandbox] 本会话沙箱策略不可得或非法,EnvDock 拒绝委托执行(不拿部署默认档冒充);请改用宿主自带的命令工具' }
     }
-    const env = { ENVD_CMD: line }
+    const env = invocation.envValue ? { ENVD_CMD: invocation.envValue } : {}
     // 和官方 shell 工具一致:带上受管的 DSH_* 快照(subprocess 会剥掉父进程的 DSH_*)。
     // 它必须走 dshEnv 而不是普通 env:普通 env 会被登记为可被覆盖的普通变量。
     let dshEnv = null
@@ -2097,13 +2184,21 @@ function commandTool(ctx, activeShell, gateFor, hostFamilyOf, stats) {
     } catch (error) {
       return fail('执行', error)
     }
+    // result 必须是对象:空/非对象说明执行器坏了,不能当成一次「成功执行」计数
+    if (!result || typeof result !== 'object') {
+      return fail('结果', new Error('宿主执行器返回了空结果'))
+    }
     // 「委托路径真的跑起来了」单独记账:诊断条要靠它区分「围栏会话根本没走过委托」
     // 和「走了、但宿主执行器拒绝/失败」—— 只看输出文本分不清这两种。
     if (stats && typeof stats === 'object') stats.delegateCalls = (Number(stats.delegateCalls) || 0) + 1
     const LIMIT = 16000
     const clip = (text) => (text.length > LIMIT ? text.slice(0, LIMIT) + '\n…(已截断,原长 ' + text.length + ' 字符)' : text)
     const mode = (policy && policy.mode) || gate.mode || '宿主的围栏'
-    const parts = ['[sandbox] 委托宿主执行器执行(' + mode + ')']
+    const parts = [
+      result.sandbox
+        ? '[sandbox] 委托宿主执行器执行(' + ((result.sandbox && result.sandbox.mode) || mode) + ')'
+        : '[sandbox] 委托宿主执行器执行(策略 ' + mode + ';执行器未报告围栏事实)',
+    ]
     if (result.sandbox) {
       if (result.sandbox.runnerFailed) parts.push('[sandbox: 围栏 runner 失败,这条命令没有执行]')
       if (result.sandbox.denied) parts.push('[sandbox: 文件操作被沙箱拒绝 —— 这是策略拒绝,不要换旁路重试]')
@@ -2116,9 +2211,9 @@ function commandTool(ctx, activeShell, gateFor, hostFamilyOf, stats) {
     if (stderr) parts.push('[stderr]\n' + clip(stderr))
     const exit = result.timedOut ? 'timeout' : result.exitCode !== null && result.exitCode !== undefined ? String(result.exitCode) : '?'
     parts.push('[exit ' + exit + ']')
-    // runner 失败时命令根本没执行:这不是「命令跑完但失败」,不能回 ok:true。
+    // runner 失败时命令根本没执行;aborted 是取消 —— 两者都不能回 ok:true。
     const runnerFailed = Boolean(result.sandbox && result.sandbox.runnerFailed)
-    return { ok: !runnerFailed, text: parts.join('\n') }
+    return { ok: !runnerFailed && !result.aborted, text: parts.join('\n') }
   }
 
   return {
@@ -2191,7 +2286,7 @@ function commandTool(ctx, activeShell, gateFor, hostFamilyOf, stats) {
             ',EnvDock 不接管;请改用宿主自带的命令工具' +
             (options.sandboxTakeover === 'refuse'
               ? '(面板里把「沙箱下接管」切到「委托执行」可以恢复这个工具)'
-              : '(委托执行不可用:宿主执行器族未知,不能安全转发)'),
+              : '(当前执行器/终端组合无法安全委托,详见本条拒绝原因)'),
         }
       }
       const service = ctx.get('subprocess')
@@ -2258,7 +2353,16 @@ export function apply(ctx, config) {
   const runner = createRunner(ctx)
 
   const getState = () => readState()
-  const getDetection = async (force) => detect(ctx, runner, getState(), Boolean(force))
+  const getDetection = async (force) => {
+    const started = Date.now()
+    const value = await detect(ctx, runner, getState(), Boolean(force))
+    syncStats.lastDetectMs = Date.now() - started
+    if (!rt.lastDetectionAt || (value && value.at && value.at !== rt.lastDetectionAt)) {
+      syncStats.detections++
+      rt.lastDetectionAt = value && value.at ? value.at : Date.now()
+    }
+    return value
+  }
 
   /**
    * 对账统计:`/envdock-api` 直接端出去,面板显示「真的在动还是假装在动」。
@@ -2295,12 +2399,16 @@ export function apply(ctx, config) {
     sandboxDefault: '',
     /** 本会话被围栏 → 这个会话改用宿主工具(没有任何会话被挡时为空) */
     sandboxBlocked: false,
+    /** kind=sandbox-host 的会话数(逐会话事实推导;初始 0,别让字段在首个 tick 前消失) */
+    sandboxHiddenScopes: 0,
     /** 每个作用域的沙箱事实:[{ id, mode, confined }],面板据此说「哪个会话为什么」 */
     sandboxScopes: [],
     /** 本 tick 结束时是否**此刻**处于稳态;累计量 steadyTicks 不能当状态用(一旦稳态过就永远为真) */
     steadyNow: false,
     /** 最近一次进入稳态的时刻(ms);0 = 从未 */
     steadySinceAt: 0,
+    /** 上一轮是否稳态(内部用,判断「刚进入稳态」) */
+    steadyPrev: false,
     /** lastError 的写入时刻(ms);lastError 为 null 时无意义 —— 面板据此显示「多久前」 */
     lastErrorAt: 0,
     /** ctx.tools.register 的**尝试**次数(含失败/被校验拒绝):和 registers 一起才能抓「建了又拆」 */
@@ -2309,6 +2417,8 @@ export function apply(ctx, config) {
     delegateTries: 0,
     /** 委托在 resolve/启动/结果三个阶段抛错的次数 */
     delegateFailures: 0,
+    /** 因「目标终端/执行器不支持安全委托」而直接拒绝的次数(与失败区分) */
+    delegateRefusals: 0,
     /** 藏我们自己的 envd_shell 的 restrict 次数(与「挡宿主」分开记账) */
     ownHides: 0,
     /** 挡宿主 shell 的 restrict 次数 */
@@ -2329,6 +2439,9 @@ export function apply(ctx, config) {
     executorFamilySource: 'unknown',
     /** 宿主是否提供 tools.executable(没有时只能按可见性判，「可执行面」并不存在) */
     hasExecutableApi: false,
+    /** 探测次数(真正的探测,不是缓存命中)与最近一次耗时(ms) */
+    detections: 0,
+    lastDetectMs: 0,
   }
   /** 对账周期(默认 5s;测试夹具用它把 20 个 tick 压进几百毫秒) */
   const syncIntervalMs = Math.min(Math.max(Number(settings.syncIntervalMs) || 5000, 20), 600000)
@@ -2345,9 +2458,12 @@ export function apply(ctx, config) {
   }
   /** 稳态记账:steadyNow 是**状态**,steadyTicks 是**累计量**,两者不能混用。 */
   const markSteady = () => {
+    // steadyNow 每轮开始会置 false,所以用 steadyPrev 记住「上一轮是否稳态」:
+    // 只有从「非稳态」进入「稳态」的那一刻才刷新 steadySinceAt,否则它每 tick 被重置,
+    // 消费者永远算不出「已经稳态多久」。
     if (!syncStats.steadyNow) {
       syncStats.steadyNow = true
-      syncStats.steadySinceAt = Date.now()
+      if (!syncStats.steadyPrev) syncStats.steadySinceAt = Date.now()
     }
     syncStats.steadyTicks++
   }
@@ -2371,7 +2487,11 @@ export function apply(ctx, config) {
     try { push(shell.id) } catch {}
     try { push(shell.constructor && shell.constructor.name) } catch {}
     try { push(shell.constructor && shell.constructor.id) } catch {}
-    const text = probes.join(' ').toLowerCase()
+    // CamelCase 也要能分:`CmdSandboxExecutor` 先拆成 `Cmd Sandbox Executor` 再小写
+    const text = probes
+      .join(' ')
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .toLowerCase()
     if (/pwsh|powershell/.test(text)) return { family: 'powershell', source: 'executor' }
     if (/gitbash|msys|bash/.test(text)) return { family: 'bash', source: 'executor' }
     if (/\bcmd\b/.test(text)) return { family: 'cmd', source: 'executor' }
@@ -2420,11 +2540,7 @@ export function apply(ctx, config) {
    * 只有 `confined === true` 才会拦住 EnvDock 自己的 spawn;`capable` 单独拿出来,
    * 只用于「面板要不要提沙箱」「委托执行可不可用」这类判断。
    */
-  const sandboxGate = (agent, options) => {
-    const cap = shellCapability()
-    const opts = options || getState().options
-    const delegate = opts.sandboxTakeover !== 'refuse'
-    if (!cap.capable) return { capable: false, confined: false, mode: '', policyKnown: true, delegate }
+  const resolveSessionMode = (agent) => {
     const policy = readService('sandboxPolicy')
     const session = agent && agent.session
     let mode = ''
@@ -2432,19 +2548,38 @@ export function apply(ctx, config) {
     if (policy && typeof policy.resolve === 'function') {
       policyKnown = true
       try {
-        mode = String(policy.resolve(session ? { session } : {}).mode || '')
+        mode = String((policy.resolve(session ? { session } : {}) || {}).mode || '')
       } catch {
         mode = ''
-        // 解析失败 ≠ 策略是默认档:这时说「本会话被围栏(workspace-write)」就是编造。
+        policyKnown = false
+      }
+      // 成功返回但 mode 不在闭集里 = 策略服务异常:按「不可知」保守处理,绝不回落到部署默认档
+      // (回落到默认档会让围栏会话被 EnvDock 当无围栏直接 spawn,绕过沙箱)。
+      if (policyKnown && !SANDBOX_MODES.has(mode)) {
+        mode = ''
         policyKnown = false
       }
     }
-    // 策略不可知时绝不拿部署默认档冒充本会话结论(两个方向都危险:把无围栏说成围栏、
-    // 把围栏当成无围栏)。confined 留 null,由调用方按「未知 = 保守」处理。
-    if (!policyKnown) return { capable: true, confined: null, mode: '', policyKnown: false, delegate }
-    if (!mode) mode = cap.defaultMode
+    return { mode, policyKnown }
+  }
+  const sandboxGate = (agent, options) => {
+    const cap = shellCapability()
+    const opts = options || getState().options
+    const delegate = opts.sandboxTakeover !== 'refuse'
+    const resolved = resolveSessionMode(agent)
+    if (!cap.capable) {
+      // 执行器自称不围栏,但策略服务明确说本会话受围栏时,仍按「有围栏」处理:
+      // 否则直接 spawn 就是绕过策略服务(兼容只实现 ctx.sandbox / 不暴露 sandboxMode 的执行器)。
+      if (resolved.policyKnown && resolved.mode && resolved.mode !== 'danger-full-access') {
+        return { capable: false, confined: true, mode: resolved.mode, policyKnown: true, delegate }
+      }
+      return { capable: false, confined: false, mode: '', policyKnown: resolved.policyKnown, delegate }
+    }
+    // 策略不可知时绝不拿部署默认档冒充本会话结论(两个方向都危险)。
+    if (!resolved.policyKnown) return { capable: true, confined: null, mode: '', policyKnown: false, delegate }
+    const mode = resolved.mode
     const confined = agent ? mode !== 'danger-full-access' : null
-    return { capable: true, confined, mode, policyKnown, delegate }
+    return { capable: true, confined, mode, policyKnown: true, delegate }
   }
   /**
    * 作用域 → agent 的索引。systemPrompt.context 早于接管 effect 注册,而简报要按会话
@@ -2637,7 +2772,8 @@ export function apply(ctx, config) {
         denyKey: '',
         denyBlockedKey: '',
         disposers: [],
-        badNames: new Set(),
+        /** 挡不掉的宿主 shell:name → 到期重试时刻(不是永久判死) */
+        badNames: new Map(),
         hostSeen: new Set(),
         /** 过渡性缺名:name → 允许重试的时刻(不进 badNames,不给名字「永久判死」) */
         missNames: new Map(),
@@ -2758,9 +2894,18 @@ export function apply(ctx, config) {
 
     const maskFor = (cur, names) =>
       names.filter((name) => {
-        if (cur.badNames.has(name)) return false
+        const now = Date.now()
+        const until = cur.badNames.get(name)
+        if (until !== undefined) {
+          // 挡不掉不是「永久判死」:30 秒后重试一次(publication reentry / 临时拒绝会自愈)
+          if (until > now) return false
+          cur.badNames.delete(name)
+        }
         const retryAt = cur.missNames.get(name)
-        if (retryAt && retryAt > Date.now()) return false
+        if (retryAt !== undefined) {
+          if (retryAt > now) return false
+          cur.missNames.delete(name)
+        }
         return true
       })
     /** 一份作用域计划的幂等键:宿主掩码 + 是否藏我们自己的工具。 */
@@ -2798,13 +2943,24 @@ export function apply(ctx, config) {
         const appliedMask = String(cur.denyKey || '').replace(/^own\|/, '').split(',').filter(Boolean)
         // ── 可见性一律现测:计划与账本都可能与工具表不一致 ──
         // (自己本来就不可见 / restrict 返回成功但 agent 层同名仍可见 / 别的插件短暂遮住)
-        const ownVisible = hasTool(cur.actx, ENVD_SHELL_NAME, cur.agent)
+        // 名字可见 ≠ 是我们的:同名工具被别的层盖住时,不能对自己说「已接管」。
+        const ownNameVisible = hasTool(cur.actx, ENVD_SHELL_NAME, cur.agent)
+        const ownOurs = ownNameVisible && isOwnDefinition(cur.actx, cur.agent)
+        const ownVisible = ownOurs
         const visibleHosts = []
-        for (const name of candidates) {
-          if (name === ENVD_SHELL_NAME) continue
-          try {
-            if (hasTool(cur.actx, name, cur.agent)) visibleHosts.push(name)
-          } catch {}
+        const reuseSnapshot =
+          cur.defsSet instanceof Set && cur.defsStamp === syncStats.ticks && cur.visDirty !== syncStats.ticks
+        if (reuseSnapshot) {
+          for (const name of candidates) {
+            if (name !== ENVD_SHELL_NAME && cur.defsSet.has(name)) visibleHosts.push(name)
+          }
+        } else {
+          for (const name of candidates) {
+            if (name === ENVD_SHELL_NAME) continue
+            try {
+              if (hasTool(cur.actx, name, cur.agent)) visibleHosts.push(name)
+            } catch {}
+          }
         }
         visibleHosts.sort()
         // 终局按「此刻实际能不能用」推导,不按 denyKey 的意图推导:
@@ -2815,7 +2971,12 @@ export function apply(ctx, config) {
         const leaked = appliedMask.filter((name) => visibleHosts.includes(name))
         const hostTool = visibleHosts[0] || null
         const tool = kind === 'takeover' ? ENVD_SHELL_NAME : hostTool
-        const anomaly = (!ownVisible && !hostTool) || (ownVisible && visibleHosts.length > 0) || leaked.length > 0
+        // 异常 = 这个会话实际拿不到命令工具 / 拿到两个 / 挡了却仍可见 / 名字在但不是我们的。
+        const anomaly =
+          (!ownVisible && !hostTool) ||
+          (ownVisible && visibleHosts.length > 0) ||
+          leaked.length > 0 ||
+          (ownNameVisible && !ownOurs)
         facts.push({
           id,
           kind,
@@ -2825,12 +2986,17 @@ export function apply(ctx, config) {
           hostTool,
           hostTools: visibleHosts,
           ownVisible,
+          ownNameVisible,
+          ownOurs,
           hideOwnPlanned,
           visible: kind === 'takeover' ? ownVisible : Boolean(hostTool),
           hidden,
           leaked,
           hidesOwn: hideOwnPlanned && !ownVisible,
-          confined: gate.confined === true,
+          // 三态:true=确定围栏 / false=确定无围栏 / null=策略不可知。压成 false 会让面板
+          // 把「不可知」说成「确定无围栏」,把保守隐藏说成设计底态。
+          confined: gate.confined === true ? true : gate.confined === false ? false : null,
+          policyKnown: gate.policyKnown === true,
           mode: String(gate.mode || ''),
           anomaly,
         })
@@ -2883,6 +3049,7 @@ export function apply(ctx, config) {
           continue
         }
         dropDenies(cur)
+        cur.visDirty = syncStats.ticks
         if (!mask.length && !hideOwn) continue
         const tools = toolsOf(cur.actx)
         if (!tools || typeof tools.restrict !== 'function') continue
@@ -2926,67 +3093,56 @@ export function apply(ctx, config) {
               return false
             }
           }
-          try {
-            cur.disposers.push(tools.restrict({ deny: mask }))
-            syncStats.denyApplies++
-            syncStats.hostDenyApplies++
-            // restrict 只过滤**继承面**:agent 自己层注册的同名工具挡不掉,restrict 也不报错。
-            // 所以成功返回后必须复读一次;仍可见的按「挡不掉」处理(下一 tick 让路),不能记成已挡。
-            appliedMask = mask.filter((name) => !stillVisible(name))
-            for (const name of mask) {
+          // **永远逐个名字 restrict**:批量调用不是原子的 —— 真机上 restrict 会「边加边抛」
+          // (dsh-ops 的 publication reentry),中途抛错时已生效的名字连同 disposer 一起丢失,
+          // 变成无主 deny:关掉接管/卸载后宿主工具永久隐藏。
+          for (const name of mask) {
+            try {
+              cur.disposers.push(tools.restrict({ deny: [name] }))
+              syncStats.denyApplies++
+              syncStats.hostDenyApplies++
+              // restrict 只过滤**继承面**:agent 自己层注册的同名工具挡不掉,restrict 也不报错。
+              // 所以成功返回后必须复读;仍可见的按「挡不掉」处理(短期让路,到期重试)。
               if (stillVisible(name)) {
-                cur.badNames.add(name)
                 syncStats.denyNoops++
-              }
-            }
-          } catch (error) {
-            // 整体失败(通常是混进了这个作用域挡不掉的名字):退化成逐个挡,能挡几个挡几个。
-            // 挡不掉的名字进 **cur.badNames** —— 它是作用域私有的;别动全局 seenShells,
-            // 否则「别的作用域挡得掉」的那个名字会被永久剔除,那边就永久漏挡。
-            const failed = []
-            for (const name of mask) {
-              try {
-                cur.disposers.push(tools.restrict({ deny: [name] }))
-                syncStats.denyApplies++
-                syncStats.hostDenyApplies++
-                if (stillVisible(name)) {
-                  cur.badNames.add(name)
-                  syncStats.denyNoops++
-                } else {
-                  appliedMask.push(name)
-                }
-              } catch {
-                failed.push(name)
-              }
-            }
-            for (const name of failed) {
-              if (hasTool(cur.actx, name, cur.agent)) {
-                // 真的还在 → 这个作用域确实挡不掉:记进 badNames,下一 tick 走让路
-                cur.badNames.add(name)
+                cur.badNames.set(name, Date.now() + 30000)
               } else {
-                // 名字只是暂时不在(插件热重载空窗):restrict 报 unknown 不代表「挡不掉」。
-                // 锁进 badNames 会让这个作用域永久让路、并永久谎报挡不掉;给 30s 重试窗口。
+                appliedMask.push(name)
+              }
+            } catch (error) {
+              // 抛错 ≠ 永久挡不掉:真的还在 → 30 秒内让路并重试;
+              // 名字只是暂时不在(热重载空窗)→ missNames 窗口,别锁死。
+              if (hasTool(cur.actx, name, cur.agent)) {
+                cur.badNames.set(name, Date.now() + 30000)
+              } else {
                 cur.missNames.set(name, Date.now() + 30000)
                 syncStats.transientMisses++
               }
-            }
-            appliedMask = appliedMask.filter((name) => !cur.badNames.has(name))
-            if (!cur.disposers.length) {
               setLastError('遮挡 ' + key + ' 失败: ' + ((error && error.message) || error))
-              console.error('[envdock] 遮挡 ' + key + ' 失败:', error && error.message)
             }
           }
+          appliedMask = appliedMask.filter((name) => !cur.badNames.has(name))
         }
         // 记的是「这个作用域真正生效的」计划:稳态判定要和它对得上,否则每 tick 重试。
         // hideOwn 计划下「本来就不见」也记 own|:现在 scopesSettled 会复检「又可见了就重挂」,
         // 记账不再有「永久漏藏」风险;不记反而会让账本每 tick 对不上(每 tick 完整对账/重挂掩码)。
         cur.denyKey = (hideOwn && (ownHidden || !visibleOwn) ? 'own|' : '') + appliedMask.join(',')
+        cur.visDirty = syncStats.ticks
       }
       const scopeList = [...scopes.values()]
       // 挡不掉的按作用域记,诊断只做并集(别当成全局黑名单用)。
       // 只收「真挡不掉」的名字(badNames);过渡性缺名在 missNames 里等重试,不算挡不掉。
       const bad = new Set()
-      for (const cur of scopeList) for (const name of cur.badNames) bad.add(name)
+      const nowBad = Date.now()
+      for (const cur of scopeList) {
+        for (const [name, until] of cur.badNames) {
+          if (until > nowBad) bad.add(name)
+          else cur.badNames.delete(name)
+        }
+        for (const [name, until] of cur.missNames) {
+          if (until <= nowBad) cur.missNames.delete(name)
+        }
+      }
       syncStats.unrestrictable = [...bad].sort()
       // 「哪些作用域因为看不到我们自己的工具而没遮挡」单独记账:
       // 放 lastError 里会永远粘着(稳态 tick 不会再算一次),面板就会一直报红。
@@ -3100,6 +3256,7 @@ export function apply(ctx, config) {
       // 工具表里已经有同名工具,但不是我们注册的:不认领、也不遮挡宿主(认领了就等于把
       // 模型唯一的命令工具挂在别人的生命周期上)
       if (hasTool(ctx, ENVD_SHELL_NAME)) {
+        rt.retryReason = 'taken'
         setLastError(ENVD_SHELL_NAME + ' 已被其它插件占用,EnvDock 不接管命令工具')
         return false
       }
@@ -3217,6 +3374,9 @@ export function apply(ctx, config) {
      * 签名一致 = 稳态 = 一个注册表动作都不做。
      */
     const reconcile = () => {
+      syncStats.steadyPrev = syncStats.steadyNow
+      // 本轮是否产生了新错误:完整对账成功时,只清「上一轮遗留」的错误,不吞本轮 denyScopes 刚记的。
+      const errorAtStart = syncStats.lastErrorAt
       // steadyNow 只代表「本 tick 的结果」;lastError 不在这里清 ——
       // 「名字被占用」这类持续故障每 tick 都会重报,而恢复成功时由下面的稳态分支清掉。
       syncStats.steadyNow = false
@@ -3238,10 +3398,14 @@ export function apply(ctx, config) {
       syncStats.sandboxScopes = scopeFacts.map(({ cur, gate }) => ({
         id: String(cur.agent.id),
         mode: gate.mode,
-        confined: gate.confined === true,
+        // 三态:null = 策略不可知(不要压成「确定无围栏」)
+        confined: gate.confined === true ? true : gate.confined === false ? false : null,
+        policyKnown: gate.policyKnown === true,
       }))
-      const unconfined = scopeFacts.filter(({ gate }) => gate.confined !== true).length
-      syncStats.sandboxBlocked = cap.capable && scopes.size > 0 && unconfined === 0
+      // 只有在没有任何会话**确定无围栏**时,才算「沙箱挡掉了接管」。
+      // 不可知(null)不算无围栏 —— 与执行层 gateAt 的保守方向保持一致。
+      const anyConfirmedUnconfined = scopeFacts.some(({ gate }) => gate.confined === false)
+      syncStats.sandboxBlocked = cap.capable && scopes.size > 0 && !anyConfirmedUnconfined
       const executor = executorFamily()
       syncStats.executorFamily = executor.family
       syncStats.executorFamilySource = executor.source
@@ -3258,6 +3422,7 @@ export function apply(ctx, config) {
         }
         setLastError(null)
         // 关闭接管之后每个会话都用宿主工具:面板按会话说真话,别留着上一轮「已接管」的终局
+        syncStats.unrestrictable = []
         publishScopeFacts([])
         return
       }
@@ -3288,6 +3453,10 @@ export function apply(ctx, config) {
           } catch {
             defs = []
           }
+          // 本 tick 的可见定义快照:后面 publishScopeFacts 在同 tick 未被遮挡改动时直接复用它,
+          // 避免每 tick 每个会话 ~10 次单点 probe(真实宿主每次 probe 都要重建 view 集合)。
+          cur.defsSet = new Set(defs.map((def) => (def && def.name ? String(def.name) : '')).filter(Boolean))
+          cur.defsStamp = syncStats.ticks
           for (const def of defs) {
             const name = def && def.name ? String(def.name) : ''
             if (!name) continue
@@ -3320,9 +3489,25 @@ export function apply(ctx, config) {
         if (rt.ownNames.has(name)) continue
         rt.seenShells.add(name)
       }
+      // 名字集合有界:插件/预设的名字会轮换,只增不减会让每 tick 的候选遍历与 GET 载荷线性膨胀。
+      const trimSet = (set) => {
+        while (set.size > 64) set.delete(set.values().next().value)
+      }
+      const trimMap = (map) => {
+        while (map.size > 64) map.delete(map.keys().next().value)
+      }
+      trimSet(rt.seenShells)
+      trimMap(rt.learnedShells)
+      for (const cur of scopes.values()) trimSet(cur.hostSeen)
       const allHostNames = new Set()
       for (const cur of scopes.values()) for (const name of cur.hostSeen) allHostNames.add(name)
-      syncStats.runtimeShellTools = [...shellCandidates()]
+      // 只报「真的见过」的名字(learned / seenShells / 某会话 hostSeen):
+      // 从全部内置名起步会把 8 个根本不存在的 shell 说成「已识别」。
+      const knownShells = new Set()
+      for (const name of rt.learnedShells.keys()) knownShells.add(name)
+      for (const name of rt.seenShells) knownShells.add(name)
+      for (const cur of scopes.values()) for (const name of cur.hostSeen) knownShells.add(name)
+      syncStats.runtimeShellTools = [...knownShells]
         .filter((name) => name !== ENVD_SHELL_NAME)
         .map((name) => ({ name, family: familyOf(rt, name) || 'unknown', learned: rt.learnedShells.has(name) }))
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
@@ -3333,12 +3518,39 @@ export function apply(ctx, config) {
         if (known >= 0) return known
         return SHELL_TOOL_ORDER.length + (familyOf(rt, name) === 'bash' ? 0 : 1)
       }
-      const shippedName = [...allHostNames].sort((a, b) => shellRank(a) - shellRank(b))[0] || [...rt.seenShells].sort((a, b) => shellRank(a) - shellRank(b))[0] || null
+      // 「活证」:宿主 shell 必须**此刻真的可见**,或者仍在我们自己的掩码里,才算存在。
+      // 只凭记忆(hostSeen/seenShells 只增不减)会让「宿主工具后来消失了」的机器永远判定
+      // 「与宿主同族 → 不接管」,最后零命令工具且永不恢复。
+      const liveHostNames = new Set()
+      for (const cur of scopes.values()) {
+        for (const name of cur.hostSeen) {
+          try {
+            if (hasTool(cur.actx, name, cur.agent)) liveHostNames.add(name)
+          } catch {}
+        }
+        const masked = String(cur.denyKey || '').replace(/^own\|/, '')
+        if (masked) for (const name of masked.split(',')) if (name) liveHostNames.add(name)
+      }
+      for (const name of rt.seenShells) {
+        try {
+          if (hasTool(ctx, name)) liveHostNames.add(name)
+        } catch {}
+      }
+      const shippedName =
+        [...allHostNames].filter((name) => liveHostNames.has(name)).sort((a, b) => shellRank(a) - shellRank(b))[0] ||
+        [...rt.seenShells].filter((name) => liveHostNames.has(name)).sort((a, b) => shellRank(a) - shellRank(b))[0] ||
+        null
       rt.shippedName = shippedName
+      if (shippedName) rt.everSawHost = true
       const shippedFamily = shippedName ? familyOf(rt, shippedName) : null
       const familyMatches = Boolean(shippedFamily) && shippedFamily === shell.family
-      // 还没看清宿主有什么时先别动,下一 tick 再看(否则会和宿主的命令工具并列,模型看到两个)
-      if (!shippedName && mode !== 'takeover') {
+      // 等待时机:
+      //   · 一个会话都没有 → 注册了也没人用,等;
+      //   · 还没**第一次**见过宿主 shell → 给 60s 宽限,别和晚注册的宿主插件抢(抢了会先建后拆);
+      //   · 见过之后又消失 → 立刻兜底注册 envd_shell,否则模型零命令工具且永不恢复。
+      const waitingFirstSighting =
+        !rt.everSawHost && Date.now() - (rt.startedAt || Date.now()) < 60_000
+      if (!shippedName && mode !== 'takeover' && (scopes.size === 0 || waitingFirstSighting)) {
         if (appliedSig || disposeTool || rt.owns || appliedDenyKey) teardown()
         else markSteady()
         setLastError(null)
@@ -3363,7 +3575,10 @@ export function apply(ctx, config) {
       // 否则会把模型唯一的命令工具一起藏掉(零命令工具)。
       const plan = scopeFacts.map(({ cur, gate }) => {
         if (!takeoverWanted) return { cur, gate, mask: [], hideOwn: false }
-        if (gate.confined === true) return { cur, gate, mask: [], hideOwn: true }
+        // 只有**确定无围栏**才去遮宿主。confined=true(确定围栏)当然藏自己;
+        // confined=null(策略不可知)同样藏自己 —— 执行层 gateAt 会拒绝我们的工具,
+        // 这时再把宿主遮掉就是「零命令工具」。宁可让路,不可两边都不可用。
+        if (gate.confined !== false) return { cur, gate, mask: [], hideOwn: true, confinedUnknown: gate.confined === null }
         // 这个作用域里 envd_shell 不是我们登记的那一份(agent 层同名 / 被别的插件顶掉):
         // 绝不去挡宿主 —— 遮掉的是真工具,留下的却可能是别人的同名工具,等于造零工具。
         const ownHere = hasTool(cur.actx, ENVD_SHELL_NAME, cur.agent)
@@ -3372,7 +3587,12 @@ export function apply(ctx, config) {
         const mask = maskFor(cur, hosts)
         // 挡不掉(restrict 实测失败)或认不出家族的宿主工具只要此刻还在,就必须让路:
         // 认不出家族既教不了语法,也保证不了「我们的工具能替代它」。
-        const stuck = hosts.filter((name) => (cur.badNames.has(name) || !familyOf(rt, name)) && hasTool(cur.actx, name, cur.agent))
+        const now = Date.now()
+        const stuck = hosts.filter((name) => {
+          const until = cur.badNames.get(name)
+          const locked = until !== undefined && until > now
+          return (locked || !familyOf(rt, name)) && hasTool(cur.actx, name, cur.agent)
+        })
         if (stuck.length) return { cur, gate, mask, hideOwn: true, yieldHost: true, stuck }
         return { cur, gate, mask, hideOwn: false }
       })
@@ -3410,6 +3630,7 @@ export function apply(ctx, config) {
 
       if (!takeoverWanted) {
         setLastError(null)
+        syncStats.unrestrictable = []
         if (appliedSig || disposeTool || rt.owns || appliedDenyKey) {
           teardown()
           syncStats.lastSig = sig
@@ -3420,13 +3641,21 @@ export function apply(ctx, config) {
         return
       }
 
-      // 上一次失败还没到重试时间:保持「没有自己的工具」,宿主自带的继续干活
+      // 上一次失败还没到重试时间:保持「没有自己的工具」,宿主自带的继续干活。
+      // 但两种情况下要立刻重试,不能被固定 30s 锁住:
+      //   · 占名的那个工具已经消失(tools/change 会触发对账);
+      //   · 本轮对账是 tools/change 事件驱动的(别的插件刚撤销/发布,状态已变)。
       if (retryAt && Date.now() < retryAt) {
-        markSteady()
-        publishScopeFacts(plan)
-        return
+        const takenFreed = rt.retryReason === 'taken' && !hasTool(ctx, ENVD_SHELL_NAME)
+        if (!takenFreed && !rt.retryNow) {
+          markSteady()
+          publishScopeFacts(plan)
+          return
+        }
       }
       retryAt = 0
+      rt.retryNow = false
+      rt.retryReason = ''
       // lastError 已在 reconcile 开头统一清空(本 tick 的错误本 tick 报,不跨 tick 粘着)
 
       // ── 先建后拆:新工具没就位(且可见)之前,一个东西都不拆 ──
@@ -3460,6 +3689,8 @@ export function apply(ctx, config) {
       denyScopes(plan, [...allHostNames])
       // 遮挡已经落地,现在才把逐会话终局端给面板/API(早一步就是谎报)
       publishScopeFacts(plan)
+      // 完整对账成功:上一轮遗留的错误已经恢复,清掉;本轮 denyScopes 刚记的错误保留。
+      if (syncStats.lastErrorAt === errorAtStart) setLastError(null)
       appliedOwned = true
       appliedSig = sig
       appliedDenyKey = denyKey
@@ -3515,9 +3746,13 @@ export function apply(ctx, config) {
       const timer = setTimeout(() => {
         scopeTimers.delete(timer)
         pendingSync = null
+        // 事件驱动的对账允许跳过注册失败退避(别的插件可能刚释放了名字)
+        rt.retryNow = true
         try {
           sync()
-        } catch {}
+        } finally {
+          rt.retryNow = false
+        }
       }, 40)
       pendingSync = timer
       scopeTimers.add(timer)
@@ -3662,23 +3897,25 @@ export function apply(ctx, config) {
   ctx.inject(['webServer'], (webCtx) => {
     const webServer = webCtx.webServer
     if (!webServer || typeof webServer.register !== 'function') return
+    const TOO_LARGE = Symbol('too-large')
     const readBody = (req) =>
       new Promise((resolve) => {
         const chunks = []
         let size = 0
+        let tooLarge = false
         req.on('data', (chunk) => {
           size += chunk.length
           if (size > 1_000_000) {
-            try {
-              req.destroy()
-            } catch {}
-            resolve('')
+            // 超限:**先把请求体读完再回 413**。直接 destroy 会让客户端看到 ECONNRESET,
+            // 既不是 413 也不是可诊断的错误。
+            tooLarge = true
+            chunks.length = 0
             return
           }
-          chunks.push(chunk)
+          if (!tooLarge) chunks.push(chunk)
         })
-        req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
-        req.on('error', () => resolve(''))
+        req.on('end', () => resolve(tooLarge ? TOO_LARGE : Buffer.concat(chunks).toString('utf8')))
+        req.on('error', () => resolve(tooLarge ? TOO_LARGE : ''))
       })
     const json = (res, obj, status = 200) => {
       const body = JSON.stringify(obj)
@@ -3724,7 +3961,8 @@ export function apply(ctx, config) {
                   // 沙箱分两层给面板:能力位(执行器会不会围栏)/ 部署默认档 / 逐会话有效策略
                   sandbox: {
                     capable: apiGate.capable,
-                    defaultMode: apiGate.mode,
+                    // 部署默认档来自执行器能力位,不是「本会话策略」(策略不可知时 apiGate.mode 为空)
+                    defaultMode: syncStats.sandboxDefault || apiGate.mode,
                     policyKnown: apiGate.policyKnown !== false,
                     delegate: apiGate.delegate === true,
                     scopes: Array.isArray(syncStats.sandboxScopes) ? syncStats.sandboxScopes : [],
@@ -3772,11 +4010,36 @@ export function apply(ctx, config) {
                 json(res, { ok: false, error: 'method not allowed' }, 405)
                 return
               }
-              // 跨站写入防护:面板 API 只应接受本机同源调用。
-              // 任意网页都能发 text/plain 的简单 POST(不触发 CORS 预检),其 Origin 是外部站点;
-              // 只靠 remoteAddress 会把这类请求当成 loopback。这里再按 Origin / Sec-Fetch-Site 兜一层。
+              // ── 写操作鉴权 ──
+              // 先读 body:判定「是不是 allowLan 开关」需要 body.op;也才能对超限体回 413。
               const reqHeaders = req.headers || {}
-              if (String(reqHeaders['sec-fetch-site'] || '') === 'cross-site') {
+              const remoteLoopback = isLoopback(req)
+              const lanAllowed = allowLan()
+              const raw = await readBody(req)
+              if (raw === TOO_LARGE) {
+                json(res, { ok: false, error: '请求体过大' }, 413)
+                return
+              }
+              let body = {}
+              try {
+                body = JSON.parse(raw || '{}')
+              } catch {
+                json(res, { ok: false, error: 'bad json' }, 400)
+                return
+              }
+              if (!body || typeof body !== 'object' || Array.isArray(body)) {
+                json(res, { ok: false, error: 'bad json' }, 400)
+                return
+              }
+              const op = String(body.op || '')
+              const bodyKeys = Object.keys(body)
+              // 唯一允许非本机发起的写:把「允许局域网访问」**关掉**。
+              // 打开它、以及其它任何写(终端/版本/自定义工具/自定义终端 argv)都只许本机 ——
+              // 否则局域网里就能改默认终端参数,等同把命令注入面开到局域网。
+              const allowLanToggleOff =
+                op === 'setOption' && body.allowLan === false && bodyKeys.every((key) => key === 'op' || key === 'allowLan')
+              const secFetchSite = String(reqHeaders['sec-fetch-site'] || '').toLowerCase()
+              if (secFetchSite === 'cross-site') {
                 json(res, { ok: false, error: '跨站请求被拒绝(面板 API 只接受本机同源调用)' }, 403)
                 return
               }
@@ -3789,34 +4052,29 @@ export function apply(ctx, config) {
                   return 'invalid'
                 }
               })()
-              const originOk =
-                !originHost ||
-                originHost === '127.0.0.1' ||
-                originHost === 'localhost' ||
-                originHost === '::1' ||
-                originHost.startsWith('127.')
-              if (!originOk && !allowLan()) {
-                json(res, { ok: false, error: '跨站请求被拒绝(面板 API 只接受本机同源调用)' }, 403)
-                return
-              }
-              const raw = await readBody(req)
-              let body = {}
-              try {
-                body = JSON.parse(raw || '{}')
-              } catch {
-                json(res, { ok: false, error: 'bad json' }, 400)
-                return
-              }
-              const op = String(body.op || '')
-              if (!loopback && !allowLan()) {
-                // 只放行「打开局域网访问」这一个动作:否则从局域网打开面板的人永远点不动这个开关
-                // (面板提示去打开它,而请求本身被 403 掉,死循环)。
-                const keys = Object.keys(body)
-                const toggleOnly = op === 'setOption' && keys.every((k) => k === 'op' || k === 'allowLan')
-                if (!toggleOnly) {
-                  json(res, { ok: false, error: '非本机请求被拒绝(请在运行 dsh 的这台机器上的 EnvDock 面板打开「允许局域网访问」)' }, 403)
+              if (!remoteLoopback) {
+                if (!allowLanToggleOff) {
+                  json(
+                    res,
+                    {
+                      ok: false,
+                      error: lanAllowed
+                        ? '局域网只能读面板;写操作请在本机进行'
+                        : '非本机请求被拒绝(请在运行 dsh 的这台机器上的 EnvDock 面板打开「允许局域网访问」)',
+                    },
+                    403,
+                  )
                   return
                 }
+                // 关闭开关本身必须同源(Origin 与 Host 一致),否则任意网页都能替用户关掉
+                const reqHost = String(reqHeaders.host || '').replace(/:\d+$/, '').toLowerCase()
+                if (!originHost || originHost !== reqHost) {
+                  json(res, { ok: false, error: '跨站请求被拒绝(面板 API 只接受同源调用)' }, 403)
+                  return
+                }
+              } else if (originHost && !isLoopbackHost(originHost)) {
+                json(res, { ok: false, error: '跨站请求被拒绝(面板 API 只接受本机同源调用)' }, 403)
+                return
               }
               if (op === 'refresh') {
                 const detection = await getDetection(true)
@@ -3878,7 +4136,10 @@ export function apply(ctx, config) {
                   json(res, { ok: false, error: '路径不在候选里: ' + target }, 400)
                   return
                 }
-                const selections = { ...state.selections }
+                // await 期间别的写可能已经落地:必须用**最新** state 的 selections 合并,
+                // 否则两次并发 setTool 后写者会覆盖先写者(丢更新)。
+                const fresh = getState()
+                const selections = { ...fresh.selections }
                 if (target) selections[key] = target
                 else delete selections[key]
                 const next = writeState({ selections })
@@ -3958,8 +4219,14 @@ export function apply(ctx, config) {
     )
   })
 
-  // 预热:不阻塞宿主启动
-  setTimeout(() => {
-    getDetection(false).catch((error) => console.error('[envdock] 首次探测失败:', error && error.message))
-  }, 300)
+  // 预热:不阻塞宿主启动。定时器挂到 effect 上,卸载时清掉(以前裸 setTimeout 会在卸载后跑一次)。
+  ctx.effect(
+    () => {
+      const warm = setTimeout(() => {
+        getDetection(false).catch((error) => console.error('[envdock] 首次探测失败:', error && error.message))
+      }, 300)
+      return () => clearTimeout(warm)
+    },
+    'envdock warmup',
+  )
 }

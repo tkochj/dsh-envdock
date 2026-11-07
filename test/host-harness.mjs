@@ -23,18 +23,63 @@ import { EventEmitter } from 'node:events'
 const args = new Set(process.argv.slice(2))
 const TIMING = args.has('--timing') || args.has('--verbose')
 
+// ── 测试自足:临时 DSH_HOME / 桩 bin / 清理钩子 ──
+// 换一台没装 node/npm/python/git 的机器也要能跑:缺哪个就在系统临时目录建个空文件桩,
+// 版本输出本来就由假 subprocess 的 CANNED 提供,真实 exe 内容不影响判定。
+const cleanupDirs = []
+const cleanupTemp = () => {
+  for (const dir of cleanupDirs.splice(0)) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {}
+  }
+}
+// 失败退出(process.exit(1))也要清掉临时 DSH_HOME 与桩目录,别在 %TEMP% 里越堆越多
+process.on('exit', cleanupTemp)
+process.on('SIGINT', () => {
+  cleanupTemp()
+  process.exit(130)
+})
+
 const home = mkdtempSync(join(tmpdir(), 'envdock-home-'))
+cleanupDirs.push(home)
 process.env.DSH_HOME = home
 
+const pathDirs = () => String(process.env.PATH || process.env.Path || '').split(';').filter(Boolean)
+const hasOnPath = (file) =>
+  pathDirs().some((dir) => {
+    try {
+      return existsSync(join(dir, file))
+    } catch {
+      return false
+    }
+  })
 // 夹具的断言口径是「这台机器只有系统自带工具链」:装了真实版本管理器(nvm/pyenv/fnm/conda)
 // 后,它们的 list 命令会在每次探测时起子进程,「刷新不重跑版本探测」这类断言就会被机器环境影响。
-// 这里把本机额外的工具链目录从 PATH 里摘掉(PATH 仍保留系统工具),让夹具与真机工具库解耦。
-process.env.PATH = String(process.env.PATH || process.env.Path || '')
-  .split(';')
-  .filter((dir) => dir && !/[\\/]tools[\\/](pwsh7|fnm|nvm)([\\/]|$)/i.test(dir) && !/pyenv|miniconda|anaconda/i.test(dir))
-  .join(';')
+// 这里把版本管理器目录从 PATH 里摘掉(PATH 仍保留系统工具),让夹具与真机工具库解耦。
+// 排查问题时可设 ENVDOCK_FULL_PATH=1 跳过过滤(那会暴露本机装了哪些工具链)。
+if (process.env.ENVDOCK_FULL_PATH !== '1') {
+  process.env.PATH = pathDirs()
+    .filter((dir) => !/(nvm|fnm|pyenv|conda|miniconda|anaconda)/i.test(dir))
+    .join(';')
+}
+// node / npm / pnpm / python / git 是断言里用到的 CATALOG 工具:PATH 上没有就建空文件桩。
+const PATH_STUB_NAMES = ['node.exe', 'npm.cmd', 'pnpm.cmd', 'python.exe', 'git.exe']
+const missingOnPath = PATH_STUB_NAMES.filter((file) => !hasOnPath(file))
+if (missingOnPath.length) {
+  const stubDir = mkdtempSync(join(tmpdir(), 'envdock-stub-bin-'))
+  cleanupDirs.push(stubDir)
+  for (const file of missingOnPath) {
+    try {
+      writeFileSync(join(stubDir, file), '', 'utf8')
+    } catch {}
+  }
+  process.env.PATH = stubDir + ';' + process.env.PATH
+}
+
 
 const failures = []
+const skips = []
 const t0 = Date.now()
 let last = Date.now()
 function phase(name) {
@@ -49,6 +94,11 @@ function check(name, cond, detail) {
     failures.push(name + (detail ? ' → ' + detail : ''))
     console.log('FAIL ' + name + (detail ? ' → ' + detail : ''))
   }
+}
+/** 本机环境不满足(没有该终端等)时明确 SKIP,不伪造 ok。 */
+function skip(name, reason) {
+  skips.push(name + (reason ? ' → ' + reason : ''))
+  console.log('SKIP ' + name + (reason ? ' → ' + reason : ''))
 }
 
 // ───────────────────────────────────── subprocess 服务替身 ──
@@ -159,7 +209,7 @@ function fakeSandboxPolicy(fallback, bySession = {}) {
  */
 function fakeSandboxedShell({ mode = 'workspace-write', stdout = 'host-ran\n', denied = false, className = '', runnerFailed = false } = {}) {
   const calls = { resolved: [], executed: [] }
-  const state = { fail: '', runnerFailed, denied }
+  const state = { fail: '', runnerFailed, denied, aborted: false, emptyResult: false }
   const shell = {
     calls,
     state,
@@ -175,11 +225,12 @@ function fakeSandboxedShell({ mode = 'workspace-write', stdout = 'host-ran\n', d
       return {
         result: async () => {
           if (state.fail === 'result') throw new Error('result failed (injected)')
+          if (state.emptyResult) return null
           return {
             exitCode: 0,
             signal: null,
             timedOut: false,
-            aborted: false,
+            aborted: state.aborted,
             timeoutMs: spec.timeoutMs,
             stdout: { text: stdout, truncated: false },
             stderr: { text: '', truncated: false },
@@ -205,6 +256,8 @@ function makeHarness(options = {}) {
     agents: [],
     /** tools.guard 的替身:返回拒绝理由的第一条(真机语义:任一 guard 拒绝即拒绝) */
     guards: [],
+    /** 每一次 restrict 的真实尝试(含抛错的):测重试窗口/过期重试用,别靠副作用猜 */
+    restrictCalls: [],
   }
   const denyOf = (scopeId) => {
     if (!state.deny.has(scopeId)) state.deny.set(scopeId, new Set())
@@ -242,6 +295,7 @@ function makeHarness(options = {}) {
     restrict(spec) {
       const deny = (spec && spec.deny) || []
       if (!deny.length) throw new Error('empty restriction')
+      state.restrictCalls.push(deny.slice())
       const set = denyOf(scopeId)
       const blocked = options.unrestrictable || []
       // 真机坑:agent 自己层注册的同名工具,restrict 返回成功却挡不住。
@@ -425,10 +479,11 @@ function makeHarness(options = {}) {
 }
 
 // ───────────────────────────────────── HTTP 请求替身 ──
-function fakeReq({ method = 'GET', body = '', remoteAddress = '127.0.0.1' } = {}) {
+function fakeReq({ method = 'GET', body = '', remoteAddress = '127.0.0.1', headers = null } = {}) {
   const req = new EventEmitter()
   req.method = method
   req.socket = { remoteAddress, address: () => ({ address: remoteAddress }) }
+  req.headers = headers || {}
   req.rawHeaders = []
   if (body) {
     const buf = Buffer.from(body)
@@ -456,6 +511,58 @@ function fakeRes() {
     },
   }
 }
+/** 取出宿主包装串里的单引号参数(包装器把每个参数逐个单引号包起来)。 */
+const quotedArgs = (command) => {
+  const text = String(command || '')
+  const out = []
+  let i = 0
+  while (i < text.length) {
+    if (text[i] !== "'") {
+      i++
+      continue
+    }
+    let j = i + 1
+    let value = ''
+    while (j < text.length) {
+      if (text[j] === "'") {
+        // PowerShell 的单引号转义:内部单引号写两遍
+        if (text[j + 1] === "'" && text[j + 2] !== "'") {
+          value += "'"
+          j += 2
+          continue
+        }
+        break
+      }
+      value += text[j]
+      j++
+    }
+    out.push(value)
+    i = j + 1
+  }
+  return out
+}
+/** PowerShell 目标:-EncodedCommand 的 base64(UTF-16LE)还原成命令原文。 */
+const decodeEncodedCommand = (command) => {
+  for (const arg of quotedArgs(command)) {
+    if (!/^[A-Za-z0-9+/=]+$/.test(arg) || arg.length < 16) continue
+    try {
+      const text = Buffer.from(arg, 'base64').toString('utf16le')
+      if (text && text.trim()) return text
+    } catch {}
+  }
+  return ''
+}
+/** bash 目标:env ENVD_CMD 存的是用户命令的 base64;解码回来核对。 */
+const decodeBashPayload = (spec) => {
+  const raw = spec && spec.env && typeof spec.env.ENVD_CMD === 'string' ? spec.env.ENVD_CMD : ''
+  if (!raw) return ''
+  try {
+    return Buffer.from(raw, 'base64').toString('utf8')
+  } catch {
+    return ''
+  }
+}
+
 
 /** 探测要读系统 PATH(注册表),这两次 reg.exe 不等于「版本探测」,断言里要分开算。 */
 const isReg = (call) => String((call.argv || [])[0] || '').split(/[\\/]/).pop().toLowerCase() === 'reg.exe'
@@ -492,7 +599,8 @@ async function pollSnapshot(h, pred, timeoutMs = 5000) {
  * 模块级探测缓存是进程共享的(生产里一个 dsh 进程只有一个 EnvDock),
  * 所以同一进程里起多个 fixture 时,靠一次状态写入把缓存打掉(invalidateDetection)。
  */
-const freshDetection = (h) => post(h, { op: 'setOption', injectBrief: true })
+// 探测缓存现在只被「影响探测的写入」作废,测试要新快照就直接 force 刷新
+const freshDetection = (h) => post(h, { op: 'refresh' })
 
 const waitForBrief = async (h, ms = 5000) => {
   const started = Date.now()
@@ -592,11 +700,26 @@ const lanDenied = await callApi(h, { remoteAddress: '192.168.1.9' })
 check('非 loopback GET → 403', lanDenied.status === 403, String(lanDenied.status))
 const lanDeniedOp = await post(h, { op: 'refresh' }, { remoteAddress: '192.168.1.9' })
 check('非 loopback 的操作 → 403', lanDeniedOp.status === 403, String(lanDeniedOp.status))
-const lanAllowed = await post(h, { op: 'setOption', allowLan: true }, { remoteAddress: '192.168.1.9' })
-check('局域网里可以打开「允许局域网访问」', lanAllowed.status === 200 && lanAllowed.json.ok === true, String(lanAllowed.status))
-const lanNow = await callApi(h, { remoteAddress: '192.168.1.9' })
-check('打开后局域网 GET 放行', lanNow.status === 200, String(lanNow.status))
-await post(h, { op: 'setOption', allowLan: false })
+// 安全口径:局域网**不能**打开 allowLan(打开只许本机),打开后也只能读;
+// 唯一允许的局域网写是「把 allowLan 关掉」,且必须同源。
+const lanEnableByLan = await post(h, { op: 'setOption', allowLan: true }, { remoteAddress: '192.168.1.9' })
+check('局域网不能打开「允许局域网访问」(只许本机)', lanEnableByLan.status === 403, String(lanEnableByLan.status))
+const lanEnableLocal = await post(h, { op: 'setOption', allowLan: true })
+check('本机可以打开 allowLan', lanEnableLocal.status === 200 && lanEnableLocal.json.ok === true, String(lanEnableLocal.status))
+const lanRead = await callApi(h, { remoteAddress: '192.168.1.9' })
+check('打开后局域网 GET 放行(只读)', lanRead.status === 200, String(lanRead.status))
+const lanWrite = await post(h, { op: 'setShell', key: 'cmd' }, { remoteAddress: '192.168.1.9' })
+check('局域网写操作一律 403(即使 allowLan 打开)', lanWrite.status === 403, String(lanWrite.status))
+const lanToggleOffCrossSite = await post(h, { op: 'setOption', allowLan: false }, {
+  remoteAddress: '192.168.1.9',
+  headers: { origin: 'http://evil.example', host: '192.168.1.9:3080' },
+})
+check('局域网关 allowLan 必须同源(跨站 Origin 被拒)', lanToggleOffCrossSite.status === 403, String(lanToggleOffCrossSite.status))
+const lanToggleOff = await post(h, { op: 'setOption', allowLan: false }, {
+  remoteAddress: '192.168.1.9',
+  headers: { origin: 'http://192.168.1.9:3080', host: '192.168.1.9:3080' },
+})
+check('局域网可以关掉 allowLan(同源)', lanToggleOff.status === 200 && lanToggleOff.json.ok === true, String(lanToggleOff.status))
 const lanDeniedAgain = await callApi(h, { remoteAddress: '192.168.1.9' })
 check('关掉 allowLan 后又拒绝', lanDeniedAgain.status === 403, String(lanDeniedAgain.status))
 
@@ -622,6 +745,33 @@ if (nodeCand) {
   check('setTool 未知工具 400', setToolUnknown.status === 400)
   await post(h, { op: 'setTool', key: 'node', path: '' })
 }
+
+// 并发 setTool 不能丢更新:两个请求都在 await 探测,写回时若拿旧 state 覆盖就丢一个
+const pyCand = (py.versions || [])[0]
+if (nodeCand && pyCand) {
+  const [rNode, rPy] = await Promise.all([
+    post(h, { op: 'setTool', key: 'node', path: nodeCand.path }),
+    post(h, { op: 'setTool', key: 'python', path: pyCand.path }),
+  ])
+  const selAfterConcurrent = (await callApi(h)).json.state.selections || {}
+  check(
+    '并发 setTool 不丢更新(两个选择都在)',
+    rNode.status === 200 && rPy.status === 200 && selAfterConcurrent.node === nodeCand.path && selAfterConcurrent.python === pyCand.path,
+    JSON.stringify({ statuses: [rNode.status, rPy.status], selections: selAfterConcurrent }),
+  )
+  await post(h, { op: 'setTool', key: 'node', path: '' })
+  await post(h, { op: 'setTool', key: 'python', path: '' })
+} else {
+  skip('并发 setTool 不丢更新', '没有可用的 node / python 候选')
+}
+
+// API 安全(审校新增):超大 body 必须是 413(不是 ECONNRESET/bad json);Origin 严格回环
+const hugeBody = await callApi(h, { method: 'POST', body: 'x'.repeat(1_100_000) })
+check('>1MB 请求体 → 413(不是 ECONNRESET / bad json)', hugeBody.status === 413, 'status=' + hugeBody.status + ' raw=' + String(hugeBody.raw).slice(0, 120))
+const evilOrigin = await post(h, { op: 'setOption', injectBrief: true }, { headers: { origin: 'http://127.0.0.1.evil.example:3080' } })
+check('loopback 但 Origin 是 127.0.0.1.evil.example → 403(严格回环,不做前缀匹配)', evilOrigin.status === 403, String(evilOrigin.status))
+const goodOrigin = await post(h, { op: 'setOption', injectBrief: true }, { headers: { origin: 'http://127.0.0.1:3080' } })
+check('Origin http://127.0.0.1:3080 → 放行(同源)', goodOrigin.status === 200 && goodOrigin.json.ok === true, String(goodOrigin.status))
 
 // 自定义工具:写入后必须立刻能看见(缓存失效)
 before = h.subprocess.calls.length
@@ -688,10 +838,15 @@ if (pyTool && pyTool.pyLauncher) {
   const resolvePy = await envd.execute({ action: 'resolve', name: 'py' })
   check('envd resolve py(py 是 python 的别名)', resolvePy.ok === true && resolvePy.text.includes('py 启动器'), resolvePy.text.slice(0, 180))
 } else {
-  check('本机 PATH 上没有 py.exe,启动器断言跳过', true, '')
+  skip('py 启动器断言', '本机 PATH 上没有 py.exe')
 }
-const resolveBash = await envd.execute({ action: 'resolve', name: 'bash' })
-check('envd resolve bash(终端)', resolveBash.ok === true, resolveBash.text.slice(0, 120))
+const hasBashTerminal = (got.json.terminals || []).some((t) => t.key === 'bash')
+if (hasBashTerminal) {
+  const resolveBash = await envd.execute({ action: 'resolve', name: 'bash' })
+  check('envd resolve bash(终端)', resolveBash.ok === true, resolveBash.text.slice(0, 120))
+} else {
+  skip('envd resolve bash(终端)', '本机没有检测到 bash 终端')
+}
 const resolveNope = await envd.execute({ action: 'resolve', name: 'zzz' })
 check('envd resolve 未知名字 ok:false', resolveNope.ok === false)
 const resolveEmpty = await envd.execute({ action: 'resolve' })
@@ -1041,11 +1196,29 @@ check(
   Boolean(hostShell.calls.executed[0].sandboxPolicy) && hostShell.calls.executed[0].sandboxPolicy.mode === 'workspace-write',
   JSON.stringify(hostShell.calls.executed[0].sandboxPolicy),
 )
-check(
-  '命令经环境变量 ENVD_CMD 传入,没有拼进命令字符串',
-  hostShell.calls.executed[0].env.ENVD_CMD === 'echo delegated' && !String(hostShell.calls.executed[0].command).includes('echo delegated'),
-  String(hostShell.calls.executed[0].command),
-)
+// 委托包装器按**目标终端族**安全编码(审校后的新约定):
+//   目标 bash → env ENVD_CMD = 用户命令的 base64,目标端 `base64 -d | bash -s` 解码;
+//   目标 PowerShell → -EncodedCommand(UTF-16LE base64),命令行里没有用户原文;
+//   目标 cmd/wsl/custom → 拒绝委托。以下三条断言按目标族各自核对。
+const delegateTargetFamily = (await callApi(hDelegate)).json.shell.family
+const dSpec = hostShell.calls.executed[0]
+check('委托包装器:命令行里不含用户原文(不会被引号吞噬)', !String(dSpec.command).includes('echo delegated'), String(dSpec.command).slice(0, 200))
+if (delegateTargetFamily === 'bash') {
+  check(
+    'bash 目标:ENVD_CMD 是 base64 载荷,目标端 base64 -d | bash -s 解码',
+    String(dSpec.command).includes('base64 -d | bash -s') && decodeBashPayload(dSpec) === 'echo delegated',
+    JSON.stringify({ command: String(dSpec.command).slice(0, 200), payload: decodeBashPayload(dSpec) }),
+  )
+} else if (delegateTargetFamily === 'powershell') {
+  const dDecoded = decodeEncodedCommand(dSpec.command)
+  check(
+    'PowerShell 目标:-EncodedCommand(UTF-16LE base64)且不含 -lc',
+    String(dSpec.command).includes('-EncodedCommand') && !String(dSpec.command).includes('-lc') && dDecoded.includes('echo delegated'),
+    JSON.stringify({ command: String(dSpec.command).slice(0, 200), decoded: dDecoded }),
+  )
+} else {
+  skip('bash/PowerShell 目标委托包装器断言', '默认终端族=' + delegateTargetFamily + '(cmd/wsl/custom 会拒绝委托)')
+}
 check(
   '委托执行的输出回来了(带沙箱事实)',
   delegated.ok === true && delegated.text.includes('delegated-ok') && delegated.text.includes('[sandbox]'),
@@ -1187,7 +1360,7 @@ try {
   const launcherCalls = () => hPyFail.subprocess.calls.filter((c) => (c.argv || [])[1] === '-0p').length
   const launcherFirst = launcherCalls()
   check('py -0p 探测执行且失败(夹具断言)', launcherFirst >= 1, String(launcherFirst))
-  await post(hPyFail, { op: 'setOption', injectBrief: true }) // 作废探测缓存
+  await post(hPyFail, { op: 'refresh' }) // 强制重扫(选项写入不再作废探测缓存)
   await callApi(hPyFail) // 非 force 探测:失败结果不许被缓存,必须重试
   const launcherSecond = launcherCalls()
   check('py -0p 失败不缓存(下一次探测仍会重试)', launcherSecond > launcherFirst, launcherFirst + ' → ' + launcherSecond)
@@ -1238,7 +1411,7 @@ try {
       (snap6.json.tools || []).map((t) => t.key).join(','),
     )
   } else {
-    check('系统 PATH 新加目录里的工具立刻能扫到', true, '机器上 CATALOG 里的工具都装了,跳过')
+    skip('系统 PATH 新加目录里的工具立刻能扫到', '机器上 CATALOG 里的工具都装了,没有空槽可注入')
   }
   check('上一个 fixture 的僵尸目录不会漏过来', (snap6.json.pathInfo.missing || []).every((d) => d !== ghostDir), (snap6.json.pathInfo.missing || []).join('; '))
 
@@ -1438,6 +1611,16 @@ check(
   steadyAfter.ownHides === steadyBefore.ownHides && steadyAfter.hostDenyApplies === steadyBefore.hostDenyApplies,
   JSON.stringify({ ownHides: [steadyBefore.ownHides, steadyAfter.ownHides], hostDenyApplies: [steadyBefore.hostDenyApplies, steadyAfter.hostDenyApplies] }),
 )
+check(
+  '连续稳态里 steadySinceAt 保持不变(面板才算得出「已经稳态多久」)',
+  steadyAfter.steadySinceAt === steadyBefore.steadySinceAt && steadyBefore.steadySinceAt > 0,
+  JSON.stringify({ before: steadyBefore.steadySinceAt, after: steadyAfter.steadySinceAt }),
+)
+check(
+  '计数恒等式:denyApplies === ownHides + hostDenyApplies(藏自己 / 挡宿主分开记账)',
+  steadyAfter.denyApplies === steadyAfter.ownHides + steadyAfter.hostDenyApplies,
+  JSON.stringify({ denyApplies: steadyAfter.denyApplies, ownHides: steadyAfter.ownHides, hostDenyApplies: steadyAfter.hostDenyApplies }),
+)
 check('稳态 20 个 tick 里可见性完全不变', visibleCommands('agent-a').join(',') === visibleBefore, visibleBefore + ' → ' + visibleCommands('agent-a').join(','))
 check('稳态 tick 被记账(steadyTicks 在涨)', steadyAfter.steadyTicks > steadyBefore.steadyTicks, steadyBefore.steadyTicks + ' → ' + steadyAfter.steadyTicks)
 check('稳态没有留下错误', !steadyAfter.lastError, String(steadyAfter.lastError))
@@ -1498,6 +1681,18 @@ check(
   Boolean(h9a.syncStats.lastError) && Boolean(h9b.syncStats.lastError) && h9b.syncStats.lastErrorAt > 0,
   JSON.stringify({ lastError: h9b.syncStats.lastError, lastErrorAt: h9b.syncStats.lastErrorAt }),
 )
+// 注册失败退避(30s)必须被 tools/change 提前解除:占名方一释放就重试,不能干等退避结束。
+const h9FreeAt = Date.now()
+h9.state.toolDefs.delete('envd_shell')
+h9.emit('tools/change')
+const h9revived = await pollSnapshot(h9, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true, 6000)
+check(
+  '占名释放 + tools/change → 立刻接管(不等 30s 退避)',
+  Boolean(h9revived.commandTool && h9revived.commandTool.takeover === true) && h9.state.toolDefs.has('envd_shell'),
+  JSON.stringify(h9revived.commandTool),
+)
+check('事件解除退避用了多久(<5s,远小于 30s)', Date.now() - h9FreeAt < 5000, String(Date.now() - h9FreeAt))
+check('恢复接管后 lastError 被清空', !h9revived.syncStats.lastError, String(h9revived.syncStats.lastError))
 check('固定名被占用时不注册自己的工具', h9snap.syncStats.registers === 0, String(h9snap.syncStats.registers))
 
 // ── S2:卸载之后不许再往注册表里塞东西 ──
@@ -2038,15 +2233,29 @@ failShell.state.runnerFailed = false
 const errOk = await errTool.execute({ command: 'echo err-ok', cwd: process.cwd() }, errExec)
 const e6 = await errStats()
 const errSpec = failShell.calls.executed[failShell.calls.executed.length - 1]
+const errTargetFamily = (await callApi(hDelegErr)).json.shell.family
+const errDecoded = errTargetFamily === 'powershell' ? decodeEncodedCommand(errSpec.command) : ''
+const errPayload = decodeBashPayload(errSpec)
 check(
-  '成功委托:ok:true,包装器按执行器族写(PowerShell:$env:ENVD_CMD,不是 -lc)',
-  errOk.ok === true &&
-    String(errSpec.command).includes('$env:ENVD_CMD') &&
-    !String(errSpec.command).includes('-lc') &&
-    errSpec.env.ENVD_CMD === 'echo err-ok' &&
-    !String(errSpec.command).includes('echo err-ok'),
-  JSON.stringify({ text: String(errOk.text).slice(0, 120), command: String(errSpec && errSpec.command).slice(0, 200) }),
+  '成功委托:命令行里不含用户原文(安全包装,不是拼字符串)',
+  errOk.ok === true && !String(errSpec.command).includes('echo err-ok'),
+  JSON.stringify({ text: String(errOk.text).slice(0, 120), command: String(errSpec && errSpec.command).slice(0, 220) }),
 )
+if (errTargetFamily === 'powershell') {
+  check(
+    'PowerShell 目标:-EncodedCommand(UTF-16LE base64),不用 -lc / ENVD_CMD',
+    String(errSpec.command).includes('-EncodedCommand') && !String(errSpec.command).includes('-lc') && errDecoded.includes('echo err-ok') && !errSpec.env.ENVD_CMD,
+    JSON.stringify({ command: String(errSpec.command).slice(0, 220), decoded: errDecoded }),
+  )
+} else if (errTargetFamily === 'bash') {
+  check(
+    'bash 目标:ENVD_CMD 是 base64 载荷,目标端 base64 -d | bash -s 解码',
+    String(errSpec.command).includes('base64 -d | bash -s') && errPayload === 'echo err-ok',
+    JSON.stringify({ command: String(errSpec.command).slice(0, 220), payload: errPayload }),
+  )
+} else {
+  skip('委托成功包装器断言', '默认终端族=' + errTargetFamily)
+}
 check(
   '委托请求带 dshEnv(官方 shell 工具同款,subprocess 不会剥掉 DSH_* 快照)',
   Boolean(errSpec.dshEnv) && errSpec.dshEnv.DSH_SESSION === 'err-session',
@@ -2056,6 +2265,99 @@ check(
   '最终计数自洽:delegateTries 6 / delegateFailures 4 / delegateCalls 2',
   e6.delegateTries === 6 && e6.delegateFailures === 4 && e6.delegateCalls === 2,
   JSON.stringify({ tries: e6.delegateTries, failures: e6.delegateFailures, calls: e6.delegateCalls }),
+)
+// result 空(执行器坏了)不能算成功执行:delegateFailures+1、delegateCalls 不增
+const e7 = await errStats()
+failShell.state.emptyResult = true
+const errEmpty = await errTool.execute({ command: 'echo err-empty', cwd: process.cwd() }, errExec)
+const e8 = await errStats()
+failShell.state.emptyResult = false
+check(
+  '执行器返回空结果 → ok:false + delegateFailures+1,不算 delegateCalls',
+  errEmpty.ok === false && errEmpty.text.includes('空结果') && e8.delegateFailures === e7.delegateFailures + 1 && e8.delegateCalls === e7.delegateCalls,
+  JSON.stringify({ text: String(errEmpty.text).slice(0, 140), failures: [e7.delegateFailures, e8.delegateFailures], calls: [e7.delegateCalls, e8.delegateCalls] }),
+)
+// aborted(取消)也不能回 ok:true(否则模型以为命令跑完了)
+failShell.state.aborted = true
+const errAborted = await errTool.execute({ command: 'echo err-aborted', cwd: process.cwd() }, errExec)
+const e9 = await errStats()
+failShell.state.aborted = false
+check(
+  '取消(aborted)→ ok:false 且文案带 [aborted]',
+  errAborted.ok === false && errAborted.text.includes('[aborted]') && e9.delegateCalls === e8.delegateCalls + 1,
+  JSON.stringify({ text: String(errAborted.text).slice(0, 160), calls: [e8.delegateCalls, e9.delegateCalls] }),
+)
+// 目标终端 cmd:不再拼包装串,直接拒绝(delegateRefusals 单独记账)
+const cmdTermKey = ((await callApi(hDelegErr)).json.terminals || []).find((t) => t.key === 'cmd') ? 'cmd' : ''
+if (cmdTermKey) {
+  await settleShell(hDelegErr, cmdTermKey)
+  const e10 = await errStats()
+  const errCmdTarget = await errTool.execute({ command: 'echo err-cmd', cwd: process.cwd() }, errExec)
+  const e11 = await errStats()
+  check(
+    '目标终端 cmd → 拒绝委托(文案含「不支持安全委托执行」,delegateRefusals+1)',
+    errCmdTarget.ok === false &&
+      errCmdTarget.text.includes('不支持安全委托执行') &&
+      e11.delegateRefusals === e10.delegateRefusals + 1 &&
+      e11.delegateTries === e10.delegateTries + 1 &&
+      e11.delegateFailures === e10.delegateFailures,
+    JSON.stringify({ text: String(errCmdTarget.text).slice(0, 200), refusals: [e10.delegateRefusals, e11.delegateRefusals] }),
+  )
+} else {
+  skip('目标终端 cmd 拒绝委托', '本机没有检测到 cmd 终端')
+}
+
+// 执行器族为 cmd(CmdSandboxExecutor):拒绝委托,绝不按别的族猜语法
+const cfShell = fakeSandboxedShell({ className: 'CmdSandboxExecutor' })
+const hCmdFam = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: [
+    { id: 'agent-cf-free', session: { key: 'cf-free' } },
+    { id: 'agent-cf-locked', session: { key: 'cf-locked' } },
+  ],
+  shell: cfShell,
+  sandboxPolicy: fakeSandboxPolicy('workspace-write', { 'cf-free': 'danger-full-access' }),
+})
+apply(hCmdFam.ctx, { syncIntervalMs: 60000 })
+await post(hCmdFam, { op: 'setOption', shellTakeover: 'takeover' })
+const cfSnap = await pollSnapshot(hCmdFam, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true, 8000)
+check(
+  'CamelCase 类名 CmdSandboxExecutor → executorFamily=cmd(source=executor)',
+  cfSnap.syncStats.executorFamily === 'cmd' && cfSnap.syncStats.executorFamilySource === 'executor',
+  JSON.stringify({ family: cfSnap.syncStats.executorFamily, source: cfSnap.syncStats.executorFamilySource }),
+)
+const cfTool = hCmdFam.state.toolDefs.get('envd_shell')
+const cfBefore = (await callApi(hCmdFam)).json.syncStats
+const cfRefused = await cfTool.execute({ command: 'echo cf', cwd: process.cwd() }, { signal: null, agent: { session: { key: 'cf-locked' } } })
+const cfAfter = (await callApi(hCmdFam)).json.syncStats
+check(
+  '执行器族 cmd → 拒绝委托(不猜语法,delegateRefusals+1,没有真的执行)',
+  cfRefused.ok === false && cfRefused.text.includes('无法安全包装') && cfAfter.delegateRefusals === cfBefore.delegateRefusals + 1 && cfShell.calls.executed.length === 0,
+  JSON.stringify({ text: String(cfRefused.text).slice(0, 200), refusals: [cfBefore.delegateRefusals, cfAfter.delegateRefusals], executed: cfShell.calls.executed.length }),
+)
+
+// 执行器自称不围栏(capable=false)但策略服务说本会话受围栏 → 仍按有围栏处理,拒绝 spawn/委托
+const noCapShell = {}
+const hNoCap = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: [
+    { id: 'agent-nc-free', session: { key: 'nc-free' } },
+    { id: 'agent-nc-locked', session: { key: 'nc-locked' } },
+  ],
+  shell: noCapShell,
+  sandboxPolicy: fakeSandboxPolicy('workspace-write', { 'nc-free': 'danger-full-access' }),
+})
+apply(hNoCap.ctx, { syncIntervalMs: 60000 })
+await post(hNoCap, { op: 'setOption', shellTakeover: 'takeover' })
+await pollSnapshot(hNoCap, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true, 8000)
+const ncTool = hNoCap.state.toolDefs.get('envd_shell')
+const ncBefore = (await callApi(hNoCap)).json.syncStats
+const ncRefused = await ncTool.execute({ command: 'echo nc-marker', cwd: process.cwd() }, { signal: null, agent: { session: { key: 'nc-locked' } } })
+const ncAfter = (await callApi(hNoCap)).json.syncStats
+check(
+  '执行器自称不围栏、策略说围栏 → 仍拒绝(不 spawn、不委托)',
+  ncRefused.ok === false && ncRefused.text.includes('沙箱围栏') && ncAfter.delegateTries === ncBefore.delegateTries && !hNoCap.subprocess.calls.some((c) => (c.argv || []).some((a) => String(a).includes('nc-marker'))),
+  JSON.stringify({ text: String(ncRefused.text).slice(0, 160), delegateTries: [ncBefore.delegateTries, ncAfter.delegateTries] }),
 )
 
 // h-2) BashSandboxExecutor → bash 包装器(含 -lc,不是 $env:ENVD_CMD)
@@ -2079,15 +2381,23 @@ check(
   bfSnap0.syncStats.executorFamily === 'bash' && bfSnap0.syncStats.executorFamilySource === 'executor',
   JSON.stringify({ family: bfSnap0.syncStats.executorFamily, source: bfSnap0.syncStats.executorFamilySource }),
 )
-if (bashKey) await settleShell(hFamBash, bashKey)
-const bfTool = hFamBash.state.toolDefs.get('envd_shell')
-const bfOk = await bfTool.execute({ command: 'echo bf-ok', cwd: process.cwd() }, { signal: null, agent: { session: { key: 'bf-locked' } } })
-const bfSpec = bashShell.calls.executed[bashShell.calls.executed.length - 1]
-check(
-  'bash 执行器 + bash 目标终端:包装器用 -lc / "$ENVD_CMD"(不是 PowerShell 的 & + $env:)',
-  bfOk.ok === true && String(bfSpec.command).includes('-lc') && String(bfSpec.command).includes('"$ENVD_CMD"') && !String(bfSpec.command).includes('$env:ENVD_CMD'),
-  JSON.stringify({ text: String(bfOk.text).slice(0, 120), command: String(bfSpec && bfSpec.command).slice(0, 200) }),
-)
+if (!bashKey) {
+  skip('bash 执行器 + bash 目标终端包装器断言', '本机没有检测到 bash 终端')
+} else {
+  await settleShell(hFamBash, bashKey)
+  const bfTool = hFamBash.state.toolDefs.get('envd_shell')
+  const bfOk = await bfTool.execute({ command: 'echo bf-ok', cwd: process.cwd() }, { signal: null, agent: { session: { key: 'bf-locked' } } })
+  const bfSpec = bashShell.calls.executed[bashShell.calls.executed.length - 1]
+  const bfPayload = decodeBashPayload(bfSpec)
+  check(
+    'bash 执行器 + bash 目标终端:ENVD_CMD 是 base64 载荷,目标端 base64 -d | bash -s 解码',
+    bfOk.ok === true &&
+      String(bfSpec.command).includes('base64 -d | bash -s') &&
+      !String(bfSpec.command).includes('echo bf-ok') &&
+      bfPayload === 'echo bf-ok',
+    JSON.stringify({ text: String(bfOk.text).slice(0, 120), command: String(bfSpec && bfSpec.command).slice(0, 220), payload: bfPayload }),
+  )
+}
 
 // ── i) 动态识别第三方发布名(tools.definitions),并排除文件工具 ──
 const tenantBashDef = {
@@ -2244,6 +2554,357 @@ check(
   JSON.stringify({ steadyNow: steadyFull.syncStats.steadyNow, steadySinceAt: steadyFull.syncStats.steadySinceAt, lastSig: steadyFull.syncStats.lastSig, ticks: steadyFull.syncStats.ticks }),
 )
 
+// ══════════════ 服务端新行为 12 类断言(策略三态/活证回退/逐个 restrict/API 安全/探测缓存…) ══════════════
+
+// ── B1) 策略不可知三态:resolve 返回 {}/空 mode/非法 mode → confined=null,不拿部署默认档冒充 ──
+const hUnknown = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: [{ id: 'agent-uk', session: { key: 'uk' } }],
+  shell: { sandboxMode: 'workspace-write' },
+  sandboxPolicy: { resolve: () => ({}) },
+})
+apply(hUnknown.ctx, { syncIntervalMs: 25 })
+await post(hUnknown, { op: 'setOption', shellTakeover: 'takeover' })
+const ukSnap = await pollSnapshot(hUnknown, (s) => Boolean(s.syncStats) && s.syncStats.sandboxBlocked === true, 6000)
+const ukFact = ((ukSnap.commandTool || {}).scopes || []).find((x) => x.id === 'agent-uk')
+const ukScope = ((ukSnap.sandbox || {}).scopes || []).find((x) => x.id === 'agent-uk')
+phase('策略不可知三态')
+check(
+  '策略 resolve 返回空 mode → 不谎报「确定无围栏」(confined 不为 true),不把部署默认档当本会话结论',
+  Boolean(ukFact && ukFact.confined !== true && ukFact.mode === ''),
+  JSON.stringify(ukFact),
+)
+check(
+  'sandbox.scopes 也是三态:confined===null、mode 为空(部署默认档只在 defaultMode)',
+  Boolean(ukScope && ukScope.confined === null && ukScope.policyKnown === false && ukScope.mode === '') && ukSnap.sandbox.defaultMode === 'workspace-write',
+  JSON.stringify({ scope: ukScope, defaultMode: ukSnap.sandbox && ukSnap.sandbox.defaultMode }),
+)
+check(
+  '没有任何会话被证明无围栏 → sandboxBlocked=true 且根本不注册 envd_shell',
+  ukSnap.syncStats.sandboxBlocked === true && ukSnap.syncStats.registers === 0 && !hUnknown.state.toolDefs.has('envd_shell'),
+  JSON.stringify({ blocked: ukSnap.syncStats.sandboxBlocked, registers: ukSnap.syncStats.registers }),
+)
+check(
+  '不可知会话仍拿得到宿主工具(不是零工具),终局 kind=host',
+  Boolean(ukFact && ukFact.kind === 'host' && ukFact.tool === 'bash' && ukFact.visible === true && ukFact.anomaly === false),
+  JSON.stringify(ukFact),
+)
+
+// 混合:一个确定无围栏(注册 envd_shell)+ 一个策略非法(不可知)→ 后者藏自己、留宿主工具;
+// 同时验证 runDelegated 遇到非法 policy 拒绝委托(不拿部署默认档执行)。
+const muShell = fakeSandboxedShell({ mode: 'workspace-write' })
+const hMixedUnknown = makeHarness({
+  shippedTools: ['bash'],
+  agentIds: [
+    { id: 'agent-mu-free', session: { key: 'mu-free' } },
+    { id: 'agent-mu-unknown', session: { key: 'mu-unknown' } },
+  ],
+  shell: muShell,
+  sandboxPolicy: {
+    resolve(request) {
+      const key = request && request.session ? request.session.key : ''
+      if (key === 'mu-free') return { mode: 'danger-full-access', workspaceRoot: process.cwd() }
+      return { mode: 'not-a-mode' } // 非法 mode → 按策略不可知
+    },
+  },
+})
+apply(hMixedUnknown.ctx, { syncIntervalMs: 25 })
+await post(hMixedUnknown, { op: 'setOption', shellTakeover: 'takeover' })
+const muSnap = await pollSnapshot(
+  hMixedUnknown,
+  (s) => {
+    const fact = ((s.commandTool || {}).scopes || []).find((x) => x.id === 'agent-mu-unknown')
+    return Boolean(fact && fact.kind === 'sandbox-host' && fact.confined === null && hMixedUnknown.toolsFor('agent-mu-unknown').get('envd_shell') === null)
+  },
+  8000,
+)
+const muFree = ((muSnap.commandTool || {}).scopes || []).find((x) => x.id === 'agent-mu-free')
+const muUnknown = ((muSnap.commandTool || {}).scopes || []).find((x) => x.id === 'agent-mu-unknown')
+const muScope = ((muSnap.sandbox || {}).scopes || []).find((x) => x.id === 'agent-mu-unknown')
+check(
+  '混合部署:确定无围栏会话照常 takeover(策略不可知不株连别的会话)',
+  Boolean(muFree && muFree.kind === 'takeover' && muFree.confined === false),
+  JSON.stringify(muFree),
+)
+check(
+  '非法策略会话:confined=null、藏自己(hidesOwn)、宿主 bash 仍可见(不制造零工具)',
+  Boolean(
+    muUnknown &&
+      muUnknown.kind === 'sandbox-host' &&
+      muUnknown.hidesOwn === true &&
+      (muUnknown.hostTools || []).includes('bash') &&
+      muUnknown.visible === true,
+  ) &&
+    Boolean(hMixedUnknown.toolsFor('agent-mu-unknown').get('bash')) &&
+    hMixedUnknown.toolsFor('agent-mu-unknown').get('envd_shell') === null,
+  JSON.stringify(muUnknown) + ' vis=' + scopeCommands(hMixedUnknown, 'agent-mu-unknown').join(','),
+)
+check(
+  'sandbox.scopes 对非法策略报 confined=null / mode 空(三态在这里保真)',
+  Boolean(muScope && muScope.confined === null && muScope.mode === ''),
+  JSON.stringify(muScope),
+)
+check('混合部署里有一个确定无围栏会话 → sandboxBlocked=false(不把不可知当挡掉)', muSnap.syncStats.sandboxBlocked === false, String(muSnap.syncStats.sandboxBlocked))
+// 目标终端必须是可安全包装的族,才能走到「policy 非法拒绝」这一步
+const muPsKey = terminalKeyOfFamily(muSnap, 'powershell') || terminalKeyOfFamily(muSnap, 'bash')
+if (muPsKey) {
+  await settleShell(hMixedUnknown, muPsKey)
+  const muBefore = (await callApi(hMixedUnknown)).json.syncStats
+  const muToolDef = hMixedUnknown.state.toolDefs.get('envd_shell')
+  const muDeleg = await muToolDef.execute({ command: 'echo mu-invalid-policy', cwd: process.cwd() }, { signal: null, agent: { session: { key: 'mu-unknown' } } })
+  const muAfter = (await callApi(hMixedUnknown)).json.syncStats
+  check(
+    'runDelegated 遇到非法/缺失 policy → 拒绝委托(delegateFailures+1,不拿部署默认档执行)',
+    muDeleg.ok === false &&
+      muDeleg.text.includes('策略不可得或非法') &&
+      muAfter.delegateFailures === muBefore.delegateFailures + 1 &&
+      muAfter.delegateTries === muBefore.delegateTries + 1 &&
+      muShell.calls.executed.length === 0,
+    JSON.stringify({ text: String(muDeleg.text).slice(0, 200), failures: [muBefore.delegateFailures, muAfter.delegateFailures], executed: muShell.calls.executed.length }),
+  )
+} else {
+  skip('非法 policy 委托拒绝', '没有能安全包装的目标终端')
+}
+
+// ── B2) 宿主 shell 消失后的活证回退 + 起步 60s 宽限 ──
+const hGrace = makeHarness({ agentIds: ['agent-gr'] })
+apply(hGrace.ctx, { syncIntervalMs: 25 })
+await post(hGrace, { op: 'setOption', shellTakeover: 'auto' })
+await sleep(500)
+const graceSnap = (await callApi(hGrace)).json
+check(
+  '从未见过宿主 shell → 60s 宽限内不注册 envd_shell(不和晚注册的宿主插件抢)',
+  graceSnap.syncStats.registers === 0 && !hGrace.state.toolDefs.has('envd_shell') && graceSnap.syncStats.ticks >= 3,
+  JSON.stringify({ registers: graceSnap.syncStats.registers, ticks: graceSnap.syncStats.ticks }),
+)
+const fallbackFamily = String((got.json && got.json.shell && got.json.shell.family) || '')
+let hFallbackShared = null
+const hostNameByFamily = { bash: 'bash', powershell: 'pwsh', cmd: 'cmd', wsl: 'wsl', custom: 'bash' }
+const fbHostName = hostNameByFamily[fallbackFamily] || ''
+if (fbHostName) {
+  const hFallback = makeHarness({ shippedTools: [fbHostName], agentIds: [{ id: 'agent-fb', session: { key: 'fb' } }] })
+  hFallbackShared = hFallback
+  apply(hFallback.ctx, { syncIntervalMs: 25 })
+  await post(hFallback, { op: 'setOption', shellTakeover: 'auto' })
+  const fbFirst = await pollSnapshot(hFallback, (s) => Boolean(s.syncStats) && s.syncStats.ticks >= 4, 6000)
+  check(
+    '前置:宿主 shell 与默认终端同族 → auto 不接管(宿主工具继续干活)',
+    fbFirst.commandTool.takeover === false && Boolean(hFallback.toolsFor('agent-fb').get(fbHostName)),
+    JSON.stringify({ ct: fbFirst.commandTool, family: fallbackFamily }),
+  )
+  // 宿主 shell 从注册表消失(插件卸载 / 热重载),按真机语义派发 tools/change
+  hFallback.state.toolDefs.delete(fbHostName)
+  hFallback.emit('tools/change')
+  const fbAfter = await pollSnapshot(
+    hFallback,
+    (s) => Boolean(s.commandTool) && s.commandTool.takeover === true && Boolean(hFallback.toolsFor('agent-fb').get('envd_shell')),
+    8000,
+  )
+  check(
+    '宿主 shell 消失后(已见过 → 不受宽限)立刻兜底注册 envd_shell,不留零命令工具',
+    Boolean(fbAfter.commandTool && fbAfter.commandTool.takeover === true) &&
+      Boolean(hFallback.toolsFor('agent-fb').get('envd_shell')) &&
+      hFallback.state.toolDefs.has('envd_shell'),
+    JSON.stringify(fbAfter.commandTool),
+  )
+} else {
+  skip('宿主 shell 消失后的活证回退', '无法判定默认终端族: ' + fallbackFamily)
+}
+
+// ── B3/B4) 逐个 restrict(不批量)/ 无主 deny / badNames 30s 过期重试 ──
+const hBatch = makeHarness({
+  shippedTools: ['bash', 'pwsh'],
+  agentIds: ['agent-batch'],
+  // bash 挡得掉;pwsh 是作用域私有(restrict 抛错),让路后仍有 30s 重试窗口
+  unrestrictableFor: (scopeId, name) => name === 'pwsh',
+})
+apply(hBatch.ctx, { syncIntervalMs: 25 })
+await post(hBatch, { op: 'setOption', shellTakeover: 'takeover' })
+const batchSnap = await pollSnapshot(
+  hBatch,
+  (s) => {
+    const fact = ((s.commandTool || {}).scopes || []).find((x) => x.id === 'agent-batch')
+    return Boolean(fact && fact.kind === 'yield' && fact.hostTool === 'pwsh' && (fact.hidden || []).includes('bash'))
+  },
+  8000,
+)
+const batchFact = ((batchSnap.commandTool || {}).scopes || []).find((x) => x.id === 'agent-batch')
+phase('逐个 restrict / 30s 重试窗口')
+check(
+  '逐个 restrict:挡得掉的 bash 真挡住、挡不掉的 pwsh 让路(批量调用会一锅端)',
+  Boolean(batchFact && batchFact.kind === 'yield' && (batchFact.hidden || []).includes('bash') && (batchFact.hostTools || []).includes('pwsh')),
+  JSON.stringify(batchFact),
+)
+check(
+  'badNames 30s 内只报未过期名字:unrestrictable 恰好是 pwsh(挡不掉的)',
+  (batchSnap.syncStats.unrestrictable || []).length === 1 && (batchSnap.syncStats.unrestrictable || [])[0] === 'pwsh',
+  JSON.stringify(batchSnap.syncStats.unrestrictable),
+)
+const pwshAttempts = () => hBatch.state.restrictCalls.filter((deny) => deny.includes('pwsh')).length
+const pwshAttemptsBefore = pwshAttempts()
+const batchSteady1 = (await callApi(hBatch)).json.syncStats
+await sleep(300)
+const batchSteady2 = (await callApi(hBatch)).json.syncStats
+check(
+  '30s 重试窗口内不反复 restrict(没有新的 pwsh restrict 尝试)',
+  pwshAttempts() === pwshAttemptsBefore && batchSteady2.denyApplies === batchSteady1.denyApplies && batchSteady2.hostDenyApplies === batchSteady1.hostDenyApplies,
+  JSON.stringify({ pwshAttempts: [pwshAttemptsBefore, pwshAttempts()], denyApplies: [batchSteady1.denyApplies, batchSteady2.denyApplies] }),
+)
+// 注入时间前进 31s:badNames 过期 → 必须重试一次(否则就是永久判死)
+const realDateNow = Date.now
+const batchBeforeTtl = (await callApi(hBatch)).json.syncStats
+Date.now = () => realDateNow() + 31_000
+try {
+  hBatch.emit('tools/change')
+  for (let i = 0; i < 800; i++) {
+    if (pwshAttempts() > pwshAttemptsBefore) break
+    await callApi(hBatch)
+    await sleep(10)
+  }
+} finally {
+  Date.now = realDateNow
+}
+const batchAfterTtl = (await callApi(hBatch)).json.syncStats
+check(
+  'badNames 30s 过期后会重新 restrict pwsh(不是永久判死)',
+  pwshAttempts() > pwshAttemptsBefore,
+  JSON.stringify({ pwshAttempts: [pwshAttemptsBefore, pwshAttempts()], hostDenyApplies: [batchBeforeTtl.hostDenyApplies, batchAfterTtl.hostDenyApplies] }),
+)
+// 无主 deny:关掉接管后宿主工具必须全部恢复(批量 restrict 中途抛错会留下无主 deny)
+await post(hBatch, { op: 'setOption', shellTakeover: 'off' })
+await pollSnapshot(
+  hBatch,
+  () => Boolean(hBatch.toolsFor('agent-batch').get('bash')) && Boolean(hBatch.toolsFor('agent-batch').get('pwsh')),
+  6000,
+)
+check(
+  '关掉接管后宿主工具全部恢复(逐个 restrict 不留无主 deny)',
+  Boolean(hBatch.toolsFor('agent-batch').get('bash')) && Boolean(hBatch.toolsFor('agent-batch').get('pwsh')),
+  'vis=' + scopeCommands(hBatch, 'agent-batch').join(','),
+)
+
+// ── B6) runtimeShellTools 只报真的见过(不再把 8 个内置名当「已识别」) ──
+const hPwshOnly = makeHarness({ shippedTools: ['pwsh'], agentIds: ['agent-pw'] })
+apply(hPwshOnly.ctx, { syncIntervalMs: 25 })
+await post(hPwshOnly, { op: 'setOption', shellTakeover: 'takeover' })
+const pwSnap = await pollSnapshot(hPwshOnly, (s) => Boolean(s.commandTool) && s.commandTool.takeover === true, 6000)
+const pwNames = (pwSnap.syncStats.runtimeShellTools || []).map((t) => t.name)
+phase('runtimeShellTools / 动态识别收紧')
+check('runtimeShellTools 只报 really-seen:宿主只有 pwsh 时列表就是 [pwsh]', pwNames.length === 1 && pwNames[0] === 'pwsh', JSON.stringify(pwSnap.syncStats.runtimeShellTools))
+check(
+  'bash/cmd/fish/ops_bash 等伪候选不出现在「已识别」列表里',
+  !pwNames.some((n) => ['bash', 'cmd', 'fish', 'ops_bash', 'powershell', 'sh', 'zsh', 'wsl'].includes(n)),
+  pwNames.join(','),
+)
+
+// ── B7) 动态识别收紧:run_cmd / wc_cmd_palette 不误认;tenant_bash 正常识别 ──
+const hDynTighten = makeHarness({
+  shippedTools: [],
+  agentIds: ['agent-dt'],
+  shellDefinitions: [
+    { name: 'run_cmd', description: 'Run a task', parameters: { type: 'object', properties: { task: { type: 'string' } } } },
+    { name: 'wc_cmd_palette', description: 'Command palette UI', parameters: { type: 'object', properties: { palette: { type: 'string' } } } },
+    readFilesDef,
+    tenantBashDef,
+  ],
+})
+apply(hDynTighten.ctx, { syncIntervalMs: 25 })
+await post(hDynTighten, { op: 'setOption', shellTakeover: 'takeover' })
+const dtSnap = await pollSnapshot(
+  hDynTighten,
+  (s) => {
+    const fact = ((s.commandTool || {}).scopes || []).find((x) => x.id === 'agent-dt')
+    return Boolean(fact && fact.kind === 'takeover' && (fact.hidden || []).includes('tenant_bash'))
+  },
+  8000,
+)
+const dtNames = (dtSnap.syncStats.runtimeShellTools || []).map((t) => t.name)
+const dtFact = ((dtSnap.commandTool || {}).scopes || []).find((x) => x.id === 'agent-dt')
+check(
+  '名字带 cmd 但没有 command 参数(run_cmd / wc_cmd_palette)→ 不当宿主 shell',
+  !dtNames.includes('run_cmd') && !dtNames.includes('wc_cmd_palette'),
+  JSON.stringify(dtSnap.syncStats.runtimeShellTools),
+)
+check(
+  'tenant_bash(有 command 参数)→ 正常识别并遮挡',
+  dtNames.includes('tenant_bash') && Boolean(dtFact && (dtFact.hidden || []).includes('tenant_bash')),
+  JSON.stringify({ names: dtNames, fact: dtFact }),
+)
+check(
+  '不误伤:run_cmd / wc_cmd_palette / ops_read_files 仍然可见(RPC/文件工具不能挡)',
+  Boolean(hDynTighten.toolsFor('agent-dt').get('run_cmd')) &&
+    Boolean(hDynTighten.toolsFor('agent-dt').get('wc_cmd_palette')) &&
+    Boolean(hDynTighten.toolsFor('agent-dt').get('ops_read_files')),
+  'vis=' + scopeCommands(hDynTighten, 'agent-dt', ['envd_shell', 'tenant_bash', 'run_cmd', 'wc_cmd_palette', 'ops_read_files']).join(','),
+)
+
+// ── B10) 探测缓存语义:多次 GET 不重复探测;非探测写入不作废;setShell 作废 ──
+const hCache = makeHarness()
+apply(hCache.ctx, {})
+const cacheSnap1 = await pollSnapshot(hCache, (s) => Boolean(s.syncStats) && s.syncStats.detections >= 1, 6000)
+const det1 = cacheSnap1.syncStats.detections
+const at1 = cacheSnap1.detectedAt
+const cacheSnap2 = (await callApi(hCache)).json
+check(
+  '同一探测缓存的多次 GET 不增加 detections / detectedAt 不变',
+  cacheSnap2.syncStats.detections === det1 && cacheSnap2.detectedAt === at1,
+  JSON.stringify({ detections: [det1, cacheSnap2.syncStats.detections], detectedAt: [at1, cacheSnap2.detectedAt] }),
+)
+await post(hCache, { op: 'setOption', injectBrief: true })
+const cacheSnap3 = (await callApi(hCache)).json
+check(
+  '非探测相关的 setOption 不作废探测(detectedAt 不变)',
+  cacheSnap3.detectedAt === at1 && cacheSnap3.syncStats.detections === det1,
+  JSON.stringify({ detectedAt: [at1, cacheSnap3.detectedAt], detections: [det1, cacheSnap3.syncStats.detections] }),
+)
+const cacheShellKey = (cacheSnap3.terminals || []).map((t) => t.key).find((k) => k && k !== 'auto') || ''
+if (cacheShellKey) {
+  await sleep(5)
+  await post(hCache, { op: 'setShell', key: cacheShellKey })
+  const cacheSnap4 = (await callApi(hCache)).json
+  check(
+    'setShell(影响探测)会作废缓存,下一次 GET 重新探测(detectedAt 变化)',
+    cacheSnap4.detectedAt !== at1 && cacheSnap4.syncStats.detections > det1,
+    JSON.stringify({ detectedAt: [at1, cacheSnap4.detectedAt], detections: [det1, cacheSnap4.syncStats.detections] }),
+  )
+} else {
+  skip('setShell 作废探测缓存', '没有可切换的终端')
+}
+
+// ── B11) brief 口径:sessionless 不说「本会话策略未知」;围栏会话给换回宿主工具的提示 ──
+const envdSummary = await hSandbox.state.toolDefs.get('envd').execute({ action: 'summary' }, { signal: null })
+check(
+  'envd summary(无会话)不再说「本会话策略未知」,改指路 scopes',
+  envdSummary.ok === true && !envdSummary.text.includes('本会话策略未知') && envdSummary.text.includes('各会话有效策略见 scopes'),
+  String(envdSummary.text).split('\n').find((l) => l.includes('命令工具')) || '',
+)
+check(
+  'brief 最后一行:envd 只能解析上面已探测到的工具',
+  envdSummary.text.includes('只能解析上面已探测到的工具'),
+  String(envdSummary.text).split('\n').slice(-1)[0] || '',
+)
+const mixLockedAgent = hMix.state.agents.find((a) => a.id === 'agent-locked')
+if (mixLockedAgent) {
+  hMix.setScopeDeny('agent-locked', ['bash'])
+  const mixConfBrief = hMix.state.brief.text({ scope: mixLockedAgent })
+  hMix.setScopeDeny('agent-locked', [])
+  check(
+    '围栏会话宿主工具暂时不可见时,简报给出「下一轮对账把宿主工具换回来」的提示',
+    mixConfBrief.includes('下一轮对账会把宿主工具换回来') && !mixConfBrief.includes('本会话策略未知'),
+    mixConfBrief.split('\n').find((l) => l.includes('命令工具')) || '',
+  )
+} else {
+  skip('围栏会话简报换回宿主工具提示', 'hMix 里没有 agent-locked')
+}
+
+// ── B12) 让路计数语义/恒等式(ownHides + hostDenyApplies === denyApplies) ──
+const multiStats = (await callApi(hMulti)).json.syncStats
+check(
+  '让路计数语义:ownHides>=1、hostDenyApplies>=1,且 denyApplies===两者之和',
+  multiStats.ownHides >= 1 && multiStats.hostDenyApplies >= 1 && multiStats.denyApplies === multiStats.ownHides + multiStats.hostDenyApplies,
+  JSON.stringify({ denyApplies: multiStats.denyApplies, ownHides: multiStats.ownHides, hostDenyApplies: multiStats.hostDenyApplies }),
+)
+
 // 收掉回归用例的 fixture
 for (const { dis } of [
   ...h8.state.effects,
@@ -2269,6 +2930,17 @@ for (const { dis } of [
   ...hDynTaken.state.effects,
   ...hNoDefs.state.effects,
   ...hSteady.state.effects,
+  // 服务端新行为批次
+  ...hUnknown.state.effects,
+  ...hMixedUnknown.state.effects,
+  ...hGrace.state.effects,
+  ...(hFallbackShared ? hFallbackShared.state.effects : []),
+  ...hBatch.state.effects,
+  ...hPwshOnly.state.effects,
+  ...hDynTighten.state.effects,
+  ...hCache.state.effects,
+  ...hCmdFam.state.effects,
+  ...hNoCap.state.effects,
 ]) {
   try {
     if (typeof dis === 'function') dis()
@@ -2277,6 +2949,12 @@ for (const { dis } of [
 
 rmSync(home, { recursive: true, force: true })
 
-console.log('\n' + (failures.length ? failures.length + ' 项失败:' : '全部通过') + '  (' + (Date.now() - t0) + ' ms)')
+console.log(
+  '\n' +
+    (failures.length ? failures.length + ' 项失败:' : '全部通过') +
+    '  (' + (Date.now() - t0) + ' ms)' +
+    (skips.length ? '  SKIP ' + skips.length + ' 项(本机环境不满足)' : ''),
+)
+for (const s of skips) console.log('  SKIP · ' + s)
 for (const f of failures) console.log('  · ' + f)
 process.exit(failures.length ? 1 : 0)

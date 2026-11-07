@@ -49,5 +49,8 @@
       "immediately": true,
       "inject": []
     }
+  },
+  "engines": {
+    "dsh": ">=0.2.0"
   }
 }

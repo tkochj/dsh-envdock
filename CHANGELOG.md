@@ -2,27 +2,42 @@
 
 本文件记录 EnvDock 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [0.3.0] - 2026-11-07
+## [0.3.0] - 2026-11-08
 
 ### Added
 
+- **面板重做（简洁 + 接管可视化）**：头部压成一行、只挂 1 个状态 badge（异常红 / 混合黄 / 直连接管绿 / 未接管灰）；置顶「命令工具 / 接管」卡片 = 终端 chips + 状态行（状态词 / 当前命令工具名 / 执行器族 / 接管模式 chips / 沙箱下接管 chips）+ 逐会话行（id 前 8 位 · 终局 · 实际工具名，异常行红色并在行尾给原因，异常会话优先展示，最多 5 行、其余折叠成「还有 N 个」）+ 已识别宿主命令工具 chips（`名字 · 家族`，启发式认出的带标记）+ 可折叠诊断；工具链路径点击即复制、多版本折叠；健康检查与环境简报默认折叠；底部两个开关。面板只在 `web` profile 注册。
+- **自动刷新**：面板每 15 秒静默拉一次 `/envdock-api`，只在页面可见时拉；比较 payload 前剔除易变计数（`ticks` / `steadyTicks` / `steadySinceAt` / `lastAt` / `lastErrorAt` 等），事实没变就不重渲染，卸载时清定时器。
+- **剪贴板兜底**：安全上下文走 `navigator.clipboard`，局域网 http 退到 `textarea + execCommand('copy')`，两条都失败给可见提示；复制反馈挂 `aria-live`。
+- `syncStats` 增加 `detections`（探测次数）/ `lastDetectMs`（最近一次探测耗时）/ `steadyPrev`（上一轮是否稳态）。
+- 委托计数细化：新增 `delegateRefusals`（目标终端 / 执行器不支持时 +1）；`delegateTries` 在进入委托路径时就 +1，`delegateCalls` 只在拿到合法执行结果后 +1；面板诊断里能直接看到「委托拒绝」。
 - **逐会话命令工具事实** `commandTool.scopes`：`kind`（`takeover` / `host` / `yield` / `sandbox-host`）+ `tool` / `hostTool` / `hostTools` / `ownVisible` / `hideOwnPlanned` / `visible` / `hidden` / `leaked` / `hidesOwn` / `confined` / `mode` / `anomaly`。事实按「此刻实际能不能用」推导（现测 `envd_shell` 与每个候选宿主 shell 在该作用域可见性），实际生效的遮挡以复读为准，不拿计划意图充数；`anomaly` 标出「零命令工具 / 接管下宿主仍可见 / 挡了却仍可见」。
-- **动态识别宿主命令工具**：宿主提供 `tools.definitions` 时枚举定义，按名字里的家族 token（`ops_bash`、`tenant_*` 等）和「描述提到 bash / PowerShell / cmd / WSL 且参数里有 `command`」认出宿主命令工具，再按家族参与接管判定；认出的名字进运行态（`runtimeShellTools` / `learnedShells`），遮挡之后仍记得。认得出工具、认不出家族时**让路**，不猜语法。
+- **动态识别宿主命令工具**：宿主提供 `tools.definitions` 时枚举定义，按名字里的家族 token（`ops_bash`、`tenant_*` 等）和「描述提到 bash / PowerShell / cmd / WSL 且参数里有 command 类字段（`command` / `cmd` / `script` / `commandline`）」认出宿主命令工具，再按家族参与接管判定；认出的名字进运行态（`runtimeShellTools` / `learnedShells`），遮挡之后仍记得。认得出工具、认不出家族时**让路**，不猜语法。
 - **事件驱动对账**：监听 `tools/change`，同一轮变更用 40 ms 合并定时器归并，别的插件晚一步注册或撤销 shell 时立刻收敛；5 秒 tick 保留为兜底（旧宿主没有该事件时仍然正确）。对账期间置 `mutating` 标志，自己派发的 `tools/change` 不再触发下一轮。
 - **可执行面优先**：宿主提供 `tools.executable(name, agent)` 时用它判「这一单能不能调」，否则回落 `tools.get`；`hasExecutableApi` 把宿主到底有没有这个能力写进诊断。
 - **拒绝守卫双向**：宿主 shell 被藏 → 改 `envd_shell`；`envd_shell` 被藏（让路 / 沙箱让路）→ 指路该会话里真的可见的宿主工具，原因取自逐会话事实（沙箱围栏 / 宿主 shell 作用域私有）；事实还没生成时给「暂时无法判定」，不编造工具名。守卫判替代品用可执行面（宿主有 `tools.executable` 时）或可见性；判不出时给「暂时无法判定」或放行，两种情况都不编造工具名。
 - **诊断计数补全**：`registerTries` / `delegateTries` / `delegateFailures` / `ownHides` / `hostDenyApplies` / `denyNoops` / `transientMisses` / `steadyNow` / `steadySinceAt` / `lastErrorAt` / `guardReady` / `guardError` / `runtimeShellTools` / `scopeAnomalies` / `executorFamily` / `executorFamilySource` / `hasExecutableApi`；`hostOnlyScopes` / `sandboxHiddenScopes` 改为从实际事实推导（不再用计划意图或 `hideOwn` 计数冒充）。
-- **面板**：头部新增「N 个会话命令工具异常」badge；title 列出**全部**会话（id 前 8 位 · 终局 · 实际工具名，含挡掉 / 沙箱围栏 / 泄漏标注）与诊断计数；旧版 API（没有 `scopes`）在 title 里明确标注「旧版构建」，退回汇总计数并说明无法逐会话核对。
+- **面板**：头部新增「N 个会话命令工具异常」badge；title 列出**全部**会话（id 前 8 位 · 终局 · 实际工具名，含挡掉 / 沙箱围栏 / 泄漏标注）与常用计数；旧版 API（没有 `scopes`）在 title 里明确标注「旧版构建」，退回汇总计数并说明无法逐会话核对。
 - **测试**：新增 `test/panel-render.mjs`（极简 React 运行时替身加载 `client.js`、遍历 `.envd-badge` 做面板渲染回归）；`npm test` 现在跑四个文件。`test/` 不在 npm 包内，`npm test` 只适用于源代码检出目录。
 - README / README.en.md 的 FAQ 扩写：命令工具的四种终局、面板两种汇总 badge 的含义（含异常会话）、沙箱会话为什么没有 `envd_shell`（含「全部会话被围栏 → 不注册工具」）。
 
 ### Changed
 
 - 归属判定改为登记身份（`tools.get(name) === 我注册的那个定义对象`）：同名工具被别的层盖住时，名字还在不代表还是我们的，不会被误判成「已接管」去遮挡宿主。
+- **局域网访问改为只读**：打开「允许局域网访问」后局域网只能 GET 面板数据；所有写操作（切终端、改默认版本、加自定义工具 / 终端 argv、改选项）都只允许本机，唯一例外是同源页面把该开关**关掉**（`Origin` 必须与 `Host` 一致）。理由：写操作能改默认终端 argv，等于把命令注入面开到整个局域网。
+- 面板 badge 语义：全部会话都「未接管」时灰「未接管」、全部围栏时灰「沙箱」，不再用黄色混合告警；「N 个会话用宿主工具」只在真混合（部分接管 + 部分未接管）时出现；数字来自 `commandTool.scopes`（旧版 API 才回退到「约 N 个」，并把 `hostOnlyScopes` 与 `sandboxHiddenScopes` 相加）。
+- `commandTool.scopes` 增加 `confined` 三态（true / false / null = 策略不可知）、`policyKnown`、`ownNameVisible` / `ownOurs`；`sandbox.scopes` 同步三态，`sandboxBlocked` 改为「没有任何会话**确认**无围栏」。策略不可知按有围栏保守处理：藏 `envd_shell`、留宿主工具，绝不拿部署默认档冒充。
+- 宿主 shell 判定加「活证」：必须此刻可见（或仍在我们的遮挡里）才算存在；从没见过宿主时给约 60 秒宽限，见过之后又消失则接管兜底。作用域内挡不掉的名字改为带约 30 秒过期的 `badNames`，到期自动重试。
+- 动态识别收紧：必须同时有 command 类参数（`command` / `cmd` / `script` / `commandline`）才认，名字里带 `cmd` 不再足够（`run_cmd`、`wc_cmd_palette` 不会被误认成宿主 shell）；`runtimeShellTools` 只报真的见过的名字，不再把 8 个内置候选说成「已识别」。
+- 委托执行：执行器族判不出时按平台默认（win32 = PowerShell）并标注来源；判成 cmd、执行器不存在、没有会话信息、或拿不到本会话 policy 时拒绝委托。
+- **委托执行支持矩阵收紧（安全）**：只有 **bash / PowerShell 目标**能安全委托，且命令数据不走命令行——bash 目标把用户命令 base64 放进环境变量 `ENVD_CMD`、由 `base64 -d | bash -s` 解码执行；PowerShell 目标用 `-EncodedCommand`（UTF-16LE base64，前缀 `$ProgressPreference` 抑制 5.1 的 CLIXML 噪音，并对超长命令设上限）。**cmd / WSL / 自定义终端目标一律拒绝委托**：PowerShell 5.1 会吞参数里的双引号、MSYS 会把 cmd 的 `/d /s /c` 改写成路径，实测命令静默不执行。
+- **沙箱策略改为闭集**：`sandboxPolicy.resolve` 返回 `{}` / 空 mode / 闭集（`read-only` / `workspace-write` / `danger-full-access`）之外的值，一律按「策略不可知」保守处理，不再回落到部署默认档；反过来，执行器自称不围栏、但策略服务明确说本会话受围栏时，EnvDock 仍然拒绝自己 spawn / 委托。
+- 简报：按逐会话事实说真话；sessionless 与「策略不可知」不再冒充「确定无围栏」；围栏会话的工具表只剩 `envd_shell` 时提示「下一轮对账会把宿主工具换回来」；末行改为「`envd` 只解析已探测到的工具」。
+- 面板悬停 / 诊断只展示常用计数，完整字段留给 `/envdock-api` 的 `syncStats`；旧版 API（没有 `scopes` 字段）在 title 标注「旧版构建」，新构建零会话（`scopes: []`）显示「当前无会话」而不是误报旧版。
 - 遮挡与「主宿主 shell」全部按**作用域**判定：每个会话只挡它自己真的见过、且挡得掉的宿主 shell；挡不掉或认不出家族的那个只要此刻还在，就藏 `envd_shell` 让路（同时仍挡住本作用域挡得掉的其它宿主 shell）。
-- 委托执行的包装器改为按**宿主执行器**（`ctx.shell`）的语法族选择（`executorFamily`：先看执行器对象 / 类名，判不出按平台默认，win32 是 PowerShell、其余平台是 bash）；判成 cmd 时拒绝委托。命令经 `ENVD_CMD` 传入，`dshEnv` 透传。
-- 面板头部 badge 优先级：异常（红）> 混合（黄「N 个会话用宿主工具」）> 全接管（绿「模型可见」）；混合数字从 `commandTool.scopes` 推导，不再用 `sandboxHiddenScopes` 之类汇总值凑数。
-- 接管诊断用 `steadyNow`（本 tick 是否稳态）而不是累计的 `steadyTicks`；`lastError` 显示写入龄期，且每轮对账开始即清空——瞬时错误不再常驻面板。
+- 委托执行的包装器改为按**宿主执行器**（`ctx.shell`）的语法族选择（`executorFamily`：先看执行器对象 / 类名，判不出按平台默认，win32 是 PowerShell、其余平台是 bash）；判成 cmd 时拒绝委托。命令数据走 base64 通道（bash 目标：`ENVD_CMD`；PowerShell 目标：`-EncodedCommand`），`dshEnv` 透传。
+- 面板头部改为**单 badge**：异常（红）> 混合（黄「N 个会话用宿主工具」）> 直连接管（绿「模型可见」）> 未接管（灰，含全部会话都未接管 / 全部围栏的「沙箱」/ 由其它插件提供）；混合数字从 `commandTool.scopes` 推导，不再用 `sandboxHiddenScopes` 之类汇总值凑数。
+- 接管诊断用 `steadyNow`（本 tick 是否稳态）+ `steadyPrev`（上一轮是否稳态）而不是累计的 `steadyTicks`；`lastError` 显示写入龄期，且每轮对账开始即清空——瞬时错误不再常驻面板。
 - 简报按模型**实际拿到**的命令工具分支出话：直连接管 / 未接管（`host`）/ 让路 / 沙箱各一套文案；API 没有会话时注明「全局视图；逐会话终局见 `commandTool.scopes`」，不再对「本会话」下结论。
 - 「让路」被当作正常终局：诊断条不再给它挂 ⚠（头部汇总已经表达）。
 
@@ -34,7 +49,12 @@
 - 多宿主 shell 时不再出现 `envd_shell` 与宿主工具并列：旧实现用全局记忆算掩码，`mask` 一旦非空就跳过让路分支；旧构建的历史观测里确实出现过模型手里两个命令工具、简报却只说一个。现在按作用域逐个对账。
 - 委托失败分阶段记账（解析 / 启动 / 执行），输出里标 `[sandbox]`；执行器 `runnerFailed` 不再伪装成「命令跑完但失败」（返回 `ok:false`）；缺本会话 policy、缺会话信息、执行器族不支持时直接拒绝，绝不拿部署默认档冒充。旧说法「按宿主工具名选包装器」已废弃——Windows 官方 base 的宿主执行器是 PowerShell，而模型手里的工具可能是 bash 家族的 `ops_bash`，按工具名选包装器会直接 ParserError。
 - 守卫方向一改用该会话事实里的 `hostTool`，多宿主时不再拿全局 `shippedName` 静默放行成裸 `UNKNOWN_TOOL`。
+- 委托结果校验：执行器返回空 / 非对象 `result` 算失败（不记成功委托、不输出假结果），`aborted` 返回 `ok:false`；配合支持矩阵，cmd / WSL / 自定义终端目标不再出现「看起来跑完、其实命令没执行」。
 - 文档与验证口径：不把旧构建的观测当成新版本的验证结论。此前的 6.5 分钟稳态观测来自**旧构建**（没有 `commandTool.scopes` 与新计数），只能算历史观测；新构建的运行时证据需要重启 dsh 后重新采集。
+- **API 安全加固**：请求体 >1 MB 时先把请求读完再回 413（不再 ECONNRESET）；`sec-fetch-site: cross-site` 一律 403；本机请求但 `Origin` 不是回环也 403；`isLoopbackHost` 严格匹配回环地址（`127.0.0.1.evil.example` 不算回环）。
+- **性能**：状态文件按 `mtime+size` 缓存解析结果；探测结果在内存里缓存 45 秒；只有影响探测的写入（默认终端 / 自定义终端 / 默认版本 / 自定义工具）才作废探测缓存，改 `allowLan` 之类选项不再触发全量重扫；每 tick 复用工具定义快照（`defsSet` / `defsStamp`），候选名集合有界（各 64 条），`runtimeShellTools` 不再随插件改名线性膨胀。
+- **面板修复**：诊断三态（`diagUser` 未设置时跟随自动展开，点「收起」不再假死）、warn 级诊断不染红（danger 只留给 error / 最近错误）、异常会话不会被「还有 N 个」藏住（异常优先排序，按钮标注「（A 个异常）」）、长名字 / 路径溢出改为省略号 + title、403 无数据时不再显示假的「简报注入关闭」、中英文案补齐（英文界面不出现中文、`(平台默认)` 走词条）、复制失败可见提示。
+- **守卫边界说明**（dsh-ops 0.5.0）：它可能**先**挂 `tools/pre-execute` 的 deny + 自己的 guard，那种情况下 EnvDock 方向二的拒绝文案不一定出现、`guardDenials` 也可能一直是 0；文档不再把「不可执行时放行」之类写成已有保障。
 
 ## [0.2.0] - 2026-11-07
 
