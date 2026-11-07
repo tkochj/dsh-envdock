@@ -864,7 +864,9 @@ function commandToolState(runtime, isVisible, gate, includeScopes = true) {
           leaked: Array.isArray(fact.leaked) ? fact.leaked.slice() : [],
           hidesOwn: fact.hidesOwn === true,
           anomaly: fact.anomaly === true,
-          confined: fact.confined === true,
+          // 三态:null = 策略不可知。压成 false 会让面板把「不可知」当「确定无围栏」。
+          confined: fact.confined === true ? true : fact.confined === false ? false : null,
+          policyKnown: fact.policyKnown === true,
           mode: String(fact.mode || ''),
         }))
       : [],
