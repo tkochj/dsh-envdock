@@ -2,6 +2,8 @@
 
 面向要读代码、改代码的人。用户向的安装与使用说明见 [README](../README.md)。
 
+> **发布号 vs 内部迭代号**：对外发布用 **0.2.0**（npm `0.1.0` → `0.2.0`）；设计史里出现的 0.5 / 0.6 / 0.6.x 是开发期内部编号，从未发布，对应关系见 [CHANGELOG](../CHANGELOG.md)。
+
 ## 目标
 
 Windows 上做开发时，机器上往往并排躺着好几套 Node / Python / Git，cmd、PowerShell、Git Bash 又在混用。EnvDock 要回答四个问题，并把答案交给 AI：

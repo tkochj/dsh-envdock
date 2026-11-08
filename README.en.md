@@ -11,7 +11,7 @@
 
 ![EnvDock panel: one-sentence purpose, terminal choice, command row, toolchain](https://raw.githubusercontent.com/tkochj/dsh-envdock/main/docs/panel.png)
 
-> The screenshot is the 0.6.3 first screen (this example picked Git Bash by hand): a one-line header (icon · plugin name · default terminal and version · one two-state badge · Rescan) with a one-sentence purpose underneath; the pinned **Terminal / Command** card (the `Command` row reads "`bash syntax · manual` · `envd_shell` · `no other command tool` · Details", with plain-language notes only when needed, at most two, e.g. "N other sessions are sandbox-limited: envd_shell runs inside the sandbox" and "Hid pwsh (to avoid mixing the two syntaxes)"); a toolchain with one row per tool; one Environment brief row (state + an inline switch + Copy + Expand); **Advanced** collapsed by default and holding the "Hide the other family command tools" and "Allow LAN access" switches; and a footer with only copy feedback and the platform / updated footnote.
+> The screenshot is the 0.2.0 first screen (this example picked Git Bash by hand): a one-line header (icon · plugin name · default terminal and version · one two-state badge · Rescan) with a one-sentence purpose underneath; the pinned **Terminal / Command** card (the `Command` row reads "`bash syntax · manual` · `envd_shell` · `no other command tool` · Details", with plain-language notes only when needed, at most two, e.g. "N other sessions are sandbox-limited: envd_shell runs inside the sandbox" and "Hid pwsh (to avoid mixing the two syntaxes)"); a toolchain with one row per tool; one Environment brief row (state + an inline switch + Copy + Expand); **Advanced** collapsed by default and holding the "Hide the other family command tools" and "Allow LAN access" switches; and a footer with only copy feedback and the platform / updated footnote.
 
 On Windows it is common to have several Node / Python / Git installations side by side, while cmd, PowerShell and Git Bash all disagree on syntax. Without EnvDock the agent has to probe with `where node`, guess paths, write the wrong command and retry. **EnvDock is a DeepSeek Harness (dsh) plugin** that detects your toolchain at startup, injects a ready-made environment brief into the agent's context, and exposes **one syntax family per session** (bash or PowerShell); it optionally adds one command tool that runs your terminal (`envd_shell`). No configuration required.
 
@@ -45,6 +45,8 @@ On Windows it is common to have several Node / Python / Git installations side b
 **Requirements:** Windows and an installed DeepSeek Harness (dsh). Plugins are installed per profile; the commands below use `web`.
 
 > **The npm build may lag behind this repository.** For the newest features (the one-screen panel, the additive command tool, brief injection), install from a local directory / Git as described below; the npm package follows releases, and the repository's `package.json` is the source of truth for the current version.
+>
+> **Versioning:** the repository used 0.5 / 0.6 build numbers during development; the public release version is **0.2.0** (npm goes from 0.1.0 to 0.2.0). The mapping is in CHANGELOG.
 
 ### Option 1 — npm (may lag behind)
 
