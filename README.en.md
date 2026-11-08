@@ -44,9 +44,9 @@ On Windows it is common to have several Node / Python / Git installations side b
 
 **Requirements:** Windows and an installed DeepSeek Harness (dsh). Plugins are installed per profile; the commands below use `web`.
 
-> **npm's `dsh-envdock@latest` is the published release of this repository (currently 0.2.0) — just install it.** The repository's `main` may be ahead of the latest release (work in progress); use the local directory / Git options below if you want those commits.
+> **npm's `dsh-envdock@latest` is the published release of this repository (whatever the npm `latest` tag points to) — just install it.** The repository's `main` may be ahead of the latest release (work in progress); use the local directory / Git options below if you want those commits.
 >
-> **Versioning:** the repository used 0.5 / 0.6 build numbers during development; the public release version is **0.2.0** (npm goes from 0.1.0 to 0.2.0). The mapping is in CHANGELOG.
+> **Versioning:** public releases started at **0.2.0** (npm went from 0.1.0 to 0.2.0; later 0.2.x are releases); the repository's 0.5 / 0.6 build numbers were internal, never published. The mapping is in CHANGELOG.
 
 ### Option 1 — npm (recommended)
 
