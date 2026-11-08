@@ -5,8 +5,9 @@
  *   1. 探测机器上的工具链(Node/Python/Git/包管理器)、多版本、版本管理器与终端。
  *   2. 把「系统 + 终端 + 工具版本」写成一条运行环境简报,注入给模型。
  *   3. 注册 `envd` 工具:按名字解析绝对路径 / 版本 / 该终端下的正确命令语法。
- *   4. 注册一个**增补**的 `envd_shell`(用你配置的终端与 PATH):**永不隐藏、永不禁用**
- *      任何别人的工具 —— 宿主的命令工具始终可用,围栏会话里 envd_shell 直接拒绝执行。
+ *   4. 注册一个**增补**的 `envd_shell`(用你配置的终端与 PATH):围栏会话里直接拒绝执行。
+ *      0.6 起按**语法族**工作:每个会话只暴露一族命令工具 —— bash 族会话会遮挡宿主的
+ *      PowerShell 族内置名(pwsh/powershell),开关 `blockOtherFamily` 可关闭(见核实后的规则)。
  *   5. 提供 /envdock-api 给侧边栏面板读写状态。
  *
  * 刻意不 import 任何 @deepseek-ai/* 包:本地目录安装是 link 检出,
@@ -47,6 +48,11 @@ const DEFAULT_STATE = {
     injectBrief: true,
     /** 允许非 loopback 请求访问 /envdock-api(默认关:面板数据含本机路径与终端) */
     allowLan: false,
+    /**
+     * bash 族会话遮挡 PowerShell 族内置命令工具(pwsh / powershell)。
+     * 0.6 默认开;关掉 = 两族同时可见(简报/面板只警告,不遮挡)。
+     */
+    blockOtherFamily: true,
   },
 }
 
@@ -65,6 +71,7 @@ function normalizeOptions(raw) {
   return {
     injectBrief: src.injectBrief === false ? false : true,
     allowLan: src.allowLan === true,
+    blockOtherFamily: src.blockOtherFamily === false ? false : true,
   }
 }
 
@@ -655,7 +662,229 @@ function shellFamilyFromDefinition(definition) {
   return ''
 }
 
-// ──────────────────────────────────────────────────────── 探测 ──
+// ────────────────────────────────────────────────── 两族(0.6) ──
+/**
+ * 语法族:一个会话只暴露一个族的命令工具(0.6 的唯一例外,见 docs/DESIGN.md)。
+ *
+ *   bash 族       宿主 bash / sh / zsh / fish / ops_bash,以及启发式认出的第三方 bash 名
+ *   PowerShell 族 宿主 pwsh / powershell(启发式认出的其它 PowerShell 名只展示,不遮挡)
+ *
+ * cmd 与自定义终端不参与自动选族、也不被遮挡;WSL 手动选时按 bash 语法计(D5)。
+ * 只有**内置**的 PowerShell 名会进入遮挡/拒绝名单:启发式认出的名字可能是第三方发布的
+ * 普通工具,误伤一次就是「模型手里突然少一个工具」,而且很难向用户解释。
+ */
+const FAMILY_BASH = 'bash'
+const FAMILY_POWERSHELL = 'powershell'
+
+/** 首次判定后允许「powershell → bash」升级的时间窗(兜住 dsh-ops 晚挂载 ops_bash)。 */
+export const FAMILY_GRACE_MS = 10_000
+
+/** 会进入遮挡/拒绝名单的内置 PowerShell 族命令工具名(D8:pwsh_persistent 先只展示,不加)。 */
+export const POWER_SHELL_BUILTIN_NAMES = Object.freeze(['pwsh', 'powershell'])
+
+/** 内置命令工具名 → 语法族(这是**遮挡**口径;ops_bash 认成 bash,不参与 PowerShell 遮挡)。 */
+const BUILTIN_TOOL_GROUP = Object.freeze({
+  pwsh: FAMILY_POWERSHELL,
+  powershell: FAMILY_POWERSHELL,
+  cmd: 'cmd',
+  bash: FAMILY_BASH,
+  sh: FAMILY_BASH,
+  zsh: FAMILY_BASH,
+  fish: FAMILY_BASH,
+  // dsh-ops 在 cordis 模式用 ops_bash 顶替官方 pwsh/bash(同一套 bash 语法)。
+  ops_bash: FAMILY_BASH,
+})
+
+/** 名字 → 语法族(内置名单优先,其余按 token 启发式,同 shellFamilyByName)。 */
+export function shellToolGroup(name) {
+  const lower = String(name || '').toLowerCase()
+  if (!lower || lower === ENVD_SHELL_NAME) return ''
+  if (BUILTIN_TOOL_GROUP[lower]) return BUILTIN_TOOL_GROUP[lower]
+  return shellFamilyByName(lower)
+}
+
+/** 手动选择的族。defaultShell 非 auto 时才可能有值;cmd / custom 不参与两族(永不遮挡)。 */
+export function manualFamilyOf(defaultShell) {
+  const key = String(defaultShell || 'auto').toLowerCase()
+  if (key === 'pwsh' || key === 'powershell') return FAMILY_POWERSHELL
+  // WSL 手动选时按 bash 语法计:进入 wsl 之后跑的就是 bash。
+  if (key === 'bash' || key === 'wsl' || key === 'sh' || key === 'zsh' || key === 'fish') return FAMILY_BASH
+  return ''
+}
+
+/** 自动选族:会话能看到任何 bash 族宿主工具 → bash,否则 PowerShell。 */
+export function autoFamilyOf(hostTools) {
+  for (const tool of Array.isArray(hostTools) ? hostTools : []) if (tool && tool.family === FAMILY_BASH) return FAMILY_BASH
+  return FAMILY_POWERSHELL
+}
+
+/**
+ * 会话族判定(锁定 + 10 秒升级宽限)。纯函数,不碰 IO。
+ *
+ * record: { source:'auto'|'manual', group, at, upgraded } | null
+ * 返回  : { group, source:'auto'|'manual', changed, record }
+ */
+export function resolveSessionFamily(input) {
+  const spec = input && typeof input === 'object' ? input : {}
+  const now = Number.isFinite(spec.now) ? spec.now : Date.now()
+  const manual = spec.manual === FAMILY_BASH || spec.manual === FAMILY_POWERSHELL ? spec.manual : ''
+  const auto = spec.auto === FAMILY_BASH ? FAMILY_BASH : FAMILY_POWERSHELL
+  const record = spec.record && typeof spec.record === 'object' ? spec.record : null
+  if (manual) {
+    const changed = !record || record.source !== 'manual' || record.group !== manual
+    return { group: manual, source: 'manual', changed, record: { source: 'manual', group: manual, at: now, upgraded: true } }
+  }
+  if (record && record.source === 'auto') {
+    const withinGrace = now - Number(record.at || 0) <= FAMILY_GRACE_MS
+    if (record.group === FAMILY_POWERSHELL && auto === FAMILY_BASH && record.upgraded !== true && withinGrace) {
+      return {
+        group: FAMILY_BASH,
+        source: 'auto',
+        changed: true,
+        record: { source: 'auto', group: FAMILY_BASH, at: record.at, upgraded: true },
+      }
+    }
+    const group = record.group === FAMILY_BASH ? FAMILY_BASH : FAMILY_POWERSHELL
+    return { group, source: 'auto', changed: false, record }
+  }
+  return { group: auto, source: 'auto', changed: true, record: { source: 'auto', group: auto, at: now, upgraded: false } }
+}
+
+/**
+ * 一个会话的遮挡/拒绝目标集合。纯函数。
+ *
+ * active = 开关开 + 会话族 bash + (该会话看得到 bash 族宿主工具,或上次已经遮过 —— sticky)。
+ * sticky 是「记忆」:op_bash 之类 bash 族工具消失后,已经遮挡的 pwsh 不立刻放回来,
+ * 直到主人在面板上「重新探测」(会话族与遮挡一起重判),避免工具表在会话里反复闪。
+ *   hide       可见且可 restrict 的内置 PowerShell 名(继承层;tools.restrict 能挡掉)
+ *   refuse     可见的内置 PowerShell 名(含 agent 自有层:restrict 挡不掉,只能 guard 拒绝)
+ *   displayOnly 启发式认出的 PowerShell 族名字(只展示,永不遮挡/拒绝)
+ * 硬不变量:返回的 hide / refuse 里永远不会出现 bash 族名字。
+ */
+export function familyMask(input) {
+  const spec = input && typeof input === 'object' ? input : {}
+  const hostTools = Array.isArray(spec.hostTools) ? spec.hostTools : []
+  const active =
+    spec.blockOtherFamily !== false &&
+    spec.group === FAMILY_BASH &&
+    (hostTools.some((tool) => tool && tool.family === FAMILY_BASH) || spec.sticky === true)
+  const known = new Set()
+  if (spec.known && typeof spec.known[Symbol.iterator] === 'function') for (const name of spec.known) known.add(String(name))
+  for (const tool of hostTools) if (tool && tool.name) known.add(String(tool.name))
+  const restrictable = spec.restrictable && typeof spec.restrictable.has === 'function' ? spec.restrictable : null
+  const hide = []
+  const refuse = []
+  if (active) {
+    for (const name of POWER_SHELL_BUILTIN_NAMES) {
+      if (!known.has(name)) continue
+      refuse.push(name)
+      // 省略 restrictable = 全可 restrict(老宿主没有 view 时的保守口径)。
+      if (!restrictable || restrictable.has(name)) hide.push(name)
+    }
+  }
+  const displayOnly = active
+    ? hostTools
+        .filter((tool) => tool && tool.learned === true && tool.family === FAMILY_POWERSHELL)
+        .map((tool) => String(tool.name))
+        .sort()
+    : []
+  return { active, hide: hide.sort(), refuse: refuse.sort(), displayOnly }
+}
+
+/**
+ * 简报里的「命令工具」行(纯函数,按会话族生成)。
+ *
+ * spec: {
+ *   family, familySource, shellLabel, terminalAvailable,
+ *   registered, skipReason,
+ *   hostTools: [{ name, family, learned }],   // 本会话此刻看得见的宿主命令工具(不含被遮掉的内置名)
+ *   hidden, refused, displayOnly,              // familyMask 的结果(或 runtime 快照的并集)
+ *   mixed, blockOtherFamily, bashHostAvailable,
+ *   confined, sessionless,
+ * }
+ */
+export function familyBriefLine(spec) {
+  const s = spec && typeof spec === 'object' ? spec : {}
+  const family = s.family === FAMILY_BASH || s.family === FAMILY_POWERSHELL ? s.family : ''
+  const manual = s.familySource === 'manual'
+  const envd = ENVD_SHELL_NAME
+  const hostTools = Array.isArray(s.hostTools) ? s.hostTools.filter((tool) => tool && tool.name) : []
+  const hidden = Array.isArray(s.hidden) ? s.hidden.filter(Boolean) : []
+  const refused = Array.isArray(s.refused) ? s.refused.filter(Boolean) : Array.isArray(s.refuseOnly) ? s.refuseOnly.filter(Boolean) : []
+  const displayOnly = Array.isArray(s.displayOnly) ? s.displayOnly.filter(Boolean) : []
+  const listed = (list) => list.map((name) => '`' + String(name) + '`').join(', ')
+  const hostBash = hostTools.filter((tool) => tool.family === FAMILY_BASH).map((tool) => String(tool.name))
+  const hostPwsh = hostTools.filter((tool) => tool.family === FAMILY_POWERSHELL).map((tool) => String(tool.name))
+  const hostOther = hostTools
+    .filter((tool) => tool.family !== FAMILY_BASH && tool.family !== FAMILY_POWERSHELL)
+    .map((tool) => String(tool.name))
+  const bashHostAvailable = s.bashHostAvailable === true || hostBash.length > 0
+  const terminalLabel = String(s.shellLabel || (family === FAMILY_BASH ? 'Git Bash' : 'PowerShell 7'))
+  const registered = s.registered === true
+  const skipReason = s.skipReason ? String(s.skipReason) : ''
+  const blockOtherFamily = s.blockOtherFamily !== false
+  let line = '  · 命令工具'
+  if (family) line += '(' + (family === FAMILY_BASH ? 'bash 族' : 'PowerShell 族') + (manual ? ',手动选择' : '') + ')'
+  line += ': '
+
+  if (family === FAMILY_BASH) {
+    const bits = []
+    if (hostBash.length) bits.push('宿主 ' + listed(hostBash))
+    if (registered) bits.push('`' + envd + '`(EnvDock 增补,' + terminalLabel + ',同语法)')
+    else if (skipReason === 'no-family-terminal') bits.push('`' + envd + '` 未注册(' + terminalLabel + ')')
+    else if (skipReason === 'taken') bits.push('`' + envd + '` 与其它插件同名,EnvDock 未注册')
+    else if (skipReason === 'no-unconfined-session') bits.push('`' + envd + '` 未注册(没有无围栏会话)')
+    else if (skipReason) bits.push('`' + envd + '` 未注册(原因见面板详情)')
+    line += bits.length ? bits.join(' + ') : '(没有可用的 bash 族命令工具)'
+    if (hidden.length) line += ';PowerShell 族宿主工具已隐藏(' + listed(hidden) + '),不要调用 ' + hidden[0]
+    else if (refused.length) line += ';PowerShell 族宿主工具(`' + refused[0] + '`)在本会话调用会被拒绝'
+    if (!blockOtherFamily && hostPwsh.length) line += ';PowerShell 族宿主工具未隐藏(' + listed(hostPwsh) + '),两族同时可见,各按自己的语法写命令,不要混写'
+    if (manual && !bashHostAvailable) line += ';本会话看不到 bash 族宿主工具,EnvDock 未遮挡 PowerShell 族'
+    if (displayOnly.length) line += ';另见只展示、未遮挡的 ' + listed(displayOnly)
+  } else if (family === FAMILY_POWERSHELL) {
+    const bits = []
+    if (registered) bits.push('`' + envd + '`(EnvDock 增补,' + terminalLabel + ')')
+    else if (skipReason === 'no-family-terminal') bits.push('`' + envd + '` 未注册(' + terminalLabel + ')')
+    else if (skipReason === 'taken') bits.push('`' + envd + '` 与其它插件同名,EnvDock 未注册')
+    else if (skipReason === 'no-unconfined-session') bits.push('`' + envd + '` 未注册(没有无围栏会话)')
+    else if (skipReason) bits.push('`' + envd + '` 未注册(原因见面板详情)')
+    if (hostPwsh.length) bits.push('宿主 ' + listed(hostPwsh))
+    if (hostBash.length) bits.push('宿主 ' + listed(hostBash) + '(bash 族,未隐藏)')
+    if (hostOther.length) bits.push('宿主 ' + listed(hostOther))
+    line += bits.length ? bits.join(' + ') : '(没有可用的 PowerShell 族命令工具)'
+    if (s.mixed === true || (manual && hostBash.length)) line += ';两族同时可见,各按自己的语法写命令,不要混写'
+    else if (!bashHostAvailable) line += ';未检测到 bash 族工具,不需要 bash 语法'
+    if (refused.length) line += ';同一族的内置名调用会被拒绝(' + listed(refused) + ')'
+    if (displayOnly.length) line += ';另见只展示、未遮挡的 ' + listed(displayOnly)
+  } else {
+    // 手动 cmd / custom:不参与两族,按原口径描述。
+    const bits = []
+    if (registered) bits.push('`' + envd + '`(EnvDock 增补,用 ' + terminalLabel + ' 语法)')
+    if (hostTools.length) bits.push('宿主 ' + listed(hostTools.map((tool) => String(tool.name))))
+    line += bits.length ? bits.join(' + ') : '用宿主的 ' + (hostTools.length ? listed(hostTools.map((t) => String(t.name))) : '(未识别到宿主命令工具)')
+  }
+
+  // 手动选的族不可用 → 已回退 auto:必须说清楚,否则面板/简报和模型的命令语法会打架。
+  if (s.fallback === true) line += ';手动选择的族不可用(该族既没有终端、也没有按该族发布的宿主工具),已回退自动选族'
+  // 围栏:envd_shell 会被拒绝 —— 与 execute 的拒绝文案同一措辞,并**指向真正的出路**。
+  if (s.confined === true && s.sessionless !== true) {
+    if (family === FAMILY_BASH) {
+      line += bashHostAvailable
+        ? ';本会话被围栏:envd_shell 会拒绝,改用 ' + listed(hostBash.slice(0, 1)) + '(同语法)'
+        : ';本会话被围栏:envd_shell 会拒绝,且本会话没有 bash 族宿主工具可用'
+    } else if (family === FAMILY_POWERSHELL) {
+      line += ';本会话被围栏:envd_shell 会拒绝,改用宿主 ' + (hostPwsh.length ? listed(hostPwsh.slice(0, 1)) : '`pwsh`')
+    } else {
+      line += ';本会话被围栏:envd_shell 会拒绝'
+    }
+  }
+  if (registered && !s.sessionless && family === FAMILY_BASH && bashHostAvailable && s.confined !== true) {
+    line += ';使用分工:需要你机器上的版本(node/pnpm/python/git)时用 envd_shell,需要后台作业或沙箱提权参数时用 ops_bash'
+  }
+  return line
+}
+
+// ──────────────────────────────────────────────── 探测 ──
 
 let cache = { at: 0, value: null, inflight: null }
 /** 每次作废探测就 +1:探测启动时记下代数,落地时代数变了说明中途有状态写入,这份结果不能进缓存。 */
@@ -733,14 +962,28 @@ function createRuntime() {
     ownDefinition: null,
     /** envd_shell 是否由我们注册成功(注册成功且仍是那一份) */
     registered: false,
-    /** 未注册的原因:'same-family' | 'no-unconfined-session' | 'taken' | 'error' | null(§1.4) */
+    /** 未注册的原因:'no-family-terminal' | 'no-unconfined-session' | 'taken' | 'error' | null(§1.4) */
     skipReason: null,
-    /** 宿主已识别的命令工具(只用于展示):[{ name, family, learned }],排序稳定、名字有界 */
+    /** 宿主已识别的命令工具(只用于展示):[{ name, family, learned, group }],排序稳定、名字有界 */
     hostTools: [],
-    /** 与默认终端同族的宿主工具名('' = 没有)。简报用它说「不重复提供」 */
-    sameFamilyTool: '',
-    /** 默认终端的家族(执行侧读 activeShell,这里只给诊断) */
+    /** 主终端所在的语法族(全局默认族;cmd/custom 手动选择时为 '') */
     family: '',
+    /** 族的来源:'auto' | 'manual' */
+    familySource: 'auto',
+    /** 手动选的族没有终端也没有对应宿主工具 → 已回退 auto(简报/面板要警告) */
+    familyFallback: false,
+    /** 逐会话族的聚合计数 */
+    sessions: { total: 0, bash: 0, powershell: 0, other: 0 },
+    /** 此刻被 restrict 遮挡的内置 PowerShell 名(并集) */
+    hidden: [],
+    /** 只能在 dispatch 前拒绝、无法 restrict 的内置 PowerShell 名(agent 自有层) */
+    refuseOnly: [],
+    /** 启发式认出的 PowerShell 族名字:只展示,永不遮挡 */
+    displayOnly: [],
+    /** 手动 PowerShell + 会话里有 bash 族工具(两族同时可见,未遮挡) */
+    mixed: false,
+    /** 遮挡开关的当前值(panel 冗余展示) */
+    blockOtherFamily: true,
     /** 沙箱聚合事实(§1.4 的形状;逐会话明细不外泄) */
     sandbox: {
       present: false,
@@ -759,9 +1002,10 @@ function createRuntime() {
 /**
  * `/envdock-api` 与面板的 `commandTool`(§1.4)。
  *
- * 只回答四件事:注册了吗(skipReason 说明为什么没注册)、此刻全局可见吗、用哪个终端、
- * 宿主还有哪些命令工具。没有 scopes / kind / denies / yield 之类「接管时代」的字段 ——
- * EnvDock 不再遮挡别人,也就不存在「每个会话的终局」。
+ * 回答:注册了吗(skipReason 说明为什么没注册)、此刻全局可见吗、用哪个终端、
+ * 宿主还有哪些命令工具,以及 0.6 的两族状态(family / sessions / hidden / refuseOnly /
+ * displayOnly / mixed)。没有 scopes / kind / denies / yield 之类「接管时代」的字段 ——
+ * 遮挡是 restrict + guard 的产物,只报**结果**(谁被藏了、谁只能拒绝),不报逐会话账本。
  *
  * `visible` 是一次 hasTool 探针,只用于展示真相:注册成功 ≠ 模型看得见。
  */
@@ -785,7 +1029,28 @@ function commandToolState(runtime, shell, sandbox, isVisible) {
       name: String(tool.name || ''),
       family: String(tool.family || ''),
       learned: tool.learned === true,
+      // 两族口径:'bash' | 'powershell' | ''(cmd / wsl 等)
+      group: tool.group === FAMILY_BASH || tool.group === FAMILY_POWERSHELL ? tool.group : '',
     })),
+    /** 0.6 两族:当前会话族(无会话时给全局口径) */
+    family: runtime.family === FAMILY_BASH || runtime.family === FAMILY_POWERSHELL ? runtime.family : '',
+    familySource: runtime.familySource === 'manual' ? 'manual' : 'auto',
+    familyFallback: runtime.familyFallback === true,
+    blockOtherFamily: runtime.blockOtherFamily !== false,
+    sessions: {
+      total: Number(runtime.sessions && runtime.sessions.total) || 0,
+      bash: Number(runtime.sessions && runtime.sessions.bash) || 0,
+      powershell: Number(runtime.sessions && runtime.sessions.powershell) || 0,
+      other: Number(runtime.sessions && runtime.sessions.other) || 0,
+    },
+    /** 被 restrict 真正遮挡掉的内置 PowerShell 名 */
+    hidden: (Array.isArray(runtime.hidden) ? runtime.hidden : []).map(String),
+    /** 挡不掉、只能 guard 拒绝的名字 */
+    refuseOnly: (Array.isArray(runtime.refuseOnly) ? runtime.refuseOnly : []).map(String),
+    /** 启发式认出的 PowerShell 名:只展示 */
+    displayOnly: (Array.isArray(runtime.displayOnly) ? runtime.displayOnly : []).map(String),
+    /** 两族同时可见(手动 PowerShell + bash 族工具) */
+    mixed: runtime.mixed === true,
     sandbox: { ...(sandbox || (runtime && runtime.sandbox) || {}) },
   }
 }
@@ -1556,10 +1821,19 @@ async function detect(ctx, runner, state, force) {
 
 // ──────────────────────────────────────────────────── 默认终端 ──
 
-function resolveShell(state, detection) {
+/**
+ * 解析默认终端。
+ *
+ * 0.6 起带 `family` 参数:自动模式下按**族**挑终端(bash 族要 Git Bash,PowerShell 族要
+ * pwsh/powershell),不再无条件优先 Windows 的 pwsh —— 否则 bash 族会话会拿到一个
+ * 「用 PowerShell 语法」的 envd_shell,简报与执行侧直接自相矛盾。
+ * `family` 省略 = 老口径(cmd / 自定义 / 无会话时的全局展示)。
+ */
+function resolveShell(state, detection, family) {
   const terminals = (detection && detection.terminals) || []
   const pick = (key) => terminals.find((t) => t.key === key) || null
   const wanted = state.defaultShell || 'auto'
+  const group = family === FAMILY_BASH || family === FAMILY_POWERSHELL ? family : ''
 
   if (wanted === 'custom' && state.customShell && state.customShell.path && existsSync(state.customShell.path)) {
     const rawArgs = state.customShell.args
@@ -1572,18 +1846,34 @@ function resolveShell(state, detection) {
       args: args.length ? args : ['-c', '{command}'],
     }
   }
+  // 手动选的终端永远第一优先(它已经把语法族讲清楚了)。
   const explicit = wanted !== 'auto' ? pick(wanted) : null
-  const preferred = IS_WIN ? ['pwsh', 'powershell', 'cmd'] : ['bash', 'zsh', 'sh']
+  const preferred =
+    group === FAMILY_BASH
+      ? ['bash', 'zsh', 'sh']
+      : group === FAMILY_POWERSHELL
+        ? ['pwsh', 'powershell']
+        : IS_WIN
+          ? ['pwsh', 'powershell', 'cmd']
+          : ['bash', 'zsh', 'sh']
   let chosen = explicit
   if (!chosen) {
     for (const key of preferred) {
       chosen = pick(key)
       if (chosen) break
     }
+    // 显式的 preferred 名单没命中时,按族的**全部**终端兜底(比如只有 fish 的机器)。
+    if (!chosen && group) chosen = terminals.find((t) => t.family === group) || null
+    if (!chosen && !group) chosen = terminals[0] || null
   }
-  chosen = chosen || terminals[0] || null
   if (!chosen) {
-    return { key: 'none', label: '未探测到可用终端', family: 'custom', path: null, args: [] }
+    return {
+      key: 'none',
+      label: group === FAMILY_BASH ? '未找到 Git Bash' : group === FAMILY_POWERSHELL ? '未找到 PowerShell' : '未探测到可用终端',
+      family: group || 'custom',
+      path: null,
+      args: [],
+    }
   }
   // 刻意不再返回 toolName:命令工具的注册名是固定的 ENVD_SHELL_NAME,不随终端变。
   // 终端变了只是「怎么执行」变(执行侧从 activeShell 读),注册表不需要跟着动。
@@ -1693,7 +1983,11 @@ function healthIssues(detection, state) {
 
 function brief(detection, state, probeIn, runtime) {
   if (!detection) return ''
-  const shell = resolveShell(state, detection)
+  // probe 是**按会话**的:族 / 宿主工具 / 遮挡结果 / gate 全部按这个 agent 求值。
+  // sessionless(API 简报)没有「本会话」,用 runtime 的全局快照,不下会话结论。
+  const probe = probeIn && typeof probeIn === 'object' ? probeIn : {}
+  const family = probe.family === FAMILY_BASH || probe.family === FAMILY_POWERSHELL ? probe.family : ''
+  const shell = resolveShell(state, detection, family || undefined)
   const lines = []
   lines.push('## 本机环境 (EnvDock 实测,优先于猜测)')
   lines.push(
@@ -1706,56 +2000,40 @@ function brief(detection, state, probeIn, runtime) {
       '),用户 ' +
       (detection.platform.host || ''),
   )
-  if (shell.key !== 'none') {
-    lines.push('- 默认终端: ' + shell.label + (shell.path ? ' → ' + shell.path : '') + (shell.version ? ' (v' + shell.version + ')' : ''))
-    // probe 是**按会话**的:gate() 给本会话的沙箱事实,visible(name) 走该 agent 作用域。
-    // 简报只说这个会话的实话(§1.6),不下全局结论。
-    const probe = probeIn && typeof probeIn === 'object' ? probeIn : {}
-    const gate = typeof probe.gate === 'function' ? probe.gate() : null
-    const sessionless = probe.sessionless === true
-    const registered = Boolean(runtime && runtime.registered === true)
-    const skipReason = runtime && runtime.skipReason ? String(runtime.skipReason) : null
-    const hostTools = runtime && Array.isArray(runtime.hostTools) ? runtime.hostTools : []
-    const hostNames = hostTools.map((tool) => String(tool.name || '')).filter(Boolean)
-    const familyLabel = (family) =>
-      ({ bash: 'bash / sh', powershell: 'PowerShell', cmd: 'cmd', wsl: 'WSL', custom: '自定义终端' })[family] || ''
-    const hostList = hostNames.length ? hostNames.map((name) => '`' + name + '`').join(', ') : ''
-    const hostFamilies = [...new Set(hostTools.map((tool) => familyLabel(tool.family)).filter(Boolean))]
-    let commandLine = ''
-    if (registered) {
-      // 注册成功:两条命令工具都可用,说清优先级与理由(§1.6)
-      commandLine = '  · 命令工具: `' + ENVD_SHELL_NAME + '`(EnvDock 增补,用 ' + shell.label + ' 语法)'
-      if (hostList) {
-        commandLine +=
-          ' + 宿主 ' +
-          hostList +
-          (hostFamilies.length ? '(' + hostFamilies.join(' / ') + ')' : '') +
-          ';二者都可用,优先 `' +
-          ENVD_SHELL_NAME +
-          '`(它用你的 PATH/终端),需要宿主语义时再用宿主工具'
-      } else {
-        commandLine += ';宿主没有识别到命令工具,用这个就行'
-      }
-    } else if (skipReason === 'same-family') {
-      const same = runtime && runtime.sameFamilyTool ? '`' + runtime.sameFamilyTool + '`' : hostList || '宿主的命令工具'
-      commandLine = '  · 命令工具: ' + same + '(与默认终端同族,EnvDock 不重复提供)'
-    } else {
-      commandLine = '  · 命令工具: 用宿主的 ' + (hostList || '(未识别到宿主命令工具)')
-      if (skipReason === 'no-unconfined-session') {
-        commandLine += ';没有无围栏会话,EnvDock 暂不注册 `' + ENVD_SHELL_NAME + '`(围栏会话里它只会拒绝)'
-      } else if (skipReason === 'taken') {
-        commandLine += ';`' + ENVD_SHELL_NAME + '` 与其它插件同名,EnvDock 未注册'
-      } else {
-        commandLine += ';EnvDock 未注册 `' + ENVD_SHELL_NAME + '`(原因见面板详情)'
-      }
-    }
-    // 围栏会话:envd_shell 会被拒绝 —— 与 execute 的拒绝文案同一措辞。
-    // sessionless(API 简报)没有「本会话」可言,不下会话结论。
-    if (!sessionless && gate && gate.confined !== false) {
-      commandLine += ';Envd_shell 在本会话被围栏,会被拒绝,请用宿主工具'
-    }
-    lines.push(commandLine)
-  }
+  lines.push(
+    '- 默认终端: ' +
+      (shell.key === 'none'
+        ? shell.label + '(未找到;本机没有该族的可用终端)'
+        : shell.label + (shell.path ? ' → ' + shell.path : '') + (shell.version ? ' (v' + shell.version + ')' : '')),
+  )
+  const gate = typeof probe.gate === 'function' ? probe.gate() : null
+  const sessionless = probe.sessionless === true
+  const registered = Boolean(runtime && runtime.registered === true)
+  const skipReason = runtime && runtime.skipReason ? String(runtime.skipReason) : null
+  const fallbackTools = runtime && Array.isArray(runtime.hostTools) ? runtime.hostTools : []
+  const commandLine = familyBriefLine({
+    family: probe.family !== undefined ? probe.family : family,
+    familySource: probe.familySource || (runtime && runtime.familySource) || 'auto',
+    shellLabel: shell.label,
+    terminalAvailable: Boolean(shell.path),
+    registered,
+    skipReason,
+    hostTools: Array.isArray(probe.hostTools) ? probe.hostTools : fallbackTools,
+    hidden: Array.isArray(probe.hidden) ? probe.hidden : runtime && Array.isArray(runtime.hidden) ? runtime.hidden : [],
+    refused: Array.isArray(probe.refused)
+      ? probe.refused
+      : runtime && Array.isArray(runtime.refuseOnly)
+        ? runtime.refuseOnly
+        : [],
+    displayOnly: Array.isArray(probe.displayOnly) ? probe.displayOnly : runtime && Array.isArray(runtime.displayOnly) ? runtime.displayOnly : [],
+    mixed: probe.mixed === true || Boolean(runtime && runtime.mixed === true),
+    fallback: probe.fallback === true || Boolean(runtime && runtime.familyFallback === true),
+    blockOtherFamily: probe.blockOtherFamily !== undefined ? probe.blockOtherFamily : runtime && runtime.blockOtherFamily,
+    bashHostAvailable: probe.bashHostAvailable === true || fallbackTools.some((tool) => tool && tool.family === FAMILY_BASH),
+    confined: !sessionless && Boolean(gate && gate.confined !== false),
+    sessionless,
+  })
+  lines.push(commandLine)
   const tools = (detection.tools || []).slice(0, 14)
   if (tools.length) {
     lines.push('- 工具(绝对路径,直接用,不必再 where/which):')
@@ -1829,13 +2107,14 @@ function isLoopback(req) {
   return isLoopbackHost(addr)
 }
 
-function envdTool(ctx, getDetection, getState, forceRefresh, runtime, gateFor, hasToolFor) {
+function envdTool(ctx, getDetection, getState, forceRefresh, runtime, gateFor, hasToolFor, familyFor) {
   /**
-   * 按调用方会话求值的探针:简报要按这个会话说真话(有没有被围栏、该用哪个命令工具)。
+   * 按调用方会话求值的探针:简报要按这个会话说真话(有没有被围栏、当前族、该用哪个命令工具)。
    * execute 拿得到 exec.agent 就按它求值;没有 agent = 全局视图,不下会话结论。
    */
   const probeFor = (exec) => {
     const agent = exec && exec.agent ? exec.agent : null
+    const facts = typeof familyFor === 'function' ? familyFor(agent) : null
     return {
       visible: (name) => {
         try {
@@ -1847,6 +2126,7 @@ function envdTool(ctx, getDetection, getState, forceRefresh, runtime, gateFor, h
       gate: () => (typeof gateFor === 'function' ? gateFor(agent) : null),
       agentId: agent ? String(agent.id) : '',
       sessionless: !agent,
+      ...(facts && typeof facts === 'object' ? facts : {}),
     }
   }
   const definition = {
@@ -1884,7 +2164,7 @@ function envdTool(ctx, getDetection, getState, forceRefresh, runtime, gateFor, h
       const state = getState()
       let detection = null
       try {
-        detection = await getDetection(Boolean(a.refresh) || Boolean(forceRefresh))
+        detection = await getDetection(Boolean(a.refresh) || Boolean(forceRefresh), Boolean(a.refresh) === true)
       } catch (error) {
         return { ok: false, text: '环境探测失败: ' + String((error && error.message) || error) }
       }
@@ -1930,7 +2210,8 @@ function envdTool(ctx, getDetection, getState, forceRefresh, runtime, gateFor, h
           text: '没探测到 "' + name + '"。已探测: ' + (detection.tools || []).map((t) => t.key + (t.defaultVersion ? '@' + t.defaultVersion : '')).join(', '),
         }
       }
-      const shell = resolveShell(state, detection)
+      // 终端行按**本会话的族**说(与简报同一口径):bash 族会话里说「终端: PowerShell 7」会自相矛盾。
+      const shell = resolveShell(state, detection, probe.family || undefined)
       const lines = []
       lines.push(entry.label + ' 默认: ' + entry.defaultPath + (entry.defaultVersion ? ' (' + entry.defaultVersion + ')' : ''))
       // `envd resolve py` 走到这里:命中 python,但要把启动器本身讲明白,不能只报解释器就完事。
@@ -1968,8 +2249,10 @@ function envdTool(ctx, getDetection, getState, forceRefresh, runtime, gateFor, h
  * 它**不隐藏、不禁用**任何别人的工具;围栏会话里直接拒绝(不 spawn、不委托):
  * 拒绝的措辞要能让模型立刻改道去找宿主工具,而不是怀疑工具坏了或命令写错了。
  */
-function commandTool(ctx, activeShell, gateFor) {
-  /** 本会话的执行闸门。取不到就按「有围栏」保守处理,绝不猜成无围栏。 */
+function commandTool(ctx, activeShell, gateFor, familyFor) {
+  /**
+   * 本会话的执行闸门。取不到就按「有围栏」保守处理,绝不猜成无围栏。
+   */
   const gateAt = (agent) => {
     const fallback = { present: false, capable: false, confined: true, mode: '', policyKnown: false }
     let gate = fallback
@@ -1981,12 +2264,24 @@ function commandTool(ctx, activeShell, gateFor) {
     // 策略不可得(confined 为 null/undefined)一律按「被围栏」处理:宁可拒绝,不开无围栏旁路。
     return { ...gate, confined: gate.confined !== false }
   }
+  /** 本会话的语法族(取不到就按全局默认,绝不猜成有终端)。 */
+  const familyAt = (agent) => {
+    let facts = null
+    try {
+      if (typeof familyFor === 'function') facts = familyFor(agent)
+    } catch {
+      facts = null
+    }
+    const family = facts && facts.family === FAMILY_BASH ? FAMILY_BASH : facts && facts.family === FAMILY_POWERSHELL ? FAMILY_POWERSHELL : ''
+    return { facts: facts || {}, family }
+  }
   return {
     name: ENVD_SHELL_NAME,
     description:
-      '在本机默认终端里执行一条命令并返回输出(EnvDock 的增补工具,用你配置的终端与 PATH)。' +
+      '在本机默认终端里执行一条命令并返回输出(EnvDock 的增补工具,用**本会话语法族**的终端与 PATH)。' +
       '终端是哪一个、必须用哪套语法,以「本机环境 (EnvDock)」简报里「默认终端 / 命令工具」那几行为准。' +
-      '它不会隐藏或禁用任何其它工具:宿主自带的命令工具仍然可用;若本会话被宿主沙箱围栏,本工具会直接拒绝,请改用宿主工具。' +
+      'EnvDock 按会话的语法族工作:bash 族会话会隐藏宿主的 PowerShell 族命令工具(pwsh/powershell,面板开关可关);' +
+      '若本会话被宿主沙箱围栏,本工具会直接拒绝,请改用宿主命令工具。' +
       'cwd 省略时用当前会话的工作目录;长输出会被截断。',
     parameters: {
       type: 'object',
@@ -2010,20 +2305,54 @@ function commandTool(ctx, activeShell, gateFor) {
       // 不能直接用 activeShell.current —— 它要到下一次检查才更新(最多 5 秒),
       // 这期间简报已经写的是新终端,命令却还按旧终端跑(实测 setShell 后 200ms 内仍用旧 shell)。
       const stateNow = readState()
-      const shell = (cache.value && resolveShell(stateNow, cache.value)) || activeShell.current || resolveShell(stateNow, null)
+      const agent = exec && exec.agent ? exec.agent : null
+      const at = familyAt(agent)
+      const family = at.family
+      // 按**调用会话的族**取终端(不是按面板里的全局默认):bash 族会话必须拿到 bash,不能拿到 pwsh。
+      // 探测还没落地时退回 activeShell(只在该族匹配时)—— 不要拿另一族的 shell 顶班。
+      const shell = family
+        ? (cache.value ? resolveShell(stateNow, cache.value, family) : null) ||
+          (activeShell.current && activeShell.current.family === family ? activeShell.current : null) ||
+          resolveShell(stateNow, null, family)
+        : (cache.value && resolveShell(stateNow, cache.value)) || activeShell.current || resolveShell(stateNow, null)
       const line = String((args && args.command) || '')
       if (!line.trim()) return { ok: false, text: 'command 不能为空。' }
+      // 该族没有终端:明确拒绝并指路,不要让模型对着「命令没输出」猜。
+      if (!shell.path) {
+        const host = Array.isArray(at.facts.hostTools) ? at.facts.hostTools : []
+        const hostNames = host.map((tool) => String((tool && tool.name) || '')).filter(Boolean)
+        return {
+          ok: false,
+          text:
+            '[terminal] 本会话按 ' +
+            (family === FAMILY_BASH ? 'bash 族' : 'PowerShell 族') +
+            ' 执行,但没有找到对应族的终端(' +
+            shell.label +
+            ');EnvDock 的 envd_shell 不执行命令。\n' +
+            (hostNames.length
+              ? '请改用宿主命令工具:' + hostNames.map((name) => '`' + name + '`').join(', ') + '。'
+              : '请改用宿主命令工具,或在本机装好该族终端。'),
+        }
+      }
       // 沙箱闸门:每一单都按**本会话**的有效策略复检(检查周期是 5 秒,策略可能在两次之间变严)。
       // 围栏会话里直接拒绝:不 spawn、不委托(EnvDock 不持有围栏执行器,委托就是绕过沙箱)。
-      const gate = gateAt(exec && exec.agent ? exec.agent : null)
+      const gate = gateAt(agent)
       if (gate.confined) {
+        const host = Array.isArray(at.facts.hostTools) ? at.facts.hostTools : []
+        const bashHost = host.filter((tool) => tool && tool.family === FAMILY_BASH).map((tool) => '`' + String(tool.name) + '`')
+        const pwshHost = host.filter((tool) => tool && tool.family === FAMILY_POWERSHELL).map((tool) => '`' + String(tool.name) + '`')
+        const wayOut = family === FAMILY_BASH ? bashHost.join(', ') || '宿主 bash 工具' : pwshHost.join(', ') || '宿主 pwsh'
         return {
           ok: false,
           text:
             '[sandbox] 本会话被宿主沙箱围栏(' +
             (gate.mode || '策略未知') +
             ');EnvDock 的 envd_shell 不执行命令。\n' +
-            '请改用宿主工具(宿主自带的命令工具,它在围栏内可执行)。',
+            '请改用宿主工具(本会话的 ' +
+            (family === FAMILY_BASH ? 'bash 族' : 'PowerShell 族') +
+            '命令工具:' +
+            wayOut +
+            ')。',
         }
       }
       const argv = shellInvocation(shell, line)
@@ -2114,11 +2443,10 @@ export function apply(ctx, config) {
   const getState = () => readState()
 
   /**
-   * 运行统计(§1.4 白名单):面板只需要知道「探测 / 识别 / 注册到底动没动」。
+   * 运行统计(§1.4 白名单):面板只需要知道「探测 / 识别 / 注册 / 遮挡到底动没动」。
    *
-   * 以前这里挂着 deny / delegate / guard 几十个计数 —— 那套「接管」机制已整体删除,
-   * 计数也就没有意义了。保留的九个字段是**稳态证据**:ticks 涨而 registerTries 不涨,
-   * 就说明注册表没在被反复拆建。
+   * 稳态证据:ticks 涨而 registerTries / restrictApplied 不涨,就说明注册表与遮挡
+   * 都没在被反复拆建;guardRefusals 只在模型仍去调被藏工具时才涨。
    */
   const syncStats = {
     ticks: 0,
@@ -2128,6 +2456,10 @@ export function apply(ctx, config) {
     lastDetectMs: 0,
     hostToolScans: 0,
     registerTries: 0,
+    /** 累计成功施加的 restrict 次数(稳态时应趋于 0 增长) */
+    restrictApplied: 0,
+    /** 累计 guard 拒绝次数(模型仍去调被藏工具时才会涨) */
+    guardRefusals: 0,
     lastError: null,
     lastErrorAt: 0,
   }
@@ -2136,6 +2468,24 @@ export function apply(ctx, config) {
   syncStats.intervalMs = syncIntervalMs
   /** 本代实例的运行态:注册身份 / 宿主工具识别结果 / 沙箱聚合。brief 与 API 都读它 */
   const rt = createRuntime()
+  /**
+   * 两族运行态:agent → 会话记录(族 / 锁定 / 遮挡目标 / restrict 句柄)。
+   *
+   * 刻意放在 apply 作用域而不是 effect 里:简报、envd 工具、guard、API 都要读它,
+   * 而这些注册都发生在命令工具 effect 之前。effect 只负责在对账时往里写。
+   */
+  const familyRuntime = {
+    sessions: new Map(),
+    globalFamily: FAMILY_POWERSHELL,
+    globalFamilySource: 'auto',
+    /**
+     * 「重新探测」代数:显式 refresh 时 +1,下一次对账把所有会话的族锁定与遮挡记忆
+     * 全部作废(会话族重判、已遮的 pwsh 放回)。TTL 过期/普通状态写入不涨。
+     */
+    epoch: 0,
+    /** 手动族不可用 → 已回退 auto(brief / API 都要读) */
+    fallback: false,
+  }
 
   /** 错误记账:lastError 只代表本 tick 的问题,恢复后由检查周期清掉(不跨 tick 粘着)。 */
   const setLastError = (message) => {
@@ -2143,13 +2493,30 @@ export function apply(ctx, config) {
     syncStats.lastErrorAt = message ? Date.now() : 0
   }
 
-  const getDetection = async (force) => {
+  /**
+   * 跑一次探测。
+   *   force      跳过缓存(TTL / 状态写入后需要新快照时用)
+   *   resetFamilies 显式「重新探测」——两族重判的边界:作废族锁定与遮挡记忆
+   *               (会话族按当下工具表重判,已遮挡的 pwsh 放回)。TTL 过期、切终端、
+   *               改选项、`envd set_default` 都只走 force,不涨这个代数。
+   */
+  const getDetection = async (force, resetFamilies) => {
     const started = Date.now()
+    if (force === true && resetFamilies === true) familyRuntime.epoch += 1
     const value = await detect(ctx, runner, getState(), Boolean(force))
     syncStats.lastDetectMs = Date.now() - started
     if (!rt.lastDetectionAt || (value && value.at && value.at !== rt.lastDetectionAt)) {
       syncStats.detections++
       rt.lastDetectionAt = value && value.at ? value.at : Date.now()
+    }
+    if (resetFamilies === true) {
+      // 重判要**立刻**落地(否则面板点了「重新探测」还要等最多 5 秒的对账 tick)。
+      // 排到下一轮事件循环:别在探测调用栈里重入 sync。
+      setTimeout(() => {
+        try {
+          if (typeof notifyStateChange === 'function') notifyStateChange()
+        } catch {}
+      }, 0)
     }
     return value
   }
@@ -2215,6 +2582,52 @@ export function apply(ctx, config) {
   const gateFor = (agent) => sessionGate(ctx, agent)
   const hasToolFor = (agent, name) => hasTool(agent && agent.ctx ? agent.ctx : ctx, name, agent)
 
+  /**
+   * 某个会话的两族事实(brief / envd / 执行侧共用一个口径)。
+   * 会话记录还没建立(首次 tick 之前)时回落到 runtime 的全局快照 —— 宁可说全局事实,
+   * 不要凭空猜一个族。sessionless(API)也走这条。
+   */
+  const familyProbeFor = (agent) => {
+    const record = agent ? familyRuntime.sessions.get(agent) : null
+    if (record) {
+      return {
+        family: record.group,
+        familySource: record.source,
+        hostTools: Array.isArray(record.hostTools) ? record.hostTools : rt.hostTools,
+        hidden: [...(record.restrictedNames || record.hide || [])],
+        refused: [...(record.refuse || [])],
+        displayOnly: Array.isArray(record.displayOnly) ? record.displayOnly : [],
+        mixed: record.mixed === true,
+        blockOtherFamily: record.blockOtherFamily !== false,
+        bashHostAvailable: record.bashHostAvailable === true,
+        fallback: familyRuntime.fallback === true,
+      }
+    }
+    // 会话记录还没建立(首次 tick 之前):按手动选择 + 该作用域此刻可见的 bash 族名字
+    // 现算一次,**不要**拿全局快照冒充「本会话」——新会话第一步的简报必须说对语法族
+    // (dsh-ops 的 ops_bash 可能晚一轮发布,这一步最多错一个 tick)。
+    const shellChoice = String(getState().defaultShell || 'auto')
+    const manualMode = shellChoice !== 'auto'
+    const manual = manualFamilyOf(shellChoice)
+    let family = ''
+    if (manualMode) family = manual // cmd / custom:不参与两族
+    else if (agent) family = ['ops_bash', 'bash', 'sh', 'zsh', 'fish'].some((name) => hasToolFor(agent, name)) ? FAMILY_BASH : FAMILY_POWERSHELL
+    else family = familyRuntime.globalFamily
+    return {
+      family,
+      familySource: manualMode ? 'manual' : familyRuntime.globalFamilySource,
+      hostTools: rt.hostTools,
+      hidden: rt.hidden,
+      refused: rt.refuseOnly,
+      displayOnly: rt.displayOnly,
+      mixed: rt.mixed === true,
+      blockOtherFamily: rt.blockOtherFamily !== false,
+      bashHostAvailable:
+        family === FAMILY_BASH && (agent ? ['ops_bash', 'bash', 'sh', 'zsh', 'fish'].some((name) => hasToolFor(agent, name)) : rt.hostTools.some((tool) => tool && tool.family === FAMILY_BASH)),
+      fallback: familyRuntime.fallback === true,
+    }
+  }
+
   /** 增补命令工具执行时读它:切终端只改这里,注册表一个字节都不动。 */
   const activeShell = { current: null }
 
@@ -2241,6 +2654,7 @@ export function apply(ctx, config) {
                   gate: () => gateFor(agent),
                   agentId: agent ? String(agent.id) : '',
                   sessionless: !agent,
+                  ...familyProbeFor(agent),
                 },
                 rt,
               )
@@ -2257,18 +2671,43 @@ export function apply(ctx, config) {
   // 2) envd 工具
   if (ctx.get('tools')) {
     ctx.effect(
-      () => ctx.tools.register(envdTool(ctx, getDetection, getState, false, rt, gateFor, hasToolFor), 'envdock tool'),
+      () => ctx.tools.register(envdTool(ctx, getDetection, getState, false, rt, gateFor, hasToolFor, familyProbeFor), 'envdock tool'),
       'envdock tool',
     )
   }
 
-  // 3) 增补命令工具 envd_shell(§1.1「只增不减」)
+  // 2.5) 两族 guard(根层注册一次 → 全局生效;按 exec.agent 的会话记录决定是否拒绝)
   //
-  // 与旧「接管」模型的区别全部落在这一个 effect 里:
-  //   · 从不 restrict / guard / 隐藏任何别人的工具(硬不变量:restrict 调用次数恒为 0);
-  //   · 注册条件四条:终端可用 + 不与宿主同族 + 沙箱允许 + 名字没被占;
-  //   · 稳态 tick 零注册表动作(每个 tick 只重新枚举宿主工具用于展示);
-  //   · 围栏会话里执行被拒绝(见 commandTool.execute),不 spawn、不委托。
+  // restrict 只能遮挡**继承层**名字:preset 把 pwsh 注册在 agent 自有层时挡不掉(dsh-ops
+  // 的 ops_bash 就是自有层)。那类名字走 guard:dispatch 之前就拒绝,不 spawn、不委托。
+  // 契约上 guard 是单调的(只能加否定),所以它只拒绝「本会话族明确要求遮挡」的内置名。
+  if (ctx.get('tools')) {
+    ctx.effect(
+      () =>
+        ctx.tools.guard((exec) => {
+          const agent = exec && exec.agent
+          if (!agent) return undefined
+          const record = familyRuntime.sessions.get(agent)
+          if (!record || !record.refuse || record.refuse.size === 0) return undefined
+          const name = String((exec && exec.name) || '')
+          if (!record.refuse.has(name)) return undefined
+          syncStats.guardRefusals++
+          return (
+            name +
+            ' 在本会话已被 EnvDock 隐藏(bash 族会话);请改用 ops_bash 或 envd_shell,并按 bash 语法写命令。'
+          )
+        }),
+      'envdock family guard',
+    )
+  }
+
+  // 3) 增补命令工具 envd_shell + 两族对账(0.6)
+  //
+  // 两件事落在同一个 effect 里:
+  //   · 注册 envd_shell:主族终端可用 + 沙箱允许 + 名字没被占(不再有「同族不重复提供」);
+  //   · 逐会话选族 + 遮挡:bash 族会话把内置 PowerShell 名 restrict 掉(继承层),
+  //     挡不掉的(agent 自有层)交给根层 guard 在 dispatch 前拒绝。
+  // 稳态 tick 不产生注册表动作:只有族/目标集合真的变化时才 restrict 或撤销。
   ctx.effect(() => {
     let disposeTool = null
     /** envd_shell 是否由**我们**注册成功(登记身份见 rt.ownDefinition) */
@@ -2289,6 +2728,286 @@ export function apply(ctx, config) {
     let pendingAfterScan = false
     const timers = new Set()
     const cleanups = []
+
+    /** 一个工具定义 → 宿主命令工具条目(name 为空/不是命令工具返回 null)。 */
+    const classifyHostTool = (def) => {
+      const name = def && def.name ? String(def.name) : ''
+      if (!name || name === ENVD_SHELL_NAME) return null
+      const family = shellFamilyFromDefinition(def)
+      if (!family) return null
+      const learned = !Object.prototype.hasOwnProperty.call(SHELL_TOOL_FAMILY, name.toLowerCase())
+      return {
+        name,
+        family,
+        learned,
+        group: family === FAMILY_BASH || family === FAMILY_POWERSHELL ? family : '',
+      }
+    }
+
+    /**
+     * 一个会话的两族事实:
+     *   hostTools  该作用域此刻看得见的宿主命令工具(definitions 已扣掉遮挡)
+     *   known      该作用域登记过的名字(view.knownNames:含 agent 自有层)
+     *   restrictable 可被 restrict 的名字(view.restrictableNames:只含继承层)
+     * 老宿主没有 view 时退化成「看得见的都当可 restrict」——宁可多挡一次,不要漏挡。
+     */
+    const sessionFacts = (agent) => {
+      const context = agent && agent.ctx ? agent.ctx : ctx
+      const tools = toolsOf(context)
+      const hostTools = []
+      const known = new Set()
+      const restrictable = new Set()
+      let scanned = false
+      if (tools && typeof tools.definitions === 'function') {
+        scanned = true
+        let defs = []
+        try {
+          defs = tools.definitions(agent) || []
+        } catch {
+          defs = []
+        }
+        for (const def of defs) {
+          const item = classifyHostTool(def)
+          if (item) hostTools.push(item)
+        }
+      }
+      if (!scanned) {
+        for (const name of SHELL_TOOL_NAMES) {
+          if (name === ENVD_SHELL_NAME) continue
+          if (!hasTool(context, name, agent)) continue
+          const family = SHELL_TOOL_FAMILY[name.toLowerCase()]
+          if (!family) continue
+          hostTools.push({
+            name,
+            family,
+            learned: false,
+            group: family === FAMILY_BASH || family === FAMILY_POWERSHELL ? family : '',
+          })
+        }
+      }
+      if (tools && typeof tools.view === 'function') {
+        try {
+          const view = tools.view(agent)
+          if (view && view.knownNames && typeof view.knownNames[Symbol.iterator] === 'function') {
+            for (const name of view.knownNames) known.add(String(name))
+          }
+          if (view && view.restrictableNames && typeof view.restrictableNames[Symbol.iterator] === 'function') {
+            for (const name of view.restrictableNames) restrictable.add(String(name))
+          }
+        } catch {}
+      }
+      if (!known.size) {
+        for (const tool of hostTools) {
+          known.add(tool.name)
+          restrictable.add(tool.name)
+        }
+      }
+      return { hostTools, known, restrictable }
+    }
+
+    /** 撤销一个会话的遮挡并把它从记录里移除(agent/disposed、会话消失、卸载都走这里)。 */
+    const dropFamilySession = (agent) => {
+      const record = familyRuntime.sessions.get(agent)
+      if (!record) return
+      familyRuntime.sessions.delete(agent)
+      if (record.restrictDispose) {
+        try {
+          record.restrictDispose()
+        } catch {}
+        record.restrictDispose = null
+      }
+      record.hide = new Set()
+      record.refuse = new Set()
+      record.restrictedNames = new Set()
+    }
+
+    /**
+     * 把 record.hide 施加成该 agent 作用域的 restrict(或撤销)。
+     * `tools.restrict` 只能从**有作用域的 ctx** 调:root 调会直接抛错(实测 dsh-tools),
+     * 所以这里永远通过 `toolsOf(agent.ctx)` 拿一个绑到该 agent 的 traceable 服务。
+     */
+    const applyFamilyRestriction = (agent, record) => {
+      const next = record.hide instanceof Set ? record.hide : new Set()
+      const previous = record.restrictedNames instanceof Set ? record.restrictedNames : new Set()
+      const same = next.size === previous.size && [...next].every((name) => previous.has(name))
+      if (same && !(next.size > 0 && !record.restrictDispose)) return
+      if (record.restrictDispose) {
+        try {
+          record.restrictDispose()
+        } catch {}
+        record.restrictDispose = null
+      }
+      record.restrictedNames = new Set()
+      if (!next.size) return
+      const tools = toolsOf(agent && agent.ctx ? agent.ctx : ctx)
+      if (!tools || typeof tools.restrict !== 'function') return
+      try {
+        const dispose = tools.restrict({ deny: [...next].sort() })
+        record.restrictDispose = typeof dispose === 'function' ? dispose : null
+        record.restrictedNames = new Set(next)
+        syncStats.restrictApplied++
+      } catch (error) {
+        // 扫描与施加之间名字消失了 / 老宿主不接受:不崩溃 —— guard 仍会兜住执行侧
+        record.restrictDispose = null
+        record.restrictedNames = new Set()
+        setLastError('遮挡 ' + [...next].join('/') + ' 失败: ' + String((error && error.message) || error))
+      }
+    }
+
+    /**
+     * 逐会话选族 + 遮挡。只看状态与工具表,不依赖探测结果(工具表一变立刻对账)。
+     */
+    const reconcileFamilies = (state, agentsList, scan) => {
+      const now = Date.now()
+      const wanted = new Set(agentsList)
+      // 会话没了(disposed 事件丢了 / 列表提前移除):立刻撤销残留遮挡
+      for (const agent of [...familyRuntime.sessions.keys()]) if (!wanted.has(agent)) dropFamilySession(agent)
+      // 「重新探测」之后:族锁定与遮挡记忆一起作废(先撤销 restrict,再按新事实重判)
+      for (const agent of agentsList) {
+        const stale = familyRuntime.sessions.get(agent)
+        if (stale && stale.epoch !== familyRuntime.epoch) dropFamilySession(agent)
+      }
+      const manualKey = String(state.defaultShell || 'auto')
+      const manualMode = manualKey !== 'auto'
+      const manualRequested = manualFamilyOf(manualKey)
+      const blockOtherFamily = state.options.blockOtherFamily !== false
+      const summary = { total: agentsList.length, bash: 0, powershell: 0, other: 0 }
+      const hidden = new Set()
+      const refuseOnly = new Set()
+      const displayOnly = new Set()
+      let mixed = false
+      // 每个会话的工具表事实只算一次(族判定、遮挡、手动族可用性都用它)
+      const factsByAgent = new Map()
+      for (const agent of agentsList) factsByAgent.set(agent, sessionFacts(agent))
+      const allFacts = agentsList.length ? [...factsByAgent.values()] : [{ hostTools: scan.tools }]
+      /**
+       * 手动选族但**该族既没有终端、也没有对应宿主工具** → 回退 auto 并警告。
+       * 否则面板写着「bash 族」、实际却连一个 bash 都跑不了,模型会照着简报写 bash 命令。
+       * 探测还没就绪时不判不可用(避免启动瞬间来回抖)。
+       */
+      let manual = manualRequested
+      let manualFallback = false
+      if (manualMode && manualRequested) {
+        const terminalAvailable = cache.value ? Boolean((resolveShell(state, cache.value, manualRequested) || {}).path) : true
+        const hostAvailable = allFacts.some((facts) => facts.hostTools.some((tool) => tool.family === manualRequested))
+        if (!terminalAvailable && !hostAvailable) {
+          manual = ''
+          manualFallback = true
+        }
+      }
+      const useManual = manualMode && (manualRequested ? manual !== '' : true)
+      for (const agent of agentsList) {
+        const facts = factsByAgent.get(agent)
+        const previous = familyRuntime.sessions.get(agent) || null
+        // **记忆**:definitions(agent) 会扣掉我们已经 restrict 掉的名字 —— 只按它判,下一轮
+        // 就看不见 pwsh 了,于是「撤销 → 重新看见 → 再遮挡」无限振荡。上一次的目标集合里
+        // 仍登记着的名字要补回来;只有确认注册表里已经没有它(全局 get 为空且本会话定义面
+        // 也没有)时才遗忘。
+        if (previous) {
+          const remember = (name, restrictableHint) => {
+            const text = String(name || '')
+            if (!text || facts.known.has(text)) return
+            let alive = false
+            try {
+              const globalTools = toolsOf(ctx)
+              alive = Boolean(globalTools && typeof globalTools.get === 'function' && globalTools.get(text))
+            } catch {}
+            if (!alive && !facts.hostTools.some((tool) => tool.name === text)) return
+            facts.known.add(text)
+            if (restrictableHint) facts.restrictable.add(text)
+          }
+          for (const name of previous.hide || []) remember(name, true)
+          for (const name of previous.refuse || []) remember(name, previous.restrictedNames instanceof Set && previous.restrictedNames.has(name))
+        }
+        let group = ''
+        let source = 'auto'
+        let at = now
+        let upgraded = true
+        if (useManual) {
+          group = manualRequested ? manual : ''
+          source = 'manual'
+          if (previous && previous.source === 'manual' && previous.group === group) {
+            at = previous.at
+            upgraded = previous.upgraded === true
+          }
+        } else {
+          const decided = resolveSessionFamily({
+            manual: '',
+            auto: autoFamilyOf(facts.hostTools),
+            record: previous
+              ? { source: previous.source, group: previous.group, at: previous.at, upgraded: previous.upgraded }
+              : null,
+            now,
+          })
+          group = decided.group
+          source = decided.source
+          at = decided.record.at
+          upgraded = decided.record.upgraded === true
+        }
+        // 会话族 bash 且看得到 bash 族宿主工具 → 目标集合;否则为空(不遮挡)。
+        // sticky:已经遮过就保持(工具表暂时缺 bash 族工具时不来回闪),直到重新探测/开关关闭。
+        const sticky = previous ? previous.masked === true : false
+        const mask = familyMask({
+          group,
+          blockOtherFamily,
+          sticky,
+          hostTools: facts.hostTools,
+          known: facts.known,
+          restrictable: facts.restrictable,
+        })
+        const record = previous || {
+          agentId: '',
+          hide: new Set(),
+          refuse: new Set(),
+          restrictedNames: new Set(),
+          restrictDispose: null,
+        }
+        record.agentId = String((agent && agent.id) || '')
+        record.group = group
+        record.source = source
+        record.at = at
+        record.upgraded = upgraded
+        record.epoch = familyRuntime.epoch
+        record.blockOtherFamily = blockOtherFamily
+        record.bashHostAvailable = facts.hostTools.some((tool) => tool.family === FAMILY_BASH)
+        record.hostTools = facts.hostTools
+        record.displayOnly = mask.displayOnly
+        record.masked = mask.active
+        record.mixed = source === 'manual' && group === FAMILY_POWERSHELL && record.bashHostAvailable
+        record.refuse = new Set(mask.refuse)
+        record.hide = new Set(mask.hide)
+        // 先更新拒绝集合再动 restrict:中间任何失败都不会让执行侧失去兜底。
+        applyFamilyRestriction(agent, record)
+        familyRuntime.sessions.set(agent, record)
+
+        if (group === FAMILY_BASH) summary.bash++
+        else if (group === FAMILY_POWERSHELL) summary.powershell++
+        else summary.other++
+        const reallyHidden = record.restrictedNames instanceof Set ? record.restrictedNames : record.hide
+        for (const name of reallyHidden) hidden.add(name)
+        for (const name of record.refuse) if (!reallyHidden.has(name)) refuseOnly.add(name)
+        for (const name of record.displayOnly) displayOnly.add(name)
+        if (record.mixed) mixed = true
+      }
+      rt.sessions = summary
+      rt.hidden = [...hidden].sort()
+      rt.refuseOnly = [...refuseOnly].sort()
+      rt.displayOnly = [...displayOnly].sort()
+      rt.mixed = mixed
+      rt.blockOtherFamily = blockOtherFamily
+      rt.familyFallback = manualFallback
+      familyRuntime.fallback = manualFallback
+      if (useManual) {
+        familyRuntime.globalFamily = manualRequested ? manual : ''
+        familyRuntime.globalFamilySource = 'manual'
+      } else {
+        const anyBash = summary.bash > 0 || rt.hostTools.some((tool) => tool && tool.family === FAMILY_BASH)
+        familyRuntime.globalFamily = anyBash ? FAMILY_BASH : FAMILY_POWERSHELL
+        familyRuntime.globalFamilySource = 'auto'
+      }
+      rt.family = familyRuntime.globalFamily
+      rt.familySource = familyRuntime.globalFamilySource
+    }
 
     /** 拆掉我们自己的工具(只动自己那一份;绝不碰别人的工具)。 */
     const dropTool = () => {
@@ -2314,7 +3033,7 @@ export function apply(ctx, config) {
         return 'taken'
       }
       syncStats.registerTries++
-      const definition = commandTool(ctx, activeShell, gateFor)
+      const definition = commandTool(ctx, activeShell, gateFor, familyProbeFor)
       let dispose = null
       try {
         dispose = ctx.tools.register(definition)
@@ -2387,57 +3106,90 @@ export function apply(ctx, config) {
      * shellFamilyFromDefinition / SHELL_TOOL_FAMILY。`learned` 的语义是「按描述/参数启发式
      * 认出来的,不是内置名单里的名字」。老宿主没有 definitions 时退回按内置名字探可见性。
      */
+    /**
+     * 枚举宿主命令工具:并集(展示) + 逐会话明细(族判定 / 遮挡)。
+     * 返回 { tools: 排序后的并集, byAgent: Map(agent → 该会话的条目) }。
+     * byAgent 只在有 agent 时有意义;老宿主没有 definitions 时按内置名字逐个探。
+     */
     const scanHostTools = (agentsList) => {
       const found = new Map()
-      const add = (def) => {
-        const name = def && def.name ? String(def.name) : ''
-        if (!name || name === ENVD_SHELL_NAME) return
-        const family = shellFamilyFromDefinition(def)
-        if (!family) return
-        const learned = !Object.prototype.hasOwnProperty.call(SHELL_TOOL_FAMILY, name.toLowerCase())
-        const prev = found.get(name)
+      const byAgent = new Map()
+      const merge = (item) => {
+        const prev = found.get(item.name)
         // 同一个名字既可能被内置名单认到、也可能被启发式认到:内置优先(learned=false)
-        if (!prev || (prev.learned === true && !learned)) found.set(name, { name, family, learned })
+        if (!prev || (prev.learned === true && !item.learned)) found.set(item.name, item)
+      }
+      const seen = (list) => {
+        const out = []
+        const names = new Set()
+        for (const item of list) {
+          if (!item || names.has(item.name)) continue
+          names.add(item.name)
+          out.push(item)
+        }
+        return out
       }
       let scanned = false
       for (const agent of agentsList) {
-        const tools = toolsOf(agent && agent.ctx ? agent.ctx : ctx)
-        if (!tools || typeof tools.definitions !== 'function') continue
-        scanned = true
-        let defs = []
-        try {
-          defs = tools.definitions(agent) || []
-        } catch {
-          defs = []
+        const context = agent && agent.ctx ? agent.ctx : ctx
+        const tools = toolsOf(context)
+        const mine = []
+        if (tools && typeof tools.definitions === 'function') {
+          scanned = true
+          let defs = []
+          try {
+            defs = tools.definitions(agent) || []
+          } catch {
+            defs = []
+          }
+          for (const def of defs) {
+            const item = classifyHostTool(def)
+            if (!item) continue
+            merge(item)
+            mine.push(item)
+          }
+        } else {
+          // 老宿主:没有定义面,按内置名字探这个会话的可见性(名字集合有界)
+          for (const name of SHELL_TOOL_NAMES) {
+            if (name === ENVD_SHELL_NAME) continue
+            if (!hasTool(context, name, agent)) continue
+            const family = SHELL_TOOL_FAMILY[name.toLowerCase()]
+            if (!family) continue
+            const item = {
+              name,
+              family,
+              learned: false,
+              group: family === FAMILY_BASH || family === FAMILY_POWERSHELL ? family : '',
+            }
+            merge(item)
+            mine.push(item)
+          }
         }
-        for (const def of defs) add(def)
+        byAgent.set(agent, seen(mine))
       }
-      if (!scanned) {
+      if (!agentsList.length || !scanned) {
         // 没有 agent(或作用域里没有定义面)时问一次全局定义面
         const tools = toolsOf(ctx)
         if (tools && typeof tools.definitions === 'function') {
-          scanned = true
           let defs = []
           try {
             defs = tools.definitions() || []
           } catch {
             defs = []
           }
-          for (const def of defs) add(def)
-        }
-      }
-      if (!scanned) {
-        // 老宿主:没有定义面,只能按内置名字探可见性(名字集合有界)
-        const probeNames = (context, agent) => {
+          for (const def of defs) {
+            const item = classifyHostTool(def)
+            if (item) merge(item)
+          }
+        } else if (!agentsList.length) {
           for (const name of SHELL_TOOL_NAMES) {
             if (name === ENVD_SHELL_NAME) continue
-            if (!hasTool(context, name, agent)) continue
+            if (!hasTool(ctx, name)) continue
             const family = SHELL_TOOL_FAMILY[name.toLowerCase()]
-            if (family) found.set(name, { name, family, learned: false })
+            if (!family) continue
+            merge({ name, family, learned: false, group: family === FAMILY_BASH || family === FAMILY_POWERSHELL ? family : '' })
           }
         }
-        for (const agent of agentsList) probeNames(agent && agent.ctx ? agent.ctx : ctx, agent)
-        if (!agentsList.length) probeNames(ctx, undefined)
       }
       // 名字集合要有界(第三方发布名会轮换,只增不减会让每 tick 的遍历与 GET 载荷线性膨胀)
       while (found.size > 64) found.delete(found.keys().next().value)
@@ -2446,14 +3198,15 @@ export function apply(ctx, config) {
         return known >= 0 ? known : SHELL_TOOL_ORDER.length
       }
       // 排序稳定:内置顺序优先,其余按名字
-      return [...found.values()].sort((a, b) => rank(a.name) - rank(b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      const tools = [...found.values()].sort((a, b) => rank(a.name) - rank(b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+      return { tools, byAgent }
     }
 
     /**
-     * 一次检查(tick):枚举宿主工具(展示用)→ 聚合沙箱 → 按状态差决定注册 / 拆除。
+     * 一次检查(tick):枚举宿主工具 → 聚合沙箱 → 逐会话选族+遮挡 → 按状态差决定注册 / 拆除。
      *
-     * 注册条件(§1.1,四条同时满足):终端有可用 path、宿主没有同族命令工具、
-     * 沙箱允许(没有围栏执行器,或至少一个会话 resolve 出 danger-full-access)、名字没被占。
+     * 0.6 的注册条件:主族终端有可用 path(主族 = 手动族,否则全局默认族)+ 沙箱允许 +
+     * 名字没被占。不再有「同族不重复提供」——bash 族会话本来就要同时看到 ops_bash 与 envd_shell。
      * 稳态 tick 唯一的注册表读操作是「我们自己的工具还在不在」,一次 get。
      */
     const reconcile = () => {
@@ -2466,37 +3219,35 @@ export function apply(ctx, config) {
         } catch {}
       }
 
-      // ── 1. 宿主命令工具(只用于展示,不参与遮挡:EnvDock 不挡任何人的工具) ──
-      rt.hostTools = scanHostTools(agentsList)
+      // ── 1. 宿主命令工具:并集展示 + 逐会话明细(族判定/遮挡要用) ──
+      const scan = scanHostTools(agentsList)
+      rt.hostTools = scan.tools
       syncStats.hostToolScans++
 
       // ── 2. 沙箱聚合(能力位 / 逐会话策略 → 聚合值) ──
       const sandbox = sandboxSummary(ctx, agentsList)
       rt.sandbox = sandbox
 
-      // ── 3. 默认终端 ──
+      // ── 3. 两族对账(不依赖探测:工具表一变就能立刻选族/遮挡) ──
+      reconcileFamilies(state, agentsList, scan)
+
+      // ── 4. 主终端 + 注册条件 ──
       if (!cache.value || cache.at === 0) {
         refreshThenSync()
         return
       }
       const detection = cache.value
-      const shell = resolveShell(state, detection)
+      // 主族 = 生效族(reconcileFamilies 已处理「手动族不可用 → 回退 auto」),
+      // 不能用 state.defaultShell 直接推:回退之后它还是那个不可用的手动族。
+      const primaryFamily = familyRuntime.globalFamily || ''
+      const shell = resolveShell(state, detection, primaryFamily || undefined)
       activeShell.current = shell
-      rt.family = shell.family
-
-      // ── 4. 注册条件 ──
-      const sameFamily = rt.hostTools.find((tool) => tool.family && tool.family === shell.family) || null
-      rt.sameFamilyTool = sameFamily ? sameFamily.name : ''
       let want = true
       let skipReason = null
       if (!shell.path) {
         want = false
-        skipReason = 'error'
-        setLastError('默认终端不可用: ' + shell.label)
-      } else if (sameFamily) {
-        // 同一个 shell 不该出现两份(§1.1 第 2 条)
-        want = false
-        skipReason = 'same-family'
+        skipReason = 'no-family-terminal'
+        setLastError('主族没有可用终端: ' + shell.label)
       } else if (sandbox.capable && !sandbox.anyUnconfined) {
         // 有围栏执行器、却没有任何会话 resolve 出 danger-full-access:注册了也只能在
         // 围栏会话里被拒绝,等于死工具 —— 不注册(§1.1 第 3 条)。
@@ -2582,6 +3333,19 @@ export function apply(ctx, config) {
       // 没有这个事件(旧宿主)也不致命:5 秒 tick 兜底
       console.error('[envdock] 监听 tools/change 失败:', error && error.message)
     }
+    // agent 销毁:立刻撤销这个会话的 restrict(真机上 agent 作用域的 effect 也会跟着释放,
+    // 但句柄在我们手里,显式撤销才不会留下「撤不掉的残留」)。
+    try {
+      const offDisposed = ctx.on('agent/disposed', (payload) => {
+        const agent = payload && payload.agent ? payload.agent : payload && payload.id ? payload : null
+        if (!agent) return
+        dropFamilySession(agent)
+        scheduleSync()
+      })
+      if (typeof offDisposed === 'function') cleanups.push(offDisposed)
+    } catch {
+      // 老宿主没有这个事件:tick 里的「会话消失」分支兜底
+    }
 
     const onStateChange = () => {
       if (stopped) return
@@ -2609,10 +3373,23 @@ export function apply(ctx, config) {
       }
       // 插件热重载时别把下一代的钩子置空
       if (notifyStateChange === onStateChange) notifyStateChange = null
+      // 撤销所有逐会话遮挡:插件卸载不允许留下任何 restrict 残留(最危险的一类 bug)
+      for (const agent of [...familyRuntime.sessions.keys()]) dropFamilySession(agent)
+      familyRuntime.globalFamily = FAMILY_POWERSHELL
+      familyRuntime.globalFamilySource = 'auto'
+      familyRuntime.fallback = false
       dropTool()
       rt.registered = false
       rt.skipReason = null
       rt.hostTools = []
+      rt.family = ''
+      rt.familySource = 'auto'
+      rt.sessions = { total: 0, bash: 0, powershell: 0, other: 0 }
+      rt.hidden = []
+      rt.refuseOnly = []
+      rt.displayOnly = []
+      rt.mixed = false
+      rt.familyFallback = false
       scopeAgents.clear()
     }
   }, 'envdock command tool')
@@ -2708,7 +3485,8 @@ export function apply(ctx, config) {
                     return
                   }
                 }
-                const shell = resolveShell(state, detection)
+                // 主终端按全局默认族解析:panel 的 shell 行必须和简报的「默认终端」一致。
+                const shell = resolveShell(state, detection, (familyRuntime.globalFamily || undefined))
                 // 宿主命令工具识别结果与沙箱聚合:API 每次现算,面板拿到的是「此刻」的事实。
                 const agentsList = listAgents(ctx)
                 const sandbox = sandboxSummary(ctx, agentsList)
@@ -2718,6 +3496,10 @@ export function apply(ctx, config) {
                   ok: true,
                   state,
                   shell: { key: shell.key, label: shell.label, family: shell.family, path: shell.path, version: shell.version || '' },
+                  // 0.6 两族:全局默认族 + 来源(API 没有 agent,不下「本会话」结论)
+                  family: familyRuntime.globalFamily,
+                  familySource: familyRuntime.globalFamilySource,
+                  familyFallback: familyRuntime.fallback === true,
                   commandTool,
                   // 沙箱:执行器能力位 + 聚合后的逐会话事实(§1.4,不再有 scopes)
                   sandbox,
@@ -2729,6 +3511,8 @@ export function apply(ctx, config) {
                     lastDetectMs: syncStats.lastDetectMs,
                     hostToolScans: syncStats.hostToolScans,
                     registerTries: syncStats.registerTries,
+                    restrictApplied: syncStats.restrictApplied,
+                    guardRefusals: syncStats.guardRefusals,
                     lastError: syncStats.lastError,
                     lastErrorAt: syncStats.lastErrorAt,
                   },
@@ -2759,8 +3543,9 @@ export function apply(ctx, config) {
                     {
                       visible: (name) => hasTool(ctx, name),
                       gate: () => sessionGate(ctx, null),
-                      // API 没有 agent:简报不下「本会话」结论(sessionless)
+                      // API 没有 agent:简报不下「本会话」结论(sessionless),用全局族快照
                       sessionless: true,
+                      ...familyProbeFor(null),
                     },
                     rt,
                   ),
@@ -2879,7 +3664,7 @@ export function apply(ctx, config) {
                 }
               }
               if (op === 'refresh') {
-                const detection = await getDetection(true)
+                const detection = await getDetection(true, true)
                 json(res, { ok: true, detectedAt: detection.at })
                 return
               }
@@ -2983,7 +3768,7 @@ export function apply(ctx, config) {
                 const has = (key) => Object.prototype.hasOwnProperty.call(body, key)
                 let touched = false
                 // 白名单 + 归一化:布尔只收 true/false(其它值按 false)。
-                // 0.5.0 起只剩两个开关:shellTakeover / sandboxTakeover 已删除(旧字段忽略、不迁移)。
+                // 0.5.0 起删掉了接管开关;0.6.0 新增 blockOtherFamily(遮挡另一族的内置命令工具)。
                 if (has('injectBrief')) {
                   options.injectBrief = body.injectBrief === true
                   touched = true
@@ -2992,8 +3777,12 @@ export function apply(ctx, config) {
                   options.allowLan = body.allowLan === true
                   touched = true
                 }
+                if (has('blockOtherFamily')) {
+                  options.blockOtherFamily = body.blockOtherFamily !== false
+                  touched = true
+                }
                 if (!touched) {
-                  json(res, { ok: false, error: '没有可设置的选项(可用: injectBrief / allowLan)' }, 400)
+                  json(res, { ok: false, error: '没有可设置的选项(可用: injectBrief / allowLan / blockOtherFamily)' }, 400)
                   return
                 }
                 const next = writeState({ options })

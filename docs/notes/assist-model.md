@@ -1,5 +1,15 @@
 # EnvDock 0.5 · 「辅助展示」模型（assist model）规格
 
+> **历史文档（0.5 规格），已被 0.6 的两族方案修订。** 本文描述的是 0.5 的「只增不减」模型；0.6 保留其中大部分实现，但推翻了核心原则的一半：**按会话只暴露一个语法族**——bash 族会话会遮挡宿主的**内置** `pwsh` / `powershell`，开关 `blockOtherFamily` 可关闭。因此本文的下列结论**不再适用**，仅作历史记录：
+>
+> - §0 / §1.1 的「永不隐藏、永不 `restrict`」：0.6 有**唯一例外**——按会话遮挡另一族的**内置**命令工具。
+> - §1.1 注册条件 2「家族不重复」与 `skipReason='same-family'`：**已删除**，改为「主族终端可用 + 沙箱允许 + 名字没被占」。
+> - §1.4 的 `commandTool` 形状：0.6 新增 `family` / `familySource` / `sessions` / `hidden` / `refuseOnly` / `displayOnly` / `mixed`，`syncStats` 新增 `restrictApplied` / `guardRefusals`。
+> - §1.6 的简报口径：已按会话族重写。
+> - **§3 的「`restrict` 恒为 0 / 不注册 `guard`」硬不变量已废除**：0.6 对**可 restrict**（继承层）的内置 PowerShell 名调用 `tools.restrict({ deny })` 直接隐藏；对发布在 **agent 自有层**、`restrict` 挡不掉的，只用 `guard` 在 dispatch 前拒绝执行（不 spawn）。硬不变量换成「bash 族名字永不被遮挡，启发式认出的名字只展示」。
+>
+> 现行口径见 [docs/DESIGN.md](../DESIGN.md)。
+
 > 用户决策：**不遮挡任何工具**（B 只增不减）+ **全删** restrict / deny / guard / 事实 / 委托。
 > 实施者严格按本规格改；与规格冲突的旧代码一律删除，不要保留「兼容分支」。
 

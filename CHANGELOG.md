@@ -2,6 +2,43 @@
 
 本文件记录 EnvDock 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.0] - 2026-11-08
+
+> **破坏性变更（BREAKING）**：从「只增不减」改成「**按会话只暴露一个语法族**」。默认终端、简报口径、工具表都可能变：bash 族会话里宿主的**内置** `pwsh` / `powershell` 会被遮挡（可 restrict 的直接隐藏，挡不掉的调用即拒绝）；`envd_shell` 改为按**调用会话的族**取终端（bash 族 → Git Bash）。`skipReason='same-family'` 删除。0.5 的「永不遮挡」不再是硬不变量，例外只针对另一族的**内置**命令工具。
+
+### Added
+
+- **两族模型**：`bash` 族 = 宿主 `bash` / `sh` / `zsh` / `fish` / `ops_bash`（含启发式认出的第三方 bash 名）；`PowerShell` 族 = 宿主 `pwsh` / `powershell`。`cmd` 与自定义终端不参与自动选族、也不被遮挡；WSL 手动选时按 bash 语法算。
+- **按会话自动选族，判定后锁定**：会话首次出现在对账里时，能看到 bash 族宿主工具 → bash 族，否则 PowerShell 族。只在**首次判成 PowerShell 族后的 10 秒内**允许升级一次（兜住 dsh-ops 晚挂载 `ops_bash`）。无会话时（面板 / API）：任一会话为 bash 族或宿主并集含 bash 族工具 → bash 族，否则 PowerShell 族。
+- **手动选族**：`defaultShell` 非 `auto` 时所有会话按手动族（`pwsh` / `powershell` → PowerShell 族，`bash` / `wsl` → bash 族）；`cmd` / `custom` 不遮挡。
+- **手动族不可用时回退 auto 并警告**：手动选的是 bash / PowerShell 族，但**该族没有可用终端**、且**所有会话的宿主工具里都没有该族工具**时，生效族回退成自动选族（会话按自动规则重判，`familySource` 变回 `auto`），并置 `familyFallback=true`。否则面板写着「bash 族」、实际连一个 bash 都跑不了，模型会照着简报写错语法。探测还没就绪时不判不可用（避免启动瞬间来回抖）；手动 `cmd` / `custom` 不参与这条规则。
+- **遮挡另一族的内置命令工具**：`blockOtherFamily`（默认开）+ 会话族 bash + 该会话看得到 bash 族宿主工具 → 遮挡内置 `pwsh` / `powershell`。可 restrict 的（继承层）用 `tools.restrict({ deny })` 从工具表隐藏（只在 agent 作用域调用）；发布在 agent 自有层、`restrict` 挡不掉的只用 `guard` 在 dispatch 前拒绝执行（不 spawn）。启发式认出的 PowerShell 族名字只展示、永不遮挡；bash 族名字永不遮挡。撤销：开关关闭、会话族变化、agent disposed、插件卸载。
+- **遮挡记忆（sticky）**：一旦某个 bash 族会话遮过 `pwsh`，之后即使 bash 族宿主工具（如 dsh-ops 的 `ops_bash`）暂时消失，会话族仍是 bash（锁定）、`pwsh` 也保持隐藏——避免工具表在会话里反复闪。
+- **「重新探测」是两族重判的边界**：显式刷新探测（面板「重新探测」/ `envd` 工具的 `refresh` / API `refresh`）会作废所有会话的族锁定与遮挡记忆，按当下工具表重新判定并立刻对账（不等 5 秒 tick）；45 秒 TTL 自动过期与切终端 / 改选项这类普通写入不算重新探测，不动锁定。
+- **新选项 `blockOtherFamily`**（默认开）：关掉即「两族同时可见」，简报与面板只警告、不遮挡。
+- **`/envdock-api` 新字段**：`commandTool` 与载荷顶层新增 `family` / `familySource` / `familyFallback`；`commandTool` 另有 `sessions` / `hidden` / `refuseOnly` / `displayOnly` / `mixed`；`syncStats` 新增 `restrictApplied` / `guardRefusals`（分别是 restrict 落地次数与 guard 拒绝次数，稳态可用来证明没有反复拆建）。
+
+### Changed
+
+- **`envd_shell` 注册条件改变**：删除「同族不重复提供」（`skipReason='same-family'` 与面板备注「与 X 同族，EnvDock 不重复提供」一并删除）。新条件 = 主族终端可用（主族 = **生效族**：手动族可用时是手动族，手动族不可用会回退 `auto`）+ 沙箱允许 + 名字没被占；没有终端时 `skipReason='no-family-terminal'`。
+- **执行侧按调用会话的族取终端**：bash 族会话用 bash 族终端（本机 Git Bash）；被围栏会话仍然直接拒绝，不 spawn、不委托。
+- **默认终端随族变**：本机（会话里有 `ops_bash`，判为 bash 族）的 `envd_shell` 从 PowerShell 7 改成 **Git Bash**，简报改成 bash 族口径——模型不再同时拿到两套命令语法指令。
+- **简报按会话族重写**：开头标出族（`bash 族` / `PowerShell 族`，手动选择会注明），列出本会话真正看得到的命令工具；被隐藏 / 只拒绝 / 只展示分别说明；开关关闭或手动 PowerShell + `ops_bash` 时追加「两族同时可见，各按自己的语法写命令，不要混写」；手动族不可用回退 auto 时追加「手动选择的族不可用(该族既没有终端、也没有按该族发布的宿主工具),已回退自动选族」；围栏会话追加拒绝提示与同语法出路。执行分工保留：需要你机器上的版本（node / pnpm / python / git）用 `envd_shell`，需要后台作业或沙箱提权参数用宿主工具。
+- **宿主命令工具的用途变了**：名字识别不再只用于展示——它决定会话选族与遮挡目标；但**遮挡名单只含内置 PowerShell 名**（`pwsh` / `powershell`），启发式认出的名字只展示。
+- **文档**：DESIGN / README（中英）/ CHANGELOG 按两族口径重写；`docs/notes/assist-model.md` 标注为 0.5 历史文档，§3 的「`restrict` 恒为 0 / 不注册 `guard`」硬不变量废除。
+
+### Removed
+
+- **「永不遮挡」硬不变量**：0.5 的「只增不减」在 0.6 保留为默认行为，但有一个明确例外——按会话遮挡另一族的**内置**命令工具。
+- **`envd_shell` 的「家族不重复」注册条件与 `skipReason='same-family'`**：同一个 shell 出现两份不再算「重复提供」；bash 族会话里 `envd_shell`（Git Bash）与宿主 `ops_bash` 并存是按语法族划分的**预期**状态（语法相同，分工写在简报里）。
+- **「模型手里同时有两个命令工具是预期行为」的笼统说法**：现在按族分开说——同族并存看分工、跨族并存（开关关闭或手动 PowerShell + `ops_bash`）会明确警告不要混写、bash 族会话看不到内置 PowerShell 名。
+
+### Fixed
+
+- **手动选的族不可用却显示成该族**：以前面板与简报会照着「手动 bash 族」写语法，但机器上既没有该族终端、也没有按该族发布的宿主工具，模型照着写必然失败。现在回退自动选族并说明原因（`familyFallback=true`），该族恢复可用后会自动回到手动族。
+- **同时看到两套命令语法指令**：以前默认终端是 PowerShell、宿主命令工具是 `ops_bash` 时，简报会同时给 PowerShell 与 bash 两个口径。0.6 按会话选族后用遮挡 / 拒绝把另一族收掉，模型只按一个族的语法写命令。
+- **dsh-ops 晚挂载 `ops_bash`**：会话先被判成 PowerShell 族、`ops_bash` 稍后才出现时，10 秒升级窗把它纠正成 bash 族（只允许升级一次，避免族来回抖动）。
+
 ## [0.5.0] - 2026-11-08
 
 > **破坏性变更**：EnvDock 不再遮挡、不禁用、不接管任何工具，只做「探测 + 简报 + 面板 + 可选增补 `envd_shell`」。删除 `shellTakeover` / `sandboxTakeover` 两个选项与全部逐会话接管事实；旧状态文件里的这两个字段会被忽略。

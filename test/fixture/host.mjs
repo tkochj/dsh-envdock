@@ -5,10 +5,25 @@
  * 真正跑起来。本模块是从 test/host-harness.mjs 里抽出来的**唯一一份**夹具实现:
  *
  *   · prepareHostEnv()   临时 DSH_HOME / PATH 过滤 / 缺失工具桩(import 时自动执行)
- *   · buildHost(opts)    造一个假宿主 → { ctx, services, api(), tools, dispose(), stats(), ... }
+ *   · buildHost(opts)    造一个假宿主 → { ctx, services, api(), tools, dispose(), disposeAgent(), stats(), ... }
  *   · fakeSubprocess / fakeSandboxedShell / fakeSandboxPolicy  可配置的服务替身
+ *   · withPath / makeStubBin  临时改 PATH(「本机没有 Git Bash」这类用例)
  *   · callApi / post / pollSnapshot / freshDetection / waitForBrief  HTTP + 轮询小工具
  *   · decodeEncodedCommand / decodeBashPayload / quotedArgs / isReg / isVersion  断言用解码器
+ *
+ * 0.6 起 tools 试身按真机(dsh-tools)语义搭了三层 + 遮挡/守卫:
+ *
+ *   全局层  root `ctx.tools.register()` / `shippedTools`        → 所有作用域继承,可 restrict
+ *   祖先层  `options.shellDefinitions`(preset / 第三方发布)      → 所有作用域继承,可 restrict
+ *   自有层  `options.agentTools` / `registerAgentTool()`         → 只有该 agent 看得见,**restrict 挡不掉**
+ *
+ *   真机口径(实测 dsh-tools):
+ *     · `view(scope)` 返回 `{ visible: Map, knownNames: Set, restrictableNames: Set }`;
+ *       restrictableNames 只含继承层,自有层名字不在里面;
+ *     · 对自有层名字 `restrict({deny})` 抛
+ *       `tools.restrict() names unknown global tool "pwsh"; known global tools: ...`;
+ *     · 根作用域(`ctx.tools`,没有 agent)调 restrict 直接抛(全局遮挡会遮住所有 agent);
+ *     · `guard(fn)` 在根层注册一次,`fn({name, agent, arguments})` 返回字符串即拒绝。
  *
  * 用法(注意必须**动态** import index.js,或先 import 本模块,否则 DSH_HOME 还没被指向临时目录):
  *
@@ -242,104 +257,217 @@ export function fakeSandboxedShell({ mode = 'workspace-write', stdout = 'host-ra
 }
 
 // ───────────────────────────────────── Cordis ctx 替身 ──
+/** 一个最小可用的工具定义(缺的字段补默认值)。 */
+function toolDefinition(name, description, extra = {}) {
+  const spec = extra && typeof extra === 'object' ? extra : {}
+  return {
+    name: String(name || ''),
+    description: description === undefined ? String(spec.description || '') : String(description || ''),
+    parameters: spec.parameters || { type: 'object', properties: {} },
+    output: spec.output || { schema: { type: 'object' }, render: () => [] },
+    execute: typeof spec.execute === 'function' ? spec.execute : async () => ({}),
+  }
+}
+
 /**
  * 夹具内核:造一个最小的 Cordis ctx + 服务替身。**不要直接调用** ——
  * 用 buildHost(options) 拿到带 api()/dispose()/stats() 的宿主对象。
+ *
+ * 0.6 的 tools 试身按真机 dsh-tools 搭三层(见文件头):全局 / 祖先 / 作用域自有。
+ * 关键语义:
+ *   · `get(name, scope)` / `executable(name, scope)` 的第二个参数是 agent(或 id),
+ *     省略 = 服务绑定的那个作用域;自有层永远压过继承层(restrict 挡不住自有层)。
+ *   · `definitions(scope)` 返回该作用域可见定义数组(被 deny 的过滤掉)。
+ *   · `view(scope)` 返回真机形状 `{ visible: Map, knownNames: Set, restrictableNames: Set }`
+ *     (额外附 visibleNames / visibleDefinitions 两个数组,方便断言)。
+ *   · `restrict({deny})` 在根作用域直接抛;名字不在 restrictableNames 里也抛(真机原话)。
+ *   · `guard(fn)` 可注册在任意作用域(真机允许),但 host-harness 的不变量是「只在根层注册一次」。
  */
 function createHarnessCore(options = {}) {
   const state = {
     effects: [],
+    /** 全局层:root `tools.register()` / `shippedTools` */
     toolDefs: new Map(),
-    /** 每个作用域各自的遮挡集合:真机上 restrict 是 per-agent 的,不是全局共享的一份。 */
+    /** 祖先层:`options.shellDefinitions`(preset / 第三方插件发布,不是本插件注册的全局工具) */
+    inheritDefs: new Map(),
+    /** 作用域自有层:scopeId → Map(name → definition)(`options.agentTools` / `registerAgentTool`) */
+    ownDefs: new Map(),
+    /** 每个作用域各自的遮挡集合:真机上 restrict 是 per-agent 的,不是全局共享一份 */
     deny: new Map(),
     listeners: new Map(),
     agents: [],
-    /** tools.guard 的替身:返回拒绝理由的第一条(真机语义:任一 guard 拒绝即拒绝) */
+    /** tools.guard 的替身:真机语义是「任一 guard 返回字符串即拒绝」 */
     guards: [],
-    /** 每一次 restrict 的真实尝试(含抛错的):测重试窗口/过期重试用,别靠副作用猜 */
-    restrictCalls: [],
+    /** 每次 guard 注册来自哪个作用域:'(root)' / agent id(钉「只在根层注册一次」) */
+    guardScopes: [],
+    /** guardReason 累计拒绝次数(夹具侧诊断;插件的 syncStats.guardRefusals 是另一本账) */
+    guardRefusals: 0,
+    /** 每一次 restrict 的真实尝试(含抛错的):测重试窗口/稳态不重试,别靠副作用猜 */
+    restrictAttempts: [],
+    /** 成功落地(拿到 disposer)的 restrict 次数 */
+    successfulRestrictCalls: 0,
+    /** 每个作用域由 restrict 派发出去的 disposer:agent 作用域 dispose 时统一撤销 */
+    scopeDisposers: new Map(),
+  }
+  /** 作用域 id(agent 对象 / id 字符串 / null=全局)。 */
+  const idOf = (scope) => {
+    if (scope === null || scope === undefined) return null
+    if (typeof scope === 'string' || typeof scope === 'number') return String(scope)
+    if (typeof scope === 'object') {
+      if (typeof scope.id === 'string' && scope.id) return scope.id
+      if (typeof scope.key === 'string' && scope.key) return scope.key
+    }
+    return null
+  }
+  /** 本次调用的作用域:参数省略 = 服务绑定的那个;显式传 agent = 那个 agent。 */
+  const scopeOfArg = (scopeId, scope) => {
+    if (scope === undefined) return scopeId
+    if (scope === null) return null
+    const id = idOf(scope)
+    return id === null ? scopeId : id
   }
   const denyOf = (scopeId) => {
     if (!state.deny.has(scopeId)) state.deny.set(scopeId, new Set())
     return state.deny.get(scopeId)
   }
+  const ownOf = (scopeId) => {
+    if (!state.ownDefs.has(scopeId)) state.ownDefs.set(scopeId, new Map())
+    return state.ownDefs.get(scopeId)
+  }
+  /** 继承层 = 全局层 + 祖先层(可被 restrict;真机 restrictableNames 的口径)。 */
+  const inheritedDefs = () => {
+    const out = new Map()
+    for (const [name, def] of state.toolDefs) out.set(name, def)
+    for (const [name, def] of state.inheritDefs) if (!out.has(name)) out.set(name, def)
+    return out
+  }
+  /** 可 restrict 的名字集合:只有继承层(agent 自有层不在里面 = restrict 挡不掉)。 */
+  const restrictableFor = () => new Set(inheritedDefs().keys())
+  /** 该作用域登记过的名字:继承层 + 自有层。 */
+  const knownFor = (scopeId) => {
+    const names = new Set(inheritedDefs().keys())
+    if (scopeId !== null) for (const name of ownOf(scopeId).keys()) names.add(name)
+    return names
+  }
   /**
-   * 某个作用域看到的工具表。
-   * 关键两条真机语义都在这里:
-   *   · 被 restrict 掉的**全局工具**在这个作用域里读作「不存在」;
-   *   · 对不存在的名字 restrict 直接失败(所以调用方必须先 hasTool 确认)。
+   * 该作用域此刻看得见的定义:继承层扣掉本作用域的 deny(再扣 executable 激活条件),
+   * 然后自有层整体叠上去(限制只过滤「继承来的」,不过滤自己的注册 —— 真机原话)。
+   */
+  const visibleFor = (scopeId) => {
+    const denied = scopeId !== null ? denyOf(scopeId) : null
+    const out = new Map()
+    for (const [name, def] of inheritedDefs()) {
+      if (denied && denied.has(name)) continue
+      const forced = typeof options.executableFor === 'function' ? options.executableFor(scopeId, name) : undefined
+      if (forced === false) continue
+      out.set(name, def)
+    }
+    if (scopeId !== null) for (const [name, def] of ownOf(scopeId)) out.set(name, def)
+    return out
+  }
+  /**
+   * 某个作用域看到的工具服务。
+   * 关键真机语义都在这里:
+   *   · 被 restrict 掉的**继承层工具**在这个作用域里读作「不存在」;
+   *   · 自有层注册的名字 restrict 挡不掉(restrict 直接抛);
+   *   · 根作用域(scopeId === null)没有 restrict:全局遮挡会遮住所有 agent,真机直接拒绝。
    */
   const toolsFor = (scopeId) => {
     const api = {
       register(def) {
-        if (state.toolDefs.has(def.name)) throw new Error('duplicate tool ' + def.name)
-        state.toolDefs.set(def.name, def)
-        return () => state.toolDefs.delete(def.name)
+        const name = def && def.name ? String(def.name) : ''
+        if (!name) throw new Error('tool definition needs a name')
+        if (state.toolDefs.has(name)) throw new Error('duplicate tool ' + name)
+        state.toolDefs.set(name, def)
+        return () => state.toolDefs.delete(name)
       },
-      get(name) {
-        if (scopeId !== null && denyOf(scopeId).has(name)) return null
-        return state.toolDefs.get(name) || null
+      get(name, scope) {
+        const at = scopeOfArg(scopeId, scope)
+        if (at !== null && ownOf(at).has(name)) return ownOf(at).get(name)
+        if (at !== null && denyOf(at).has(name)) return null
+        return inheritedDefs().get(name) || null
       },
       /**
        * 真机语义(dsh-ops 口径):`get` 回答「注册了没有」,`executable` 回答「这一单真的能调」。
        * ptc 模式下模型直呼只允许 run_code 时,替代工具会「get 有、executable 无」——
        * 拿 get 判就绪就会把真正能用的宿主工具藏掉,模型于是收到零命令工具。
-       * 默认与 get 同口径(注册且未被本作用域 deny);夹具用 options.executableFor(scopeId, name)
-       * 制造分歧:返回 false → 视为不可执行(返回 null);返回 undefined / true → 回落 get。
+       * 默认与 get 同口径;夹具用 options.executableFor(scopeId, name) 制造分歧:
+       * 返回 false → 视为不可执行(返回 null);返回 undefined / true → 回落 get。
        */
-      executable(name) {
-        const forced = typeof options.executableFor === 'function' ? options.executableFor(scopeId, name) : undefined
+      executable(name, scope) {
+        const at = scopeOfArg(scopeId, scope)
+        const forced = typeof options.executableFor === 'function' ? options.executableFor(at, name) : undefined
         if (forced === false) return null
-        return scopeId !== null && denyOf(scopeId).has(name) ? null : state.toolDefs.get(name) || null
+        if (at !== null && ownOf(at).has(name)) return ownOf(at).get(name)
+        if (at !== null && denyOf(at).has(name)) return null
+        return inheritedDefs().get(name) || null
       },
+      /**
+       * 真机 restrict:只能挡**继承层**的名字;根作用域调用直接抛。
+       * 返回的就是撤销这一层遮挡的 disposer(组合语义:只撤销自己加的名字)。
+       */
       restrict(spec) {
-        const deny = (spec && spec.deny) || []
-        if (!deny.length) throw new Error('empty restriction')
-        state.restrictCalls.push(deny.slice())
+        const deny = spec && Array.isArray(spec.deny) ? spec.deny.map(String) : []
+        const attempt = { scope: scopeId, deny: deny.slice(), ok: false, error: '', added: [] }
+        state.restrictAttempts.push(attempt)
+        if (scopeId === null) {
+          // 真机原话(dsh-tools):全局限制会把每个 agent 都遮住
+          attempt.error = 'tools.restrict() requires a scoped context (agent.ctx): a context-global restriction would mask every agent'
+          throw new Error(attempt.error)
+        }
+        if (!deny.length) {
+          attempt.error = 'tools.restrict({}) is a no-op'
+          throw new Error(attempt.error)
+        }
+        const restrictable = restrictableFor()
+        const unknown = deny.filter((name) => !restrictable.has(name))
+        if (unknown.length) {
+          // 真机原话:作用域私有注册(agent 自有层)挡不掉,restrict 直接抛。
+          attempt.error =
+            'tools.restrict() names unknown global tool' +
+            (unknown.length > 1 ? 's' : '') +
+            ' ' +
+            unknown.map((name) => '"' + name + '"').join(', ') +
+            '; known global tools: ' +
+            ([...restrictable].sort().join(', ') || '(none)')
+          throw new Error(attempt.error)
+        }
         const set = denyOf(scopeId)
-        const blocked = options.unrestrictable || []
-        // 真机坑:agent 自己层注册的同名工具,restrict 返回成功却挡不住。
-        // options.restrictNoop(scopeId, deny) 返回 true → 夹具照常返回 disposer,但遮挡不生效。
-        const noop = typeof options.restrictNoop === 'function' ? Boolean(options.restrictNoop(scopeId, deny)) : Boolean(options.restrictNoop)
-        // 只记「这次真的新增的」名字:disposer 只能撤销自己这一层遮挡,
-        // 不能把别的插件在这期间加的遮挡一起抹掉(真机上 restrict 是可组合的)。
-        // 真机坑(安全审校 P1-4):restrict 可能**先落地再抛错**(publication reentry),
-        // deny 已经生效、disposer 却丢了。restrictApplyThenThrow(scopeId, deny) 复现这条路径。
-        const applyThenThrow =
-          typeof options.restrictApplyThenThrow === 'function' ? Boolean(options.restrictApplyThenThrow(scopeId, deny)) : false
         const added = []
         for (const name of deny) {
-          if (!state.toolDefs.has(name)) throw new Error('unknown tool ' + name)
-          // 真机语义:作用域私有的名字挡不掉(restrict 直接失败)。
-          // unrestrictableFor(scopeId, name) 可以按作用域给出不同答案(测「不株连」)。
-          const scopeBlocked =
-            typeof options.unrestrictableFor === 'function'
-              ? Boolean(options.unrestrictableFor(scopeId, name))
-              : blocked.includes(name)
-          if (scopeBlocked) {
-            // 真机(dsh-tools)对「作用域私有注册」抛的是这句:restrictableNames 只含继承面,
-            // 名字不在里面就直接抛。第二条是夹具自造的旧口径,供不同 TTL 分支用。
-            throw options.unrestrictableRealMessage
-              ? new Error('tools.restrict() names unknown global tool "' + name + '"; known global tools: bash')
-              : new Error('scope-local tool ' + name)
-          }
-          if (!set.has(name)) {
-            if (!noop) set.add(name)
-            added.push(name)
-          }
+          if (set.has(name)) continue
+          set.add(name)
+          added.push(name)
         }
-        // 落地之后再抛:调用方拿不到 disposer,这份遮挡成为「无主 deny」(撤不掉)。
-        if (applyThenThrow) throw new Error('restrict applied then threw (injected)')
-        return () => {
+        attempt.ok = true
+        attempt.added = added.slice()
+        state.successfulRestrictCalls++
+        let live = true
+        const dispose = () => {
+          if (!live) return
+          live = false
           for (const name of added) set.delete(name)
+          const bucket = state.scopeDisposers.get(scopeId)
+          if (bucket) bucket.delete(dispose)
         }
+        let bucket = state.scopeDisposers.get(scopeId)
+        if (!bucket) {
+          bucket = new Set()
+          state.scopeDisposers.set(scopeId, bucket)
+        }
+        bucket.add(dispose)
+        return dispose
       },
-      /** 真机:全局 guard(经 ctx.tools.guard 注册)对每次调用求理由,任一拒绝即拒绝 */
+      /** 真机:guard(经 ctx.tools.guard 注册)对每次调用求理由,任一返回字符串即拒绝 */
       guard(fn) {
+        if (typeof fn !== 'function') throw new Error('tools.guard() needs a function')
         state.guards.push(fn)
+        state.guardScopes.push(scopeId === null ? '(root)' : String(scopeId))
         return () => {
           const i = state.guards.indexOf(fn)
-          if (i >= 0) state.guards.splice(i, 1)
+          if (i < 0) return
+          state.guards.splice(i, 1)
+          state.guardScopes.splice(i, 1)
         }
       },
     }
@@ -347,25 +475,29 @@ function createHarnessCore(options = {}) {
      * 真机语义:`tools.definitions(scope)` 枚举「这个作用域此刻看得见的工具定义」,
      * 连注册在 agent 祖先层、全局 get 查不到的都算(预设 / 第三方插件发布的命令工具)。
      * index.js 靠它认出第三方发布名(tenant_bash 之类)和家族。
-     * 夹具返回:全局 register 的定义 + options.shellDefinitions 注入的定义;
-     * 被本作用域 deny 掉的名字不返回(挡住之后定义面也看不到,和真机一致)。
+     * 夹具返回:全局 register 的定义 + 祖先层 + (该作用域)自有层;被 deny 掉的不返回。
      * options.definitions === false 模拟老宿主:连方法都不挂,插件必须回退到按名字探可见性。
      */
     if (options.definitions !== false) {
-      api.definitions = function definitions() {
-        const denied = scopeId !== null ? denyOf(scopeId) : null
-        const seen = new Set()
-        const defs = []
-        const add = (def) => {
-          const name = def && def.name ? String(def.name) : ''
-          if (!name || seen.has(name)) return
-          if (denied && denied.has(name)) return
-          seen.add(name)
-          defs.push(def)
+      api.definitions = function definitions(scope) {
+        return [...visibleFor(scopeOfArg(scopeId, scope)).values()]
+      }
+      /**
+       * 真机 `tools.view(scope)` 的形状:`visible` 是 Map,knownNames / restrictableNames 是 Set。
+       * 只含名字的调用方(view.knownNames 之类)与真机一致;额外给两个数组只是方便断言。
+       */
+      if (options.view !== false) {
+        api.view = function view(scope) {
+          const at = scopeOfArg(scopeId, scope)
+          const visible = visibleFor(at)
+          return {
+            visible,
+            knownNames: knownFor(at),
+            restrictableNames: restrictableFor(),
+            visibleNames: [...visible.keys()],
+            visibleDefinitions: [...visible.values()],
+          }
         }
-        for (const [, def] of state.toolDefs) add(def)
-        for (const def of options.shellDefinitions || []) add(def)
-        return defs
       }
     }
     return api
@@ -373,29 +505,31 @@ function createHarnessCore(options = {}) {
   const tools = toolsFor(null)
   // 模拟 preset 注册的宿主 shell 工具(接管判定靠它)
   for (const name of options.shippedTools || []) {
-    state.toolDefs.set(name, {
-      name,
-      description: 'shipped ' + name,
-      parameters: { type: 'object', properties: {} },
-      output: { schema: { type: 'object' }, render: () => [] },
-      execute: async () => ({}),
-    })
+    state.toolDefs.set(name, toolDefinition(name, 'shipped ' + name))
     state.shipped = (state.shipped || new Set()).add(name)
   }
   // 模拟 preset / 第三方插件把命令工具发布在 agent 祖先层:每个作用域都看得见,
   // 但不是「本插件 register 的全局工具」。options.shellDefinitions 是定义原文,
   // 供 definitions(scope) 枚举 —— 动态识别用例靠它注入 tenant_bash 这类发布名。
+  // 注意:祖先层与全局层分开存,这样 restrict 语义能按真机口径检查 restrictableNames。
   for (const def of options.shellDefinitions || []) {
     if (!def || !def.name) continue
-    if (!state.toolDefs.has(def.name)) {
-      state.toolDefs.set(def.name, {
-        name: def.name,
-        description: def.description || '',
-        parameters: def.parameters || { type: 'object', properties: {} },
-        output: def.output || { schema: { type: 'object' }, render: () => [] },
-        execute: typeof def.execute === 'function' ? def.execute : async () => ({}),
-      })
-    }
+    state.inheritDefs.set(String(def.name), toolDefinition(def.name, def.description, def))
+  }
+  /**
+   * 作用域自有层注册(模拟 preset 把 pwsh 发布在 agent 层 / dsh-ops 的 ops_bash 在自有层):
+   * definitions(agent) 看得见、knownNames 有、restrictableNames 没有、restrict 会抛。
+   * 支持写名字(只用来测「挡不掉」)或完整定义。
+   */
+  const registerAgentTool = (agentId, item) => {
+    const def = typeof item === 'string' ? toolDefinition(item, 'agent-layer ' + item) : toolDefinition(item && item.name, item && item.description, item || {})
+    if (!def.name) throw new Error('agent tool needs a name')
+    ownOf(String(agentId)).set(def.name, def)
+    return def
+  }
+  const unregisterAgentTool = (agentId, name) => ownOf(String(agentId)).delete(String(name))
+  for (const [agentId, defs] of Object.entries(options.agentTools || {})) {
+    for (const item of defs || []) registerAgentTool(agentId, item)
   }
   const subprocess = fakeSubprocess(options.subprocess)
   const services = {
@@ -455,6 +589,11 @@ function createHarnessCore(options = {}) {
     const actx = makeCtx({ tools: toolsFor(id) })
     return { id, ctx: actx, session }
   }
+  const addAgent = (id, session) => {
+    const agent = makeAgent(id, session)
+    state.agents.push(agent)
+    return agent
+  }
   const emit = (event, payload) => {
     for (const listener of [...(state.listeners.get(event) || [])]) {
       try {
@@ -477,17 +616,77 @@ function createHarnessCore(options = {}) {
     set.clear()
     for (const name of names || []) set.add(name)
   }
-  /** 某次调用的 guard 结论(真机:任一 guard 拒绝即拒绝) */
+  /** 直接往全局层加一个工具(运行时模拟「宿主后来又装了命令工具」)。 */
+  const registerGlobalTool = (item) => {
+    const def = typeof item === 'string' ? toolDefinition(item, 'global ' + item) : toolDefinition(item && item.name, item && item.description, item || {})
+    if (!def.name) throw new Error('global tool needs a name')
+    if (state.toolDefs.has(def.name)) throw new Error('duplicate tool ' + def.name)
+    state.toolDefs.set(def.name, def)
+    return def
+  }
+  const unregisterGlobalTool = (name) => state.toolDefs.delete(String(name))
+  /**
+   * agent 作用域 dispose(真机语义):
+   *   · 该作用域里挂的 restrict effect 自动撤销(restrict 返回的 disposer 正好是那个 effect 的句柄);
+   *   · 作用域消失 → 该作用域的 deny 集合不再有意义,一并清掉;
+   *   · 自有层注册随作用域销毁;
+   *   · 从 `agents.list()` 移除,再派发 `agent/disposed`({ agent })(真机 payload 就是这个形状)。
+   * 先撤句柄再派发:插件收到事件时不该看到「还挂着遮挡」的中间态。
+   */
+  const disposeAgent = (agent) => {
+    if (!agent) return false
+    const id = idOf(agent)
+    if (id === null) return false
+    const bucket = state.scopeDisposers.get(id)
+    if (bucket) {
+      for (const dispose of [...bucket]) {
+        try {
+          dispose()
+        } catch {}
+      }
+      state.scopeDisposers.delete(id)
+    }
+    denyOf(id).clear()
+    const own = state.ownDefs.get(id)
+    if (own) own.clear()
+    const i = state.agents.indexOf(agent)
+    if (i >= 0) state.agents.splice(i, 1)
+    emit('agent/disposed', { agent })
+    return true
+  }
+  /** 某次调用的 guard 结论(真机:任一 guard 拒绝即拒绝)。真机 exec 形状含 arguments。 */
   const guardReason = (name, agent) => {
-    for (const fn of state.guards) {
+    const exec = { name: String(name || ''), agent: agent || undefined, arguments: {} }
+    for (const fn of [...state.guards]) {
       try {
-        const reason = fn({ name, agent })
-        if (typeof reason === 'string' && reason) return reason
+        const reason = fn(exec)
+        if (typeof reason === 'string' && reason) {
+          state.guardRefusals++
+          return reason
+        }
       } catch {}
     }
     return undefined
   }
-  return { ctx, state, webRoutes, services, subprocess, makeAgent, emit, toolsFor, setScopeDeny, guardReason, webServer }
+  return {
+    ctx,
+    state,
+    webRoutes,
+    services,
+    subprocess,
+    makeAgent,
+    addAgent,
+    emit,
+    toolsFor,
+    setScopeDeny,
+    guardReason,
+    webServer,
+    disposeAgent,
+    registerGlobalTool,
+    unregisterGlobalTool,
+    registerAgentTool,
+    unregisterAgentTool,
+  }
 }
 
 // ───────────────────────────────────── HTTP 请求替身 ──
@@ -568,20 +767,22 @@ export async function requestApi(h, url = '/envdock-api', init = {}) {
  * 造一个假 Cordis 宿主并返回操作句柄。
  *
  * options(全部可选):
- *   shippedTools       宿主已注册的命令工具名(数组),模拟 preset 自带的 bash/pwsh
+ *   shippedTools       宿主已注册的命令工具名(数组),模拟 preset 自带的 bash/pwsh(全局层)
  *   agentIds           agent 列表:字符串(无会话)或 { id, session }
  *   shell              宿主 shell 服务替身:fakeSandboxedShell(...) 或 { sandboxMode } / {}
  *   shellEnv           受管的 DSH_* 快照收集器
  *   sandboxPolicy      逐会话沙箱策略替身(见 fakeSandboxPolicy)
  *   subprocess         假 subprocess 的配置({ registryPath, exitWhen, fail, latencyMs })
  *   shellDefinitions   发布在 agent 祖先层的命令工具定义原文(动态识别用例)
- *   definitions        false → 模拟老宿主(没有 tools.definitions)
- *   unrestrictable / unrestrictableFor   哪些宿主工具挡不掉(作用域私有)
- *   restrictNoop       restrict 成功却挡不住
- *   executableFor      get 与 executable 分歧(ptc 折叠)
+ *   agentTools         { agentId: [name|definition] } 注册进某个 agent 的**自有层**
+ *                      (模拟 preset 把 pwsh 发布在 agent 层 / ops_bash 在自有层)
+ *   definitions        false → 模拟老宿主(没有 tools.definitions / view)
+ *   view               false → 只模拟「有 definitions、没有 view」的中间代宿主
+ *   executableFor      (scopeId, name) → false 时 get 有、executable 无(ptc 折叠)
  *
- * 返回:{ ctx, services, state, webRoutes, subprocess, makeAgent, emit, toolsFor,
- *        setScopeDeny, guardReason, tools, api(), dispose(), stats() }
+ * 返回:{ ctx, services, state, webRoutes, subprocess, makeAgent, addAgent, emit, toolsFor,
+ *        setScopeDeny, guardReason, disposeAgent, registerGlobalTool, unregisterGlobalTool,
+ *        registerAgentTool, unregisterAgentTool, tools, api(), dispose(), stats() }
  */
 export function buildHost(options = {}) {
   const core = createHarnessCore(options)
@@ -601,14 +802,40 @@ export function buildHost(options = {}) {
       }
       return effects.length
     },
+    /**
+     * agent 作用域 dispose(见 createHarnessCore 里的注释)。
+     * 返回 true 表示派发了 agent/disposed(监听者已跑)。
+     */
+    disposeAgent: (agent) => core.disposeAgent(agent),
     /** 当前夹具状态快照(诊断 / 断言用;不要在这里修改任何东西)。 */
     stats() {
+      const activeDenies = {}
+      for (const [scopeId, set] of core.state.deny) {
+        if (!set || set.size === 0) continue
+        activeDenies[scopeId === null ? '(root)' : scopeId] = [...set].sort()
+      }
       return {
         effects: core.state.effects.length,
         toolDefs: [...core.state.toolDefs.keys()],
+        inheritedDefs: [...core.state.inheritDefs.keys()],
+        ownLayers: Object.fromEntries([...core.state.ownDefs.entries()].map(([id, map]) => [id, [...map.keys()].sort()])),
         webRoutes: core.webRoutes.map((r) => r && r.path),
         guards: core.state.guards.length,
-        restrictCalls: core.state.restrictCalls.length,
+        guardScopes: core.state.guardScopes.slice(),
+        guardRefusals: core.state.guardRefusals,
+        /** 每一次 restrict 尝试的次数(含抛错的) */
+        restrictCalls: core.state.restrictAttempts.length,
+        /** 成功拿到 disposer 的 restrict 次数 */
+        successfulRestrictCalls: core.state.successfulRestrictCalls,
+        /** 每次尝试的明细:{ scope, deny, ok, error }(scope 为 '(root)' 表示根层,真机不允许) */
+        restrictAttempts: core.state.restrictAttempts.map((attempt) => ({
+          scope: attempt.scope === null ? '(root)' : attempt.scope,
+          deny: attempt.deny.slice(),
+          ok: attempt.ok,
+          error: attempt.error,
+        })),
+        /** 此刻还生效的遮挡(每作用域);空 = 没有残留 */
+        activeDenies,
         agents: core.state.agents.map((a) => a.id),
         listeners: [...core.state.listeners.keys()],
         subprocessCalls: core.subprocess.calls.length,
@@ -690,6 +917,45 @@ export function decodePowerShellPayload(spec) {
 /** 探测要读系统 PATH(注册表),这两次 reg.exe 不等于「版本探测」,断言里要分开算。 */
 export const isReg = (call) => String((call.argv || [])[0] || '').split(/[\\/]/).pop().toLowerCase() === 'reg.exe'
 export const isVersion = (call) => !isReg(call) && (call.argv || [])[1] !== '-0p'
+
+// ───────────────────────────────────── PATH 辅助(「没有 Git Bash」等) ──
+/**
+ * 临时把 `process.env.PATH` 过滤成 predicate 保留的目录,跑完恢复。
+ *
+ * ⚠ 探测缓存两个坑,调用方必须自己处理:
+ *   1. 探测结果有 45s TTL 与进程级缓存 → 改完 PATH 必须 `post(h, {op:'refresh'})` 拿新快照,
+ *      跑完恢复 PATH 后也要再 refresh 一次,否则后面的夹具会吃到桩环境的探测结果;
+ *   2. 「系统 PATH」走注册表(fakeSubprocess 默认返回 process.env.PATH),refresh 时才会重读。
+ *
+ * 回调拿到 `{ path, dirs }`(过滤后的 PATH 与实际目录),方便用例断言。
+ */
+export async function withPath(predicate, fn) {
+  const before = process.env.PATH
+  const keep = typeof predicate === 'function' ? predicate : () => Boolean(predicate)
+  const dirs = pathDirs().filter(keep)
+  process.env.PATH = dirs.join(';')
+  try {
+    return await fn({ path: process.env.PATH, dirs: dirs.slice() })
+  } finally {
+    process.env.PATH = before
+  }
+}
+
+/**
+ * 建一个只放指定空文件桩的临时 bin 目录(自动登记清理)。
+ * 用于「机器上没有 Git Bash、也没有 git→bash 兜底」这类用例:把 PATH 换成一
+ * 只有 git.exe 桩的目录,index.js 的 git 兜底(dirname(dirname(git)))就找不到 bash。
+ */
+export function makeStubBin(files = []) {
+  const dir = mkdtempSync(join(tmpdir(), 'envdock-stubbin-'))
+  cleanupDirs.push(dir)
+  for (const file of files) {
+    try {
+      writeFileSync(join(dir, file), '', 'utf8')
+    } catch {}
+  }
+  return dir
+}
 
 // ───────────────────────────────────── HTTP / 轮询小工具 ──
 export async function callApi(h, opts) {

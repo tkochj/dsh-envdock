@@ -224,3 +224,136 @@ node test/simulate.mjs --json                                   # 单行机器�
 - 依赖本机「有没有某族终端」的分支保持原样:没有该终端时明确 `SKIP`,不伪造 ok。
 - 求解器/终端探测仍走夹具固定输出(`CANNED`),所以断言与这台机器实际装了哪个工具链无关
   (`ENVDOCK_FULL_PATH=1` 可以关掉 PATH 过滤,仅排查用)。
+
+---
+
+# 0.6「两族」模型的测试改造(推翻 0.5 的硬不变量)
+
+> 对象:`test/fixture/host.mjs`、`test/host-harness.mjs`、`test/family.mjs`(新增)、`test/simulate.mjs`。
+> 依据:Lead 冻结的「共享契约 v1」(族判定 / 遮挡三条 / 注册条件 / 简报文案 / API 形状 / 8 个纯函数),
+> 实现见工作区的 `index.js`(未提交)。写作用域只有 `test/`。
+
+## 7. 判定模型的变更(0.5 → 0.6)
+
+| 0.5(辅助展示) | 0.6(两族) |
+| --- | --- |
+| 硬不变量:`tools.restrict` 恒 0 次、`tools.guard` 一次都不注册 | bash 族会话**按会话** restrict 掉 PowerShell 族内置名(pwsh/powershell),挡不掉的自有层名字走根层 guard 拒绝 |
+| 注册条件第 2 条「宿主有同族工具 → `skipReason='same-family'`」 | 删除;`skipReason` 只剩 `'no-family-terminal' \| 'no-unconfined-session' \| 'taken' \| 'error'` |
+| 简报「优先 `envd_shell`」「与默认终端同族,EnvDock 不重复提供」 | 按会话族写:bash 族「宿主 ops_bash + envd_shell(EnvDock 增补,Git Bash,同语法);PowerShell 族宿主工具已隐藏(pwsh),不要调用 pwsh」;PowerShell 族「未检测到 bash 族工具」 |
+| 命令工具固定跟「默认终端」 | 手动选终端 → 手动族;auto → 该会话能看到 bash 族宿主工具就是 bash,否则 powershell;首次判定后锁定,10s 内允许一次 powershell→bash 升级 |
+| API 无族字段 | 顶层 + `commandTool` 新增 family / familySource / blockOtherFamily / sessions / hidden / refuseOnly / displayOnly / mixed,`hostTools[].group`;`syncStats` +`restrictApplied` / `guardRefusals` |
+
+## 8. 夹具升级(`test/fixture/host.mjs`)
+
+`tools` 试身按真机 `dsh-tools` 重写为**三层**,并提供 0.6 用例需要的观察点:
+
+- **全局层**:root `ctx.tools.register()` / `shippedTools`;可被 restrict。
+- **祖先层**:`options.shellDefinitions`(preset / 第三方发布);可被 restrict。
+- **作用域自有层**:`options.agentTools = { agentId: [name|definition] }` / `host.registerAgentTool()`;
+  只有该 agent 看得见,**restrict 挡不掉**(真机原话):
+  `tools.restrict() names unknown global tool "pwsh"; known global tools: ...`。
+- `tools.view(agent)` 返回**真机形状** `{ visible: Map, knownNames: Set, restrictableNames: Set }`
+  (另附 `visibleNames` / `visibleDefinitions` 两个数组方便断言);`restrictableNames` 只含继承层。
+- `tools.get(name, scope)` / `executable(name, scope)` 的第二个参数是 agent(省略 = 服务绑定的作用域)。
+- **根层 `ctx.tools.restrict` 直接抛错**(`tools.restrict() requires a scoped context (agent.ctx)...`),
+  夹具不允许从根层遮住所有 agent —— 这是 0.6 用例 11 的硬不变量。
+- `ctx.tools.guard(fn)` 在根层注册;`h.guardReason(name, agent)` 用真机形状 `fn({ name, agent, arguments: {} })`
+  求第一条字符串理由,并计 `guardRefusals`。
+- `h.disposeAgent(agent)`:撤销该作用域的 restrict disposer → 清 deny → 清自有层 → 从 `agents.list()`
+  移除 → 派发 `agent/disposed`({ agent })(真机 payload 就是这个形状)。
+- `h.stats()` 新增:`successfulRestrictCalls`、`restrictAttempts[{ scope, deny, ok, error }]`
+  (含抛错的尝试;`scope='(root)'` 表示根层调用)、`activeDenies`(每作用域,空对象 = 无残留)、
+  `guards` / `guardScopes` / `guardRefusals`、`ownLayers`。
+- `withPath(predicate, fn)` + `makeStubBin(files)`:「本机没有 Git Bash」场景把 PATH 换成只有 git.exe 桩的目录,
+  跑完恢复。**探测缓存是进程共享的**:改完/还原 PATH 都必须 `freshDetection(h)`(`POST {op:'refresh'}`),
+  否则后面的夹具会吃到桩环境的探测结果(用例 15 结尾就是这么收的)。
+- 删掉的 0.5 夹具开关(不再有用):`unrestrictable` / `unrestrictableFor` / `unrestrictableRealMessage` /
+  `restrictNoop` / `restrictApplyThenThrow`;`executableFor` 保留(ptc 折叠诊断)。
+- 修了一处隐蔽的转义坑:`regOutput()` 的行分隔必须是真 CRLF(`join('\r\n')`),否则 `reg.exe` 输出解析不出
+  「系统 PATH」,`pathInfo.source` 会一直报 `process`、PATH 漂移类用例全红。
+
+## 9. `test/family.mjs`(新增,零依赖纯函数自测)
+
+`node test/family.mjs`(88 条断言)。import 前把 `DSH_HOME` 指到临时目录,不碰真实 `~/.dsh`;函数缺失时明确报
+「index.js 还没实现 0.6 的纯函数」并退出 1。覆盖:
+
+- `shellToolGroup`:内置名单 + 名字 token(`ops_bash` / `tenant_bash` / `pwsh_persistent` / `tenant_pwsh` /
+  `gitbash` / `cmd` / `wsl` / `envd_shell` / 空)。
+- `manualFamilyOf`:`pwsh/powershell`→powershell、`bash/wsl`→bash、`cmd/custom/auto`→''。
+- `autoFamilyOf`:有 bash 族工具→bash,否则 powershell;cmd/wsl 不算;脏数组项跳过。
+- `resolveSessionFamily`:首次判定、锁定(record 原样返回)、10s 内(含边界)升级一次、超 10s 不升级、
+  升级只一次、不会从 bash 回退、手动族优先、自动↔手动重判、非法 manual → 当自动、`now` 省略用 Date.now()。
+- `familyMask`:三条同时成立才 active;`blockOtherFamily=false` / powershell 族 / 没有 bash 族宿主工具 → 不遮;
+  agent 自有层名字进 refuse 不进 hide;`restrictable` 省略 = 全可;启发式 PowerShell 名只 displayOnly;
+  bash 族名字(含各式拼写)永不进 hide/refuse;`sticky=true` 且 bash 工具暂时消失仍 active(遮挡记忆)。
+- `familyBriefLine`:全部必需文案子串(bash 族 + envd_shell、已隐藏/不要调用 pwsh、PowerShell 族/未检测到
+  bash 族工具、mixed 三连、未隐藏、未遮挡、本会话被围栏 + ops_bash 且**不含**旧「优先 envd_shell」、未找到、
+  PowerShell 族围栏「改用宿主」、只展示、使用分工);空 spec 不抛。
+
+## 10. `test/host-harness.mjs` 的两族用例(§5,17 个)
+
+编号与规划 §5 一一对应,test name 以 `5.N` 开头:
+
+| # | 场景 | 关键断言 |
+| --- | --- | --- |
+| 1 | 无 bash 族(只有 pwsh) | 会话族 powershell、envd_shell 用 PowerShell 7(`-NoLogo -Command`)、restrict 0 次、guard 不拒绝 pwsh、简报「未检测到 bash 族工具」 |
+| 2 | 有 ops_bash | 会话族 bash、envd_shell 注册且 `skipReason=null`(不再 same-family)、argv 走 `bash -lc`、ops_bash 与 envd_shell 同时可用 |
+| 3 | ops_bash + 全局层 pwsh | deny 正好 `{pwsh}`、ops_bash 不在其中、`hidden=[pwsh]`、restrict 只发生在 agent 作用域、guard 根层一次、拒绝文案含「隐藏/ops_bash/bash 语法」且不 spawn、定义面看不到 pwsh 但 knownNames 仍有 |
+| 4 | pwsh 在 agent 自有层 | 不 restrict(hide 空/0 次)、`refuseOnly=[pwsh]`、直接 restrict 抛真机错误、guard 拒绝、自有层注册没被拆 |
+| 5 | ops_bash 出现后消失 | 10s 内升级 bash 并遮挡;消失后族仍 bash + pwsh 仍隐藏(sticky 记忆);`freshDetection` 后回 powershell、hide/deny 全清 |
+| 6 | 手动 PowerShell + ops_bash | 不遮挡不拒绝、`mixed=true`、简报「两族同时可见 / 不要混写 / 手动选择」 |
+| 7 | 手动 bash + pwsh | 遮挡 pwsh,deny `{pwsh}` 不含 ops_bash,guard 拒绝 |
+| 8 | `blockOtherFamily=false` | 不发 restrict、guard 放行、pwsh 仍可见、简报「未隐藏」 |
+| 9 | 启发式 PowerShell 名(tenant_pwsh) | 只 displayOnly,不进 hide/refuse、不 restrict、guard 放行、简报「只展示」 |
+| 10 | 不变量 | 所有快照的 hide/refuseOnly/displayOnly + 所有夹具 deny/restrict 目标都不含 bash 族名字 |
+| 11 | 不变量 | 夹具根层 restrict 直接抛错;全程(除有意探针)没有根层 restrict,更没成功落地 |
+| 12 | agent/disposed | 该作用域 deny 全清、agents.list 移除、pwsh 重新可见、简报不再说已隐藏;关开关后一个对账周期内 deny 全清 |
+| 13 | 振荡 | 稳定后连续 10 次对账 restrict 调用 ≤1 次、deny/hidden 不漂移 |
+| 14 | 围栏 bash 族会话 | 简报「本会话被围栏」+ ops_bash、不含旧「优先 envd_shell」;`[sandbox]` 拒绝文案保留且指向 ops_bash;无围栏会话照常执行 |
+| 15 | 无 Git Bash + ops_bash | `skipReason='no-family-terminal'`、envd_shell 未注册、会话族仍 bash、遮挡仍生效、简报「未找到」 |
+| 16 | 手动 bash 但会话没有 bash 族工具 | 不遮挡(0 次/hide 空)、guard 放行、简报警告「未遮挡」 |
+| 17 | 手动 bash 但该族**既没有终端、也没有宿主工具** | 回退 auto:`familySource='auto'`、API 顶层与 `commandTool` 都 `familyFallback=true`、生效族按自动规则重判(powershell);简报追加「手动选择的族不可用……已回退自动选族」;注册该族宿主工具后**下一轮对账**自动回到 `manual`(`familyFallback=false`,不用重新探测) |
+
+> 用例 17(与 15 同一套环境技巧)靠 `withPath` + `makeStubBin` 造「该族没有终端」:先在真实 PATH 下把默认终端写成 bash,
+> 再把 PATH 换成只含 `git.exe` + `pwsh.exe` 桩的目录,并在**桩环境里** `freshDetection(h517)` 让共享探测缓存落到桩环境;
+> 断言完在 `finally` 里 `resetState(h)` + `freshDetection(h)` 还原,避免后面的夹具吃到桩环境。
+> 「重新可用」那一步只往全局层注册 `ops_bash`(**不需要重新探测**),用来验证逐轮对账会自动回到手动族。
+
+收尾硬不变量(替换 0.5 的「restrict 恒 0 / guard 不注册」):
+1. bash 族名字永不进任何 deny / refuse 集合(夹具侧 + 17 键快照侧各一条);
+2. `restrict` 只在 agent 作用域调用(根层调用抛错,且全程无真实根层调用);
+3. 稳态不反复施加 restrict(§5.13 断言 ≤1 次;全局上限每个夹具 ≤2 次);
+4. 关开关后一个对账周期内 deny 全清(§5.8 / §5.12);
+5. 卸载后 deny / guard 全清(所有夹具 dispose 后 `activeDenies` 为空、`guards=0`)。
+另外钉死「guard 只在根层注册一次」(没有逐会话重复注册)。
+
+## 11. `test/simulate.mjs`(两族场景)
+
+保持向后兼容(`--mode/--sessions/--host-tools/--executor/--shell-sandbox/--policy/--brief/--pretty/--json/--wait`),
+新增:
+
+```bash
+node test/simulate.mjs --host-tools ops_bash,pwsh --mode danger-full-access          # bash 族 → 遮挡 pwsh
+node test/simulate.mjs --host-tools ops_bash,pwsh --shell-family powershell          # 手动 PowerShell → mixed=true
+node test/simulate.mjs --host-tools ops_bash,pwsh --block-other-family off           # 关遮挡 → 不隐藏
+node test/simulate.mjs --host-tools ops_bash,pwsh --shell bash                       # 直接指定默认终端
+```
+
+- 新增参数:`--shell <auto|key>`、`--shell-family <bash|powershell>`(手动选该族第一个可用终端)、
+  `--block-other-family [on|off]` / `--no-block-other-family`。
+- 人读输出新增「══ 两族(family) ══」段:全局默认族 / 会话族 / fallback / blockOtherFamily / sessions /
+  hidden / refuseOnly / displayOnly / mixed;`syncStats` 从 9 字段扩到 11 字段(加 restrictApplied /
+  guardRefusals),`hostTools` 打印 `name(group)`。
+- `--json` 仍是单行 `{"scenario","snapshot"}`,scenario 只是**加字段**(shell / shellFamily / blockOtherFamily)。
+
+## 12. 已知边界
+
+- §5.15(无 Git Bash)靠「PATH 里只有 git.exe 桩 + 硬编码兜底路径不存在」造环境;若某台机器在
+  `C:\Program Files\Git` 等固定路径真有 Git Bash,该用例明确 `SKIP`(不伪造 ok)。
+- §5.17(手动族不可用)同样需要「该族没有终端」:桩环境里若仍探测到 bash 终端就 `SKIP`;
+  另外它要求本机在真实 PATH 下有 bash 族终端(否则前置的 `setShell bash` 就会 400)。
+- 依赖本机终端的用例(1/2/6/7/16/17)同样按快照里的 terminals 决定 SKIP,不假设机器装了什么。
+- `test/panel-render.mjs` 归 Lead 维护,未改;面板对新增字段的渲染不在本文件的断言范围。
+- `familyFallback` 目前只在 `test/host-harness.mjs` §5.17 断言;`test/family.mjs` 没有单独覆盖
+  `familyBriefLine` 的 fallback 文案(该轮 Lead 限定只动 harness/NOTES,需要的话可以补一条纯函数用例)。
+

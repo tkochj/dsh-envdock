@@ -75,6 +75,19 @@ check('注册了 sidebar.panellist', source.includes("slots.inject('sidebar.pane
 check('注册了 main 面板', source.includes("slots.inject('main'"))
 check('ModuleLoader id 与包名一致', source.includes("id: 'dsh-envdock'"))
 
+// ── 0.6「两族」口径:词条成对存在,0.5 的「同族不重复提供」不许回来 ──
+const FAMILY_KEYS = [
+  'famBash', 'famPwsh', 'famManual', 'famAuto', 'autoShellHint',
+  'noteHiddenPwsh', 'noteMixed', 'noteNotBlocked', 'noteNoBashHost', 'noteFamilyFallback', 'noteConfined',
+  'skipNoFamilyTerminal', 'blockOtherFamily', 'blockOtherFamilyHint',
+  'dRestrictApplied', 'dGuardRefusals', 'displayOnlyTag', 'hostToolHidden', 'hostToolRefused',
+]
+const missingFamily = FAMILY_KEYS.filter((key) => !zh.has(key) || !en.has(key))
+check('0.6 两族词条中英成对存在', missingFamily.length === 0, missingFamily.join(','))
+check('0.5「同族不重复提供」文案已删除', !source.includes('same-family') && !source.includes('skipSameFamily') && !source.includes('不重复提供'))
+check('代码里不再引用 t.skipSameFamily', !/\bt\.skipSameFamily\b/.test(source))
+check('占位符 {names} 只在隐藏名单那条用', source.includes("{names}") && !source.includes('{tool}'))
+
 console.log('\n' + (failures.length ? failures.length + ' 项失败:' : '全部通过'))
 for (const f of failures) console.log('  · ' + f)
 process.exit(failures.length ? 1 : 0)
