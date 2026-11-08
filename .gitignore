@@ -16,3 +16,6 @@ coverage/
 
 # npm pack artifacts
 *.tgz
+
+# 本地验证/测量的临时目录(测试夹具与模拟脚本的产物)
+.envdock-verify/

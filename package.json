@@ -1,6 +1,6 @@
 {
   "name": "dsh-envdock",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "EnvDock · Windows 工具链码头：自动探测 Node/Python/Git 与终端，选默认版本，把环境简报喂给 AI。",
   "keywords": [
     "dsh",

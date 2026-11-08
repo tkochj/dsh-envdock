@@ -2,6 +2,38 @@
 
 本文件记录 EnvDock 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-11-08
+
+### Added
+
+- **面板重做（一屏说完）**：常显只剩头部一行、置顶接管卡、工具链、底部一行。头部 = 插件名 · 默认终端与版本 · **恰好 1 个**状态 badge · 「重新探测」；接管卡 = `终端` chips → `命令` 行（状态词 + 实际命令工具名 + 一句会话计数 + 会话 / 设置 / 详情 三个 ghost）→ 每行一句的常显备注（旧版接口、挡不掉已让路 / 并存、N 个会话看不到 `envd_shell`、策略未知、N 个会话被围栏、最近错误）→ 设置（接管模式 3 chip + 沙箱下接管 2 chip，默认收起）→ 逐会话（**异常自动展开**，每行 id 前 8 位 · 终局 · 工具名 · 围栏 / 挡掉信息 · 原因）→ 已识别宿主工具 chips → 详情（对账计数，默认收起）。工具链改成**一行一个工具**（分组 / 名称 / 版本 / 路径可点复制 / 行尾「N 个版本 ▾」），版本管理器一行一个（激活版本带 ←），环境检查收成工具链末尾**一行**（`✓ 通过` 或 `⚠ N 项` + 第一条标题），环境简报默认一行（状态 / 复制 / 展开）。一屏（约 600px 可用高度）基本不滚动。
+- **新终局「工具并存」**：拿不到逐会话事实时（旧版 `/envdock-api`），宿主工具挡不掉且 `envd_shell` 可见 → 面板挂黄色「工具并存」并在命令行列出两个工具名（`envd_shell · ops_bash`），不谎报「接管中」、也不说成「让路」（EnvDock 的工具还看得见）。`commandTool.denies`（实际生效的遮挡）会出现在备注里（例如「envd_shell 不可见，已遮挡 bash, pwsh」），不再只有汇总数字。
+- **可复用测试基础设施**：新增 `test/fixture/host.mjs`（假 Cordis 服务 + 真实 `index.js` 的共享宿主夹具，`host-harness` / `simulate` 共用）与 `test/simulate.mjs`（起假宿主、打印 `/envdock-api` 快照；`--mode` / `--host-tools` / `--unrestrictable` / `--delegate` 等参数复现让路、并存、委托场景）。`test/panel-render.mjs` 从 97 条断言扩展到 **194 条**，覆盖单 badge、常显备注、折叠触发词、异常自动展开、一行一个工具、环境检查一行、轮询去重与复制兜底。
+
+### Changed
+
+- **GET 探测过期改为 stale-while-revalidate**：探测缓存只是「过了 45s TTL」（没有被显式作废）时，GET 先端上一份快照、后台再刷新——面板每 15s 轮询、每第 3 次都会正好撞上过期，干等一次全量探测（PATH 重扫 + `reg.exe`）没有意义。显式作废（切终端 / 改选项 / `refresh`）仍然同步等新探测，语义不变。
+- **同一 tick 的探针去重（两轮）**：①候选名单每 tick 只算一次，全局注册面用**一次** `tools.definitions()` 取代逐名 `hasTool`（老宿主没有该能力时回退逐名探），`liveHostNames` 复用同 tick 的快照，`envd_shell` 的「可见 / 是不是我们这一份」每 tick 每作用域只问一次（`visDirty` / `ownEpoch` 失效口径）；②稳态 tick 直接信任同 tick 的 `definitions` 快照（每 12 个 tick ≈ 60 秒强制逐名兜底一次；`definitions` 抛错不落快照）。实测探针次数：1/2/4 作用域 **34 / 57 / 103 → 6.7 / 10.3 / 17.6 次每 tick（-80% ~ -83%）**，让路与围栏会话 29 → 4.7（-84%），老宿主按设计回退、无退化；6 场景 × 约 325 个稳态 tick 的 `registers` / `disposes` / `denyApplies` 全程 +0，`/envdock-api` 载荷逐字节不变。
+- **委托计数拆细**：`delegateCalls` 只在命令真的执行时 +1；新增 `delegateRunnerFailures`（执行器接了活但围栏 runner 坏了、命令没执行）与 `delegateAborts`（命令被取消），三种结局分开记账，不再把「没走过委托」与「runner 挂了」混成一个 0。
+- **PowerShell 委托目标改走数据通道**：由 `-EncodedCommand` 改为 `-NoProfile -NonInteractive -Command`，脚本从 `$env:ENVD_CMD` 解 UTF-8 base64 再 `Invoke-Expression`，并固定 `[Console]::OutputEncoding` 为 UTF-8（非 65001 代码页下不乱码）。命令依旧不进命令行。
+- **结构性挡不掉与临时性挡不掉分开处理**：作用域私有注册（`restrict` 的 `restrictableNames` 只含继承面，契约原文 "do not affect scoped registrations"）给 10 分钟 TTL、**不写 `lastError`**，不再每 30 秒刷一次红；publication reentry / 热重载空窗仍 30 秒重试并如实记错误。
+- **`commandTool.hostName` 取真实宿主工具**：优先用逐会话事实里 `hostTools` 的并集（只有一个名字时就是它），dsh-ops 场景报 `ops_bash`，不再误报 `pwsh`；拿不到逐会话事实才退回 shippedName。
+
+### Fixed
+
+- **DNS rebinding 防护**：回环来源必须配**回环 Host 字面量**（`127.0.0.0/8` / `localhost` / `::1`），`Host` 为空或非回环一律 403——只比较「Origin 与 Host 一致」会放行「攻击者域名重新解析到 127.0.0.1」的跨站写（写接口能改自定义终端 argv ≈ 本机代码执行）。读与写都覆盖。
+- **严格同源**：写请求要求 `Origin.host:port === Host`（不只是回环）、`Content-Type` 含 `application/json`（否则跨源 simple POST 免预检就能打进来）、`sec-fetch-site: cross-site` 一律 403；没有 `Origin` 却带 `Sec-Fetch-Site` 的按非面板处理。
+- **bash 委托目标内层去掉 `-l`**：外层 `-lc` 已经是登录 shell，内层再 `-l` 会让 profile 跑第二遍（重复的 PATH 拼接与 rc 副作用），改为 `printf %s $ENVD_CMD | base64 -d | bash -s`。
+- **`familyOf` 大小写不敏感**：学到的家族按原名与 lowercase 各查一次，内置表按小写查，工具名大小写混用时不漏认。
+- **`denyScopes` 去掉死参数**：`candidates` 形参从来没被读过（挡不掉的名单改由每个作用域自己记 `badNames` / `hardNames`），一并删掉，遮挡路径只读真实计划与作用域账本。
+- **旧版接口的简报不再谎报「已接管」**：拿不到逐会话事实时按汇总事实说真话，挡不掉 / 不可见时说清，不写死「EnvDock 已接管」。
+- **面板**：异常会话自动展开（不再被折叠藏住、也没有「还有 N 个」这种二次折叠）；健康检查收成一行，红 / 黄 / 灰不再堆在常显区；状态 badge 与卡片状态词始终是同一句结论。
+- **委托执行的 stdin 与空载荷（第二轮审校）**：bash 目标的脚本改成 `[ -n "$ENVD_CMD" ] || exit 127; printf %s "$ENVD_CMD" | base64 -d | bash -s < /dev/null`——载荷缺失不再静默 `exit 0`，`read` / `cat` 也不会把 stdin 上的**脚本本身**吃掉（直跑路径的 stdin 是 ignore，语义对齐）；PowerShell 目标同样在 `$c` 为空时 `exit 127`。
+- **切终端立即生效**：`envd_shell` 每次执行都按 `readState()` + 缓存探测现算终端，不再依赖下一轮对账才更新的 `activeShell`——以前 `setShell` 之后最多 5 秒内简报写的是新终端、命令却还按旧终端跑。
+- **无主 deny 不再静默**：`restrict` 有可能**先落地再抛错**（publication reentry），deny 生效、撤销句柄却丢了。现在按「调用前可见 / 调用后不可见」识别这种路径，记进 `syncStats.lostDenies`、写 `lastError`、面板备注点名并提示重启 dsh 才能恢复；`restrict` 返回非函数时也不再当 disposer 塞进列表（teardown 不会炸）。
+- **Host / Content-Type 判定修正**：`localhost.`（尾点）与 `[::ffff:127.0.0.1]`（IPv4-mapped IPv6）不再被误杀 403；`Content-Type` 按媒体类型精确匹配（`text/plain;application/json` 这种子串不再放行）；局域网「关开关」例外也要求 `Origin` 的 host:port 与 `Host` 完全一致；`addCustomTool` 的 `key` 拒绝 `__proto__` / `constructor` / `prototype` 并限制长度。
+- **面板（第二轮审校）**：会话 id 先去掉 `session-` 前缀再截 8 位（真机 `session-<uuid>` 以前每行都显示 `session-`，完整 id 进 title）；`host` + 确定被围栏的会话行显示「沙箱」而不是「未接管」（与聚合口径一致）；混合 badge 文案改成「N 个会话用宿主工具」（非 takeover 的会话可能是让路 / 沙箱，不写成「未接管」）；已有数据时手动刷新失败也会显示错误框（以前只有没数据时才渲染）；窄屏（<560px）工具行不再让版本号与动作列叠在同一格；`reuse` 且没有工具名时不再补一句「没探测到命令工具」；会话计数不会再留下尾随的 ` · `。
+
 ## [0.3.0] - 2026-11-08
 
 ### Added
