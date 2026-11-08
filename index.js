@@ -3080,8 +3080,9 @@ export function apply(ctx, config) {
         const id = String(cur.agent.id)
         const entry = byId.get(id) || null
         const gate = (entry && entry.gate) || sandboxGate(cur.agent)
-        const hideOwnPlanned = Boolean(entry && entry.hideOwn)
-        const yieldHost = Boolean(entry && entry.yieldHost)
+        const quickYieldNow = cur.quickYield === syncStats.ticks
+        const hideOwnPlanned = Boolean(entry && entry.hideOwn) || quickYieldNow
+        const yieldHost = Boolean(entry && entry.yieldHost) || quickYieldNow
         const appliedMask = String(cur.denyKey || '').replace(/^own\|/, '').split(',').filter(Boolean)
         // ── 可见性一律现测:计划与账本都可能与工具表不一致 ──
         // (自己本来就不可见 / restrict 返回成功但 agent 层同名仍可见 / 别的插件短暂遮住)
@@ -3200,6 +3201,7 @@ export function apply(ctx, config) {
         const visibleOwn = hasTool(cur.actx, ENVD_SHELL_NAME, cur.agent)
         if (visibleOwn && cur.ownHideFailedKey) cur.ownHideFailedKey = ''
         let ownHidden = false
+        let ownDisposer = null
         if (hideOwn) {
           // 沙箱/让路会话:把我们的工具从模型视野里拿掉。
           // **只有真的推了 restrict 且复读确认看不见**,才记「已藏」。
@@ -3209,7 +3211,8 @@ export function apply(ctx, config) {
             ownHidden = false
           } else {
             try {
-              cur.disposers.push(tools.restrict({ deny: [ENVD_SHELL_NAME] }))
+              ownDisposer = tools.restrict({ deny: [ENVD_SHELL_NAME] })
+              cur.disposers.push(ownDisposer)
               syncStats.denyApplies++
               syncStats.ownHides++
               ownHidden = !hasTool(cur.actx, ENVD_SHELL_NAME, cur.agent)
@@ -3221,6 +3224,7 @@ export function apply(ctx, config) {
           }
         }
         let appliedMask = []
+        let maskThrew = false
         if (mask.length) {
           // 自己不可见、且没有让路(藏自己)计划时才绝不挡宿主:
           // 那一步会变成「宿主的被挡住、我们的又看不见」= 零命令工具。
@@ -3259,6 +3263,7 @@ export function apply(ctx, config) {
                 appliedMask.push(name)
               }
             } catch (error) {
+              maskThrew = true
               const message = String((error && error.message) || error)
               // restrict 直接说「不认识这个全局工具」= 它根本不在继承面(作用域私有注册):
               // 结构性挡不掉,重试无意义。
@@ -3283,12 +3288,64 @@ export function apply(ctx, config) {
               }
             }
           }
+          // 同一 tick 就让路:本轮 restrict **抛过错**(名字挡不掉),而掩码里仍有宿主工具可见,
+          // 我们自己又还可见 → 立刻收起 envd_shell。否则「宿主 + envd_shell」会并存到下一 tick
+          // (新会话/子 agent 的首 tick、TTL 到期重试都会撞到,模型手里两个命令工具 + 面板假异常)。
+          // 只对「抛错」生效:restrict 返回成功却挡不住(agent 层同名)仍按原口径如实报 anomaly。
+          // 判据用「此刻仍可见」:先落地再抛错(无主 deny)的名字其实已经挡住,不能据此藏自己。
+          if (!hideOwn && visibleOwn && !ownHidden && maskThrew) {
+            let leftoverHost = false
+            for (const name of mask) {
+              if (stillVisible(name)) {
+                leftoverHost = true
+                break
+              }
+            }
+            if (leftoverHost) {
+              try {
+                const quickDisposer = tools.restrict({ deny: [ENVD_SHELL_NAME] })
+                cur.disposers.push(quickDisposer)
+                syncStats.denyApplies++
+                syncStats.ownHides++
+                ownHidden = !hasTool(cur.actx, ENVD_SHELL_NAME, cur.agent)
+                if (!ownHidden) syncStats.denyNoops++
+              } catch {
+                ownHidden = false
+              }
+              // 本 tick 就是「让路」:事实层要按 yield 报,不能报成 host/sandbox
+              cur.quickYield = ownHidden ? syncStats.ticks : 0
+            }
+          }
           appliedMask = appliedMask.filter((name) => !cur.badNames.has(name) && !cur.hardNames.has(name))
+          // 不变量护栏:让路计划(藏自己、留挡不掉的那个)重试后可能把**仅剩**的宿主工具也挡住了
+          // (它后来变得挡得掉了)。藏自己 + 挡住宿主 = 零命令工具,必须立刻放开自己的遮挡。
+          if (hideOwn && ownHidden && appliedMask.length) {
+            let anyLeft = false
+            for (const name of cur.hostSeen) {
+              if (name === ENVD_SHELL_NAME || appliedMask.includes(name)) continue
+              try {
+                if (hasTool(cur.actx, name, cur.agent)) {
+                  anyLeft = true
+                  break
+                }
+              } catch {}
+            }
+            if (!anyLeft) {
+              try {
+                if (typeof ownDisposer === 'function') ownDisposer()
+              } catch {}
+              cur.disposers = cur.disposers.filter((dispose) => dispose !== ownDisposer)
+              ownHidden = false
+            }
+          }
         }
         // 记的是「这个作用域真正生效的」计划:稳态判定要和它对得上,否则每 tick 重试。
         // hideOwn 计划下「本来就不见」也记 own|:现在 scopesSettled 会复检「又可见了就重挂」,
         // 记账不再有「永久漏藏」风险;不记反而会让账本每 tick 对不上(每 tick 完整对账/重挂掩码)。
-        cur.denyKey = (hideOwn && (ownHidden || !visibleOwn) ? 'own|' : '') + appliedMask.join(',')
+        // 「藏了自己」一定要进账本:不管是计划要求的(hideOwn)还是本 tick 为让路临时补上的。
+        // 不记的话,下一 tick 的 steady 判定会把它当成「没有遮挡」,自己的工具就永久不可见(零命令工具)。
+        const ownRecorded = hideOwn ? ownHidden || !visibleOwn : ownHidden
+        cur.denyKey = (ownRecorded ? 'own|' : '') + appliedMask.join(',')
         cur.visDirty = syncStats.ticks
       }
       const scopeList = [...scopes.values()]
@@ -3837,20 +3894,17 @@ export function apply(ctx, config) {
         const ownHere = ownProbeOf(cur)
         if (ownHere.visible && !ownHere.ours) return { cur, gate, mask: [], hideOwn: false }
         const hosts = hostNamesAt(cur)
-        const mask = maskFor(cur, hosts)
-        // 挡不掉(restrict 实测失败)或认不出家族的宿主工具只要此刻还在,就必须让路:
-        // 认不出家族既教不了语法,也保证不了「我们的工具能替代它」。
-        const now = Date.now()
+        // 让路判定必须在 maskFor **之前**,而且「曾判定挡不掉」是粘性的:
+        // TTL 只允许重试遮挡,不允许让路消失。maskFor 会顺手删掉过期条目 ——
+        // 先算 mask 再算 stuck 时,TTL 到期那一 tick 的 stuck 就空了,计划翻回 takeover,
+        // envd_shell 复活、与宿主工具并列(一次 5 秒的双命令工具窗口),然后 restrict 再失败一次。
+        // 真机 restrict 对会话私有注册抛「unknown global tool」→ hardNames(10 分钟);
+        // 其它抛错 → badNames(30 秒)。两者都算挡不掉:模型手里的命令工具会与 envd_shell 并存。
         const stuck = hosts.filter((name) => {
-          // 挡不掉有两种记法:临时性(badNames,30 秒重试)与结构性(hardNames,10 分钟重试)。
-          // 真机 restrict 对会话私有注册抛的是「unknown global tool」→ 进 hardNames;
-          // 这里只查 badNames 就会漏判:既不遮挡、也不让路,模型手里两个命令工具并列,
-          // 逐会话事实还会把它标成 anomaly(现网实测就是这个症状)。
-          const badUntil = cur.badNames.get(name)
-          const hardUntil = cur.hardNames.get(name)
-          const locked = (badUntil !== undefined && badUntil > now) || (hardUntil !== undefined && hardUntil > now)
-          return (locked || !familyOf(rt, name)) && hasTool(cur.actx, name, cur.agent)
+          const known = cur.badNames.has(name) || cur.hardNames.has(name)
+          return (known || !familyOf(rt, name)) && hasTool(cur.actx, name, cur.agent)
         })
+        const mask = maskFor(cur, hosts)
         if (stuck.length) return { cur, gate, mask, hideOwn: true, yieldHost: true, stuck }
         return { cur, gate, mask, hideOwn: false }
       })

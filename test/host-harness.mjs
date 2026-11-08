@@ -2737,6 +2737,45 @@ for (const { dis } of [
   check('不产生零命令工具 / 不报异常', (ghost2.syncStats.scopeAnomalies || []).length === 0, JSON.stringify(ghost2.syncStats.scopeAnomalies))
 }
 
+
+// ── 第四轮终审 P1:新作用域首 tick 不许出现「两个命令工具」 ──
+// 新会话/子 agent 的 badNames/hardNames 是空的,只能先试直连;restrict 抛错后如果不当 tick 就让路,
+// 模型会在这一 tick 同时看到 envd_shell 与宿主 ops_bash(面板也会假报异常)。
+{
+  const hFresh = makeHarness({
+    shippedTools: ['ops_bash', 'pwsh'],
+    agentIds: [{ id: 'session-first-1', session: { key: 'f1' } }],
+    unrestrictable: ['ops_bash'],
+    unrestrictableRealMessage: true,
+    sandboxPolicy: { resolve: () => ({ mode: 'danger-full-access', workspaceRoot: process.cwd() }) },
+  })
+  apply(hFresh.ctx, { syncIntervalMs: 25 })
+  await post(hFresh, { op: 'setOption', shellTakeover: 'takeover' })
+  await pollSnapshot(hFresh, (s) => ((s.commandTool.scopes || []).find((x) => x.id === 'session-first-1') || {}).kind === 'yield', 8000)
+  const freshAgent = hFresh.makeAgent('session-first-2', { key: 'f2' })
+  hFresh.state.agents.push(freshAgent)
+  hFresh.emit('agent/created', { agent: freshAgent })
+  let sawTwoTools = false
+  let sawAnomaly = false
+  let samples = 0
+  const t0 = Date.now()
+  while (Date.now() - t0 < 800) {
+    const snap = (await callApi(hFresh)).json
+    const fact = (snap.commandTool.scopes || []).find((x) => x.id === 'session-first-2')
+    if (fact) {
+      samples++
+      if (fact.kind === 'takeover' && Array.isArray(fact.hostTools) && fact.hostTools.length) sawTwoTools = true
+      if (fact.anomaly === true) sawAnomaly = true
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2))
+  }
+  check('新作用域首 tick 不会出现「envd_shell + 宿主工具并列」', !sawTwoTools, 'samples=' + samples)
+  check('新作用域首 tick 不会被标成异常', !sawAnomaly, 'samples=' + samples)
+  const freshFinal = await pollSnapshot(hFresh, (s) => ((s.commandTool.scopes || []).find((x) => x.id === 'session-first-2') || {}).kind === 'yield', 5000)
+  const freshFact = (freshFinal.commandTool.scopes || []).find((x) => x.id === 'session-first-2') || {}
+  check('新作用域最终稳定在 yield(只有一个命令工具)', freshFact.kind === 'yield' && hFresh.toolsFor('session-first-2').get('envd_shell') === null, JSON.stringify({ kind: freshFact.kind, envd: Boolean(hFresh.toolsFor('session-first-2').get('envd_shell')) }))
+}
+
 rmSync(home, { recursive: true, force: true })
 
 console.log(
