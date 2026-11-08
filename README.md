@@ -50,7 +50,7 @@ Windows 上做开发，机器里常常并排放着好几套 Node / Python / Git�
 >
 > **版本对应关系**：仓库开发期用 0.5 / 0.6 编号，对外的发布版本是 **0.2.0**（npm 从 0.1.0 升级到 0.2.0）；版本对应关系见 CHANGELOG。
 
-### 方式一：从 npm 安装（版本可能滞后）
+### 方式一：从 npm 安装
 
 ```powershell
 dsh plugin --profile web add dsh-envdock
