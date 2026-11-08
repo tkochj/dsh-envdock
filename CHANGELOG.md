@@ -30,6 +30,7 @@
 - **面板**：异常会话自动展开（不再被折叠藏住、也没有「还有 N 个」这种二次折叠）；健康检查收成一行，红 / 黄 / 灰不再堆在常显区；状态 badge 与卡片状态词始终是同一句结论。
 - **委托执行的 stdin 与空载荷（第二轮审校）**：bash 目标的脚本改成 `[ -n "$ENVD_CMD" ] || exit 127; printf %s "$ENVD_CMD" | base64 -d | bash -s < /dev/null`——载荷缺失不再静默 `exit 0`，`read` / `cat` 也不会把 stdin 上的**脚本本身**吃掉（直跑路径的 stdin 是 ignore，语义对齐）；PowerShell 目标同样在 `$c` 为空时 `exit 127`。
 - **切终端立即生效**：`envd_shell` 每次执行都按 `readState()` + 缓存探测现算终端，不再依赖下一轮对账才更新的 `activeShell`——以前 `setShell` 之后最多 5 秒内简报写的是新终端、命令却还按旧终端跑。
+- **`syncStats.unrestrictable` 不再留残影（终审 P2）**：`badNames` / `hardNames` 是「别重试」的记忆（30 秒 / 10 分钟 TTL，故意不删），但宿主静默撤回工具后记忆还在——直接端给面板会让它一直说「宿主工具 ops_bash 挡不掉、与 envd_shell 并存」。现在诊断字段按**此刻可见性**过滤（记忆本身不动，不影响重试窗口），新增「静默撤工具」回归用例。
 - **让路判据补上结构性挡不掉（现网回归）**：真机 `restrict` 对会话私有注册抛的是 `names unknown global tool`，这条走 `hardNames`（10 分钟 TTL）；而「让路」的判据原来只查 `badNames`（30 秒），于是既有 10 分钟硬 TTL 又把让路判据饿死——模型手里 `envd_shell` 与 `ops_bash` **并列**，逐会话事实报 `anomaly`，面板挂红。现在让路判据同时查 `badNames` 与 `hardNames`，dsh-ops 场景稳定让路（只有一个命令工具、不报异常、不刷红）。新增用真机错误文案的回归用例。
 - **无主 deny 不再静默**：`restrict` 有可能**先落地再抛错**（publication reentry），deny 生效、撤销句柄却丢了。现在按「调用前可见 / 调用后不可见」识别这种路径，记进 `syncStats.lostDenies`、写 `lastError`、面板备注点名并提示重启 dsh 才能恢复；`restrict` 返回非函数时也不再当 disposer 塞进列表（teardown 不会炸）。
 - **Host / Content-Type 判定修正**：`localhost.`（尾点）与 `[::ffff:127.0.0.1]`（IPv4-mapped IPv6）不再被误杀 403；`Content-Type` 按媒体类型精确匹配（`text/plain;application/json` 这种子串不再放行）；局域网「关开关」例外也要求 `Origin` 的 host:port 与 `Host` 完全一致；`addCustomTool` 的 `key` 拒绝 `__proto__` / `constructor` / `prototype` 并限制长度。

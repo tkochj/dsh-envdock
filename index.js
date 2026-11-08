@@ -3310,7 +3310,19 @@ export function apply(ctx, config) {
           if (until <= nowBad) cur.missNames.delete(name)
         }
       }
-      syncStats.unrestrictable = [...bad].sort()
+      // 只报**此刻真的还在**的挡不掉名字。
+      // badNames / hardNames 是「别重试」的记忆(TTL 30s / 10min),宿主静默撤掉工具后记忆还在;
+      // 直接把它端给面板,面板会说「宿主工具 ops_bash 挡不掉、与 envd_shell 并存」——
+      // 工具早已不在,这句话是假的。按当前可见性过滤,不改记忆本身(撤掉记忆会让它每 tick 重试)。
+      const anyScopeVisible = (name) => {
+        for (const cur of scopeList) {
+          try {
+            if (hasTool(cur.actx, name, cur.agent)) return true
+          } catch {}
+        }
+        return false
+      }
+      syncStats.unrestrictable = [...bad].filter((name) => anyScopeVisible(name)).sort()
       // 「哪些作用域因为看不到我们自己的工具而没遮挡」单独记账:
       // 放 lastError 里会永远粘着(稳态 tick 不会再算一次),面板就会一直报红。
       const blockedNow = []

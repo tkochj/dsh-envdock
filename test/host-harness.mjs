@@ -2713,6 +2713,30 @@ for (const { dis } of [
   check('结构性挡不掉不写 lastError(不刷红)', !real.syncStats.lastError, String(real.syncStats.lastError))
 }
 
+
+// ── 终审 P2:宿主静默撤掉挡不掉的名字后,unrestrictable 不许留残影 ──
+// 记忆(badNames/hardNames)带 30s/10min TTL 是有意的(别每 tick 重试),
+// 但诊断字段必须按「此刻还在不在」过滤,否则面板会一直说「ops_bash 挡不掉、与 envd_shell 并存」。
+{
+  const hGhost = makeHarness({
+    shippedTools: ['ops_bash'],
+    agentIds: [{ id: 'agent-ghost', session: { key: 'ghost' } }],
+    unrestrictable: ['ops_bash'],
+    unrestrictableRealMessage: true,
+    sandboxPolicy: { resolve: () => ({ mode: 'danger-full-access', workspaceRoot: process.cwd() }) },
+  })
+  apply(hGhost.ctx, { syncIntervalMs: 40 })
+  await post(hGhost, { op: 'setOption', shellTakeover: 'takeover' })
+  const ghost1 = await pollSnapshot(hGhost, (s) => (s.syncStats.unrestrictable || []).includes('ops_bash'), 8000)
+  check('前置:ops_bash 挡不掉时 unrestrictable 如实报(工具还在)', (ghost1.syncStats.unrestrictable || []).includes('ops_bash'), JSON.stringify(ghost1.syncStats.unrestrictable))
+  // 宿主静默撤掉工具(不 emit tools/change):让路应解除,unrestrictable 也不许留残影
+  hGhost.state.toolDefs.delete('ops_bash')
+  const ghost2 = await pollSnapshot(hGhost, (s) => (s.syncStats.unrestrictable || []).length === 0, 8000)
+  check('宿主撤掉工具后 unrestrictable 立刻清空(诊断不留残影)', (ghost2.syncStats.unrestrictable || []).length === 0, JSON.stringify(ghost2.syncStats.unrestrictable))
+  check('宿主撤掉工具后让路解除:envd_shell 可再用', Boolean(hGhost.toolsFor('agent-ghost').get('envd_shell')), JSON.stringify({ envd: Boolean(hGhost.toolsFor('agent-ghost').get('envd_shell')) }))
+  check('不产生零命令工具 / 不报异常', (ghost2.syncStats.scopeAnomalies || []).length === 0, JSON.stringify(ghost2.syncStats.scopeAnomalies))
+}
+
 rmSync(home, { recursive: true, force: true })
 
 console.log(
