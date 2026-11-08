@@ -17,17 +17,20 @@
  *
  * 0.6.1「首屏收敏」:陌生人打开面板 5 秒要看懂三件事 —— 这是什么插件 / AI 现在用什么
  * 命令环境 / 去哪里改。做法是「一句人话 + 四块常显 + 高级收进折叠」:
- *   · 头部下一行常显一句用途说明(.envd-subtitle);badge 只有白话三态:就绪 / 受限 / 只展示;
+ *   · 头部下一行常显一句用途说明(.envd-subtitle);badge 只有两态:就绪 / 只展示
+ *     (「有会话被沙箱限制」只进备注,不上面板级 badge);
  *   · 终端 chip 不再挂语法族小标(「pwsh」挂在每个 PowerShell 终端上既重复又误导),
  *     语法只说一次:命令行 .envd-fam 写「bash 语法 / PowerShell 语法」,手动选才带「· 手动」;
- *   · 备注全部改人话(已隐藏 / 受沙箱限制 / 别混用 / 已自动改回),仍最多两行;
+ *   · 备注全部改人话(已隐藏 / 另有 N 个会话受沙箱限制 / 别混用 / 已自动改回),仍最多两行;
+ *     环境差异那句挪进「其它」段的 title,普通状态备注最多只有一行;
  *   · 底部 footer 只留复制反馈 + 环境脚注;注入开关放在「环境简报」区那一行,
  *     「隐藏另一族命令工具 / 允许局域网访问」收进默认折叠的「高级设置」;
+ *   · 详情计数只留扫描 / 最近 / 注册尝试(隐藏/拒绝是历史累计,API 仍给但面板不摆);
  *   · 拿不到数据(403)时简报区不存在,allowLan 开关仍留在 footer(唯一入口)。
  *
  * 三条硬规则:
  *   · 常显区不放计数:计数只在「详情」里出现,常显区只留一句人话;
- *   · 只有「状态」配胶囊:终端选择用 chip,状态用 badge(三态);
+ *   · 只有「状态」配胶囊:终端选择用 chip,状态用 badge(二态);
  *   · 异常必须一行说完并说清原因:不许出现「⚠ 出错了」然后让用户去别处找。
  * 样式只用 --dsw-* theme token,浅色/深色都由 token 决定,不硬编码颜色。
  */
@@ -72,16 +75,16 @@ window.__ModuleLoader__.load({
         dismiss: '知道了',
         actionFailed: '操作失败',
         command: '命令',
-        // badge 三态:整个面板唯一的状态结论(白话,不带族)
+        // badge 二态:整个面板唯一的状态结论(白话,没有主语的状态词不上 badge)
         statusAdditive: '就绪',
         statusDisplayOnly: '只展示',
-        statusConfined: '受限',
         // 命令行
         hostPrefix: '其它：',
         hostToolsNone: '没有其它命令工具',
         noteLegacyApi: '界面拿到的还是旧版数据，重启 dsh 后就能看到命令环境',
         cmdHintEnvDock: 'EnvDock 提供的命令工具：用你的终端和 PATH',
-        cmdHintHost: '其它命令工具：由 dsh 提供，环境与 PATH 跟你的终端可能不一样',
+        // 「其它」段一句话说清它跟你终端的关系(原来备注里那条长解释挪到这里,悬停可见)
+        cmdHintHost: '其它命令工具：由 dsh 提供，环境和 PATH 跟你的终端可能不一样；要用你自己的工具时用 envd_shell',
         // 未提供命令工具的原因(skipReason)
         skipNoFamilyTerminal: '没找到可用的终端（bash 语法需要 Git Bash，PowerShell 语法需要 pwsh）',
         skipNoUnconfined: '没有不受沙箱限制的会话，暂时不会提供 envd_shell',
@@ -93,8 +96,7 @@ window.__ModuleLoader__.load({
         noteNoBashHost: '这个会话没有 bash 命令工具，未隐藏 PowerShell 工具',
         noteFamilyFallback: '手动选的语法不可用（没有对应终端，也没有对应命令工具），已自动改回按会话选择',
         noteMixed: '手动选了 PowerShell 语法：PowerShell 与 bash 工具都在，各按自己的语法写，别混用',
-        noteConfined: '{n} 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令，请改用其它命令工具',
-        envHint: '其它命令工具的环境和 PATH 跟你的终端可能不一样；要用你自己的工具时用 envd_shell',
+        noteConfined: '另有 {n} 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令，请改用其它命令工具',
         // 详情
         diag: '详情',
         hostTools: '命令工具',
@@ -103,8 +105,6 @@ window.__ModuleLoader__.load({
         dScan: '扫描 {n} 次',
         dLastScan: '最近 {n}ms',
         dRegisterTries: '注册尝试 {n}',
-        dRestrictApplied: '隐藏 {n} 次',
-        dGuardRefusals: '拒绝 {n} 次',
         hostToolHidden: '已隐藏',
         hostToolRefused: '调用会被拒绝',
         displayOnlyTag: '只展示（没有隐藏）',
@@ -182,15 +182,15 @@ window.__ModuleLoader__.load({
         dismiss: 'Dismiss',
         actionFailed: 'Action failed',
         command: 'Command',
-        // badge: the panel's single status conclusion (plain words, no family)
+        // badge: the panel's single status conclusion (plain words, two states)
         statusAdditive: 'Ready',
         statusDisplayOnly: 'Display only',
-        statusConfined: 'Limited',
         hostPrefix: 'Other: ',
         hostToolsNone: 'No other command tools',
         noteLegacyApi: 'The panel is reading data from an older build; restart dsh to see the command environment',
         cmdHintEnvDock: 'Command tool provided by EnvDock: runs with your terminal and PATH',
-        cmdHintHost: 'Other command tools: provided by dsh; their environment and PATH may differ from your terminal',
+        // One sentence on the "Other" group; the long note that used to sit in the panel lives here.
+        cmdHintHost: 'Other command tools: provided by dsh; their environment and PATH may differ from your terminal - use envd_shell when you need your own tools',
         skipNoFamilyTerminal: 'No usable terminal found (bash syntax needs Git Bash, PowerShell syntax needs pwsh)',
         skipNoUnconfined: 'No session outside the sandbox yet; envd_shell is not provided for now',
         skipTaken: 'Name is taken by another plugin; envd_shell is not provided',
@@ -200,8 +200,7 @@ window.__ModuleLoader__.load({
         noteNoBashHost: 'This session has no bash command tool, so PowerShell tools were not hidden',
         noteFamilyFallback: 'The manually picked syntax is unavailable (no matching terminal or command tool); switched back to per-session selection',
         noteMixed: 'PowerShell syntax was picked manually: both PowerShell and bash tools are available; write each command in its own syntax, do not mix them',
-        noteConfined: '{n} sessions are sandbox-limited: envd_shell will not run there; use another command tool',
-        envHint: 'Other command tools may use a different environment and PATH than your terminal; use envd_shell when you need your own tools',
+        noteConfined: '{n} other sessions are sandbox-limited: envd_shell will not run there; use another command tool',
         diag: 'Details',
         hostTools: 'Command tools',
         learnedTag: 'auto-detected',
@@ -209,8 +208,6 @@ window.__ModuleLoader__.load({
         dScan: 'scans: {n}',
         dLastScan: 'last: {n}ms',
         dRegisterTries: 'register tries: {n}',
-        dRestrictApplied: 'hides: {n}',
-        dGuardRefusals: 'refusals: {n}',
         hostToolHidden: 'hidden',
         hostToolRefused: 'calls are refused',
         displayOnlyTag: 'display only (not hidden)',
@@ -275,7 +272,7 @@ window.__ModuleLoader__.load({
 .envd-headline{font-size:12.5px;color:var(--dsw-alias-label-secondary);white-space:nowrap;min-width:0;max-width:100%;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
 .envd-headline b{color:var(--dsw-alias-label-primary);font-weight:600}
 
-/* badge:整个面板只有「状态」用胶囊(三态:就绪 / 只展示 / 受限) */
+/* badge:整个面板只有「状态」用胶囊(二态:就绪 / 只展示) */
 .envd-badge{display:inline-flex;align-items:center;gap:6px;height:20px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:650;white-space:nowrap;flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
 .envd-badge .dot{width:5px;height:5px;border-radius:50%;background:currentColor;flex:none}
 .envd-badge.ok{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 14%,transparent)}
@@ -815,14 +812,15 @@ window.__ModuleLoader__.load({
       const confinedCount = Math.max(0, Number(sandboxInfo.confinedCount) || 0)
       const confined = confinedCount > 0
 
-      // badge 三态(整个面板唯一的状态结论):白话三态,不挂族 —— 族只在命令行的语法标签里说。
-      //   没有命令工具 → 只展示;有且会话被沙箱限制 → 受限;否则就绪。
-      const badgeTone = ready ? (confined ? 'warn' : 'ok') : 'muted'
-      const badgeText = ready ? (confined ? t.statusConfined : t.statusAdditive) : t.statusDisplayOnly
+      // badge 二态(整个面板唯一的状态结论):有命令工具 → 就绪,没有 → 只展示。
+      // 「有会话被沙箱限制」不是面板级结论(面板是全局的):它只进备注,免得上 badge 变成没主语的「受限」。
+      const badgeTone = ready ? 'ok' : 'muted'
+      const badgeText = ready ? t.statusAdditive : t.statusDisplayOnly
 
-      // 备注最多两行,按优先级取:未提供原因 → 沙箱限制 → 语法回退 → 混用警告 → 隐藏/未隐藏 → 环境差异。
+      // 备注最多两行,按优先级取:未提供原因 → 沙箱限制 → 语法回退 → 混用警告 → 隐藏/未隐藏。
       // 「用 envd_shell」「已隐藏 pwsh」这类话只在 envd_shell 真的可用/事实真的成立时才说:
       // 没提供工具就无工具可拒,也没挡任何东西 —— 那时只剩一句原因。
+      // 环境差异那句已挪进「其它」段的 title(悬停可见),普通状态备注最多一行。
       const notes = []
       if (legacyApi) notes.push({ tone: 'warn', text: t.noteLegacyApi })
       if (!ready && !legacyApi) {
@@ -849,7 +847,6 @@ window.__ModuleLoader__.load({
       if (family === 'bash' && !mixed && !blockOtherFamily && pwshHostNames.length) notes.push({ tone: 'muted', text: t.noteNotBlocked })
       // 手动选了 bash 语法、会话里却看不到 bash 命令工具:隐藏条件不成立,说清「没有隐藏」。
       if (family === 'bash' && familySource === 'manual' && bashHostNames.length === 0) notes.push({ tone: 'muted', text: t.noteNoBashHost })
-      if (ready) notes.push({ tone: 'muted', text: t.envHint })
       const shownNotes = notes.slice(0, 2)
       const badgeTitle = shownNotes.length ? shownNotes.map((note) => note.text).join(' · ') : undefined
 
@@ -858,17 +855,10 @@ window.__ModuleLoader__.load({
         const n = Number(value)
         return Number.isFinite(n) && n > 0 ? Math.round(n) : 0
       }
-      // 0.6 的新计数(遮挡 / 拒绝)只在真的发生过时出现:常显区不放计数,详情也不摆一排 0。
+      // 详情计数只留「扫描 / 最近 / 注册尝试」这三项稳定事实:
+      // restrictApplied / guardRefusals 是历史累计(API 仍提供),贴着「此刻」的详情摆只会误导用户。
       const countText = stats
-        ? [
-            fmt(t.dScan, { n: statNum(stats.detections) }),
-            fmt(t.dLastScan, { n: statNum(stats.lastDetectMs) }),
-            fmt(t.dRegisterTries, { n: statNum(stats.registerTries) }),
-            statNum(stats.restrictApplied) ? fmt(t.dRestrictApplied, { n: statNum(stats.restrictApplied) }) : '',
-            statNum(stats.guardRefusals) ? fmt(t.dGuardRefusals, { n: statNum(stats.guardRefusals) }) : '',
-          ]
-            .filter(Boolean)
-            .join(' · ')
+        ? [fmt(t.dScan, { n: statNum(stats.detections) }), fmt(t.dLastScan, { n: statNum(stats.lastDetectMs) }), fmt(t.dRegisterTries, { n: statNum(stats.registerTries) })].filter(Boolean).join(' · ')
         : ''
       const lastError = stats && typeof stats.lastError === 'string' ? stats.lastError.trim() : ''
       // 宿主工具 chips:被遮挡的名字不在 hostTools 里(宿主报的是「此刻看得见」),

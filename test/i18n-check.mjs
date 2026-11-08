@@ -82,7 +82,7 @@ const FAMILY_KEYS = [
   'famBash', 'famPwsh', 'famManual', 'autoShellHint',
   'noteHiddenPwsh', 'noteMixed', 'noteNotBlocked', 'noteNoBashHost', 'noteFamilyFallback', 'noteConfined',
   'skipNoFamilyTerminal', 'blockOtherFamily', 'blockOtherFamilyHint', 'blockOtherFamilyHintTitle',
-  'dRestrictApplied', 'dGuardRefusals', 'displayOnlyTag', 'hostToolHidden', 'hostToolRefused',
+  'displayOnlyTag', 'hostToolHidden', 'hostToolRefused',
   // 0.6.1 首屏收敏:一句用途说明 + 高级设置 + 简报关闭时的正文说明
   'subtitle', 'advanced', 'briefOffDetail',
 ]
@@ -92,10 +92,15 @@ check('0.5「同族不重复提供」文案已删除', !source.includes('same-fa
 check('代码里不再引用 t.skipSameFamily', !/\bt\.skipSameFamily\b/.test(source))
 check('占位符 {names} 只在隐藏名单那条用', source.includes('{names}') && !source.includes('{tool}'))
 check('0.6.1 首屏不再出现黑话「宿主 / 围栏 / 增补」(zh)', !zhBlock.includes('宿主') && !zhBlock.includes('围栏') && !zhBlock.includes('增补'), ['宿主', '围栏', '增补'].filter((word) => zhBlock.includes(word)).join(','))
-check('0.6.1 首屏三态是白话(就绪 / 受限 / 只展示)', zhBlock.includes("statusAdditive: '就绪'") && zhBlock.includes("statusConfined: '受限'") && zhBlock.includes("statusDisplayOnly: '只展示'"))
+check('0.6.1 首屏 badge 二态是白话(就绪 / 只展示)', zhBlock.includes("statusAdditive: '就绪'") && zhBlock.includes("statusDisplayOnly: '只展示'"))
+// 「受限」没有主语,只留备注;累计的隐藏/拒绝次数也不再上面板(API 字段仍保留)
+const DEAD_PANEL_KEYS = ['statusConfined', 'envHint', 'dRestrictApplied', 'dGuardRefusals']
+const alivePanelKeys = DEAD_PANEL_KEYS.filter((key) => zh.has(key) || en.has(key))
+check('0.6.1 已删除 statusConfined / envHint / dRestrictApplied / dGuardRefusals', alivePanelKeys.length === 0, alivePanelKeys.join(','))
 check('0.6.1 终端 chip 不再带族小标', !source.includes('envd-chipfam') && !source.includes('envd-chiplabel'))
 check('0.6.1 底部的「其它」前缀与语法标签都在', zhBlock.includes("hostPrefix: '其它：'") && zhBlock.includes("famBash: 'bash 语法'") && zhBlock.includes("famPwsh: 'PowerShell 语法'"))
 check('0.6.1 注入开关移进简报区(词条仍在,footer 不再重复)', zhBlock.includes("injectBrief:'把环境简报注入给 AI'") || zhBlock.includes("injectBrief: '把环境简报注入给 AI'"))
+check('0.6.1 受限备注带主语「另有 N 个会话」', zhBlock.includes('另有 {n} 个会话受沙箱限制') && enBlock.includes('{n} other sessions are sandbox-limited'), 'zh=' + zhBlock.includes('另有 {n} 个会话受沙箱限制') + ' en=' + enBlock.includes('{n} other sessions are sandbox-limited'))
 
 console.log('\n' + (failures.length ? failures.length + ' 项失败:' : '全部通过'))
 for (const f of failures) console.log('  · ' + f)

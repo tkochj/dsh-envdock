@@ -450,17 +450,15 @@ const MANAGERS = [
 const COPY = {
   additive: '就绪',
   displayOnly: '只展示',
-  confined: '受限',
   hostPrefix: '其它：',
   hostNone: '没有其它命令工具',
   hintOwn: 'EnvDock 提供的命令工具：用你的终端和 PATH',
-  hintHost: '其它命令工具：由 dsh 提供，环境与 PATH 跟你的终端可能不一样',
+  hintHost: '其它命令工具：由 dsh 提供，环境和 PATH 跟你的终端可能不一样；要用你自己的工具时用 envd_shell',
   noFamilyTerminal: '没找到可用的终端（bash 语法需要 Git Bash，PowerShell 语法需要 pwsh）',
   noUnconfined: '没有不受沙箱限制的会话，暂时不会提供 envd_shell',
   taken: '和别的插件重名了，暂时不提供 envd_shell',
   registerFailed: '没能提供命令工具（注册失败）',
-  fence: (n) => String(n) + ' 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令，请改用其它命令工具',
-  envHint: '其它命令工具的环境和 PATH 跟你的终端可能不一样；要用你自己的工具时用 envd_shell',
+  fence: (n) => '另有 ' + String(n) + ' 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令，请改用其它命令工具',
   hiddenPwsh: (names) => '已隐藏 ' + names + '（避免两套语法混用）',
   notBlocked: 'PowerShell 的命令工具没有隐藏（开关已关）',
   noBashHost: '这个会话没有 bash 命令工具，未隐藏 PowerShell 工具',
@@ -568,15 +566,15 @@ check('1 就绪:命令行整行 = 语法标签 + envd_shell + 其它命令工具
 check('1 就绪:命令行语法标签 = 「bash 语法」(自动选时不加后缀)', famBadgeText(ready.tree) === COPY.famBash, famBadgeText(ready.tree) || '(missing)')
 check('1 就绪:语法标签用 .envd-fam class(断言不靠下标)', Boolean(famBadgeOf(ready.tree)) && classTokens(famBadgeOf(ready.tree)).includes('envd-fam'), describe(famBadgeOf(ready.tree)))
 check('1 就绪:envd_shell 带 title 说明它用你的终端/PATH', String((readyOwn || {}).props && readyOwn.props.title || '') === COPY.hintOwn, JSON.stringify(readyOwn && readyOwn.props.title))
-check('1 就绪:「其它」段带 title 说明环境可能和你的终端不一样', String((readyHost || {}).props && readyHost.props.title || '') === COPY.hintHost, JSON.stringify(readyHost && readyHost.props.title))
+check('1 就绪:「其它」段 title 说清环境差异 + 何时用 envd_shell(原备注长句挪到这里)', String((readyHost || {}).props && readyHost.props.title || '') === COPY.hintHost && String((readyHost || {}).props && readyHost.props.title || '').includes('envd_shell'), JSON.stringify(readyHost && readyHost.props.title))
 check('1 就绪:整树 0 个 .envd-statuschip(状态胶囊已彻底删除)', statusChips(ready.tree).length === 0, JSON.stringify(statusChips(ready.tree).map((el) => el.props.className)))
 check('1 就绪:没有任何逐会话节点(.envd-sessions/.envd-srow)', !findOneByClass(ready.tree, 'envd-sessions') && findAllByClass(ready.tree, 'envd-srow').length === 0)
 check('1 就绪:没有接管模式 chips 容器(.envd-chips-sm)', findAllByClass(ready.tree, 'envd-chips-sm').length === 0)
 check('1 就绪:命令卡里没有设置按钮(注入在简报区、其余在高级设置)', buttonsIn(cardOf(ready.tree)).every((el) => !textOf(el).includes('设置')), describeAll(buttonsIn(cardOf(ready.tree))))
-check('1 就绪:常显备注两行 = 已隐藏 pwsh + 环境差异', noteNodes(ready.tree).length === 2 && noteTexts(ready.tree)[0] === COPY.hiddenPwsh('pwsh') && noteTexts(ready.tree)[1] === COPY.envHint, JSON.stringify(noteTexts(ready.tree)))
-check('1 就绪:两条备注都是 muted 级(普通事实不吓人)', noteNodes(ready.tree).length === 2 && noteNodes(ready.tree).every((el) => noteClass(el) === 'envd-note'), describeAll(noteNodes(ready.tree)))
+check('1 就绪:常显备注只剩真正需要的 1 行(已隐藏 pwsh)', noteNodes(ready.tree).length === 1 && noteTexts(ready.tree)[0] === COPY.hiddenPwsh('pwsh'), JSON.stringify(noteTexts(ready.tree)))
+check('1 就绪:这一行是 muted 级(普通事实不吓人)', noteNodes(ready.tree).length === 1 && noteNodes(ready.tree).every((el) => noteClass(el) === 'envd-note'), describeAll(noteNodes(ready.tree)))
 check('1 就绪:备注最多两行(常显区没有第三行)', noteNodes(ready.tree).length <= 2, 'notes=' + noteNodes(ready.tree).length)
-check('1 就绪:badge title 带上常显备注(可补充阅读)', Boolean(badgeOf(ready.tree)) && String(badgeOf(ready.tree).title || '').includes(COPY.envHint) && String(badgeOf(ready.tree).title || '').includes('pwsh'), JSON.stringify(badgeOf(ready.tree) && badgeOf(ready.tree).title))
+check('1 就绪:badge title 只拼这一行备注(不再有环境差异长句)', Boolean(badgeOf(ready.tree)) && String(badgeOf(ready.tree).title || '').includes('pwsh') && !String(badgeOf(ready.tree).title || '').includes('envd_shell'), JSON.stringify(badgeOf(ready.tree) && badgeOf(ready.tree).title))
 check('1 就绪:详情默认收起(.envd-diag-detail 不出现)', !detailOf(ready.tree))
 const readyDiagBtn = cmdButton(ready.tree, COPY.diag)
 check('1 就绪:详情按钮默认 aria-expanded=false', Boolean(readyDiagBtn) && readyDiagBtn.props['aria-expanded'] === false, readyDiagBtn ? JSON.stringify(readyDiagBtn.props['aria-expanded']) : '(missing)')
@@ -611,7 +609,7 @@ check('2 详情:被隐藏的名字带 hidden class + 「已隐藏」后缀', Boo
 check('2 详情:chip title 保留名字 + 语法 + 识别方式', String((readyChips[0] || {}).props && readyChips[0].props.title || '') === 'ops_bash · bash 语法 · 自动识别', JSON.stringify(readyChips[0] && readyChips[0].props.title))
 check('2 详情:被隐藏 chip 的 title 也说清已隐藏', String((readyChips[1] || {}).props && readyChips[1].props.title || '') === 'pwsh · PowerShell 语法 · 已隐藏', JSON.stringify(readyChips[1] && readyChips[1].props.title))
 check('2 详情:没有被拒 / 只展示的名字时 chip 不多挂标签', !textOf(readyChips[0]).includes(COPY.hostToolRefused) && !textOf(readyChips[0]).includes(COPY.displayOnlyTag), describeAll(readyChips))
-check('2 详情:隐藏/拒绝计数为 0 时不摆一排 0', Boolean(readyStat) && !textOf(readyStat).includes('隐藏') && !textOf(readyStat).includes('拒绝'), readyStat ? textOf(readyStat) : '(missing)')
+check('2 详情:详情计数只有三项(没有隐藏/拒绝累计)', Boolean(readyStat) && textOf(readyStat) === countsText() && !textOf(readyStat).includes('隐藏') && !textOf(readyStat).includes('拒绝'), readyStat ? textOf(readyStat) : '(missing)')
 check('2 详情:没有最近错误时不出红条目(.e)', readyDetail ? findAllByClass(readyDetail, 'e').length === 0 : false)
 check('2 详情:详情块不重复摆备注(原因/提示只在常显区)', readyDetail ? findAllByClass(readyDetail, 'envd-note').length === 0 : false)
 await ready.clickNode(cmdButton(ready.tree, COPY.diag))
@@ -633,7 +631,7 @@ check('3 无终端:命令工具照样列出(只展示)', Boolean(hostNode(noTerm
 check('3 无终端:备注 = 没找到可用终端(两套语法各需要什么说清楚)', noteTexts(noTerminal.tree)[0] === COPY.noFamilyTerminal, JSON.stringify(noteTexts(noTerminal.tree)))
 check('3 无终端:备注里点名 Git Bash 与 pwsh', noteTexts(noTerminal.tree)[0].includes('Git Bash') && noteTexts(noTerminal.tree)[0].includes('pwsh'), JSON.stringify(noteTexts(noTerminal.tree)))
 check('3 无终端:原因备注是 muted 级', noteClass(noteNodes(noTerminal.tree)[0]) === 'envd-note', describeAll(noteNodes(noTerminal.tree)))
-check('3 无终端:未注册时不说环境差异提示(用 envd_shell 是句假话)', !noteTexts(noTerminal.tree).includes(COPY.envHint), JSON.stringify(noteTexts(noTerminal.tree)))
+check('3 无终端:未注册时备注只说原因,不提「用你自己的工具」', !noteTexts(noTerminal.tree).some((text) => text.includes('用你自己的工具')), JSON.stringify(noteTexts(noTerminal.tree)))
 check('3 无终端:badge title 带原因', String(badgeOf(noTerminal.tree).title || '').includes(COPY.noFamilyTerminal), JSON.stringify(badgeOf(noTerminal.tree).title))
 check('3 无终端:零个状态胶囊,结论只在 badge', statusChips(noTerminal.tree).length === 0)
 check('3 无终端:0.5 的 same-family 词条与分支都已删除', !SOURCE.includes("'same-family'") && !ZH_BLOCK.includes('skipSameFamily') && !EN_BLOCK.includes('skipSameFamily'), 'zh=' + ZH_BLOCK.includes('skipSameFamily') + ' en=' + EN_BLOCK.includes('skipSameFamily'))
@@ -661,7 +659,7 @@ check('4 没有不受限会话:badge muted「只展示」', badgeState(noUnconfi
 check('4 没有不受限会话:备注说「没有不受限的会话，暂时不会提供 envd_shell」', noteTexts(noUnconfined.tree)[0] === COPY.noUnconfined, JSON.stringify(noteTexts(noUnconfined.tree)))
 check('4 没有不受限会话:命令行写「—」', textOf(ownTool(noUnconfined.tree)) === '—')
 check('4 没有不受限会话:没注册就不教训「会拒绝」(备注只一行原因)', noteNodes(noUnconfined.tree).length === 1 && !noteTexts(noUnconfined.tree).some((text) => text.includes('会拒绝')), JSON.stringify(noteTexts(noUnconfined.tree)))
-check('4 没有不受限会话:环境差异提示同样不出现', !noteTexts(noUnconfined.tree).includes(COPY.envHint))
+check('4 没有不受限会话:备注里也没有环境差异长句', !noteTexts(noUnconfined.tree).some((text) => text.includes('PATH') || text.includes('用你自己的工具')), JSON.stringify(noteTexts(noUnconfined.tree)))
 check('4 没有不受限会话:badge title 带原因', String(badgeOf(noUnconfined.tree).title || '') === COPY.noUnconfined)
 
 // ───────────────────────────────── 5) 与其它插件同名 ──
@@ -678,21 +676,23 @@ check('6 注册失败:备注说「注册失败，未注册」', noteTexts(regFai
 check('6 注册失败:失败原因染 warn(要用户看见)', hasClass(noteClass(noteNodes(regFailed.tree)[0]), 'warn'), describeAll(noteNodes(regFailed.tree)))
 check('6 注册失败:命令行写「—」', textOf(ownTool(regFailed.tree)) === '—')
 
-// ───────────────────────────────── 7) 受限:badge warn + 两行备注 ──
+// ───────────────────────────────── 7) 受限信息只进备注:badge 仍是「就绪」 ──
+// 面板是全局的,badge 不能拿「某些会话被限制」当面板结论(没主语的「受限」会被当成插件坏了)。
 const confinedPayload = payload({
   commandTool: commandTool({ sandbox: { capable: true, present: true, defaultMode: 'workspace-write', anyUnconfined: true, confinedCount: 2, sessionCount: 3 } }),
 })
 const confined = await mountPanel(confinedPayload)
-check('7 受限:badge 是 warn「受限」', badgeState(confined.tree) === 'warn' && badgeOf(confined.tree).text === COPY.confined, emoji(headerBadges(confined.tree)))
-check('7 受限:受限时工具仍是已注册的 envd_shell', textOf(ownTool(confined.tree)) === 'envd_shell')
-check('7 受限:备注恰两行(受限 + 环境差异)', noteNodes(confined.tree).length === 2, 'notes=' + JSON.stringify(noteTexts(confined.tree)))
-check('7 受限:第一行 = N 个会话受沙箱限制:envd_shell 会拒绝,请用命令工具', noteTexts(confined.tree)[0] === COPY.fence(2), JSON.stringify(noteTexts(confined.tree)))
-check('7 受限:受限备注带 warn 类与 ⚠ 图标', hasClass(noteClass(noteNodes(confined.tree)[0]), 'warn') && textOf(noteNodes(confined.tree)[0]).startsWith('⚠'), describe(noteNodes(confined.tree)[0]))
-check('7 受限:第二行仍是 muted 的环境差异提示', noteClass(noteNodes(confined.tree)[1]) === 'envd-note' && noteTexts(confined.tree)[1] === COPY.envHint, describe(noteNodes(confined.tree)[1]))
-check('7 受限:badge title 两条备注都在', Boolean(badgeOf(confined.tree)) && String(badgeOf(confined.tree).title || '').includes(COPY.fence(2)) && String(badgeOf(confined.tree).title || '').includes(COPY.envHint), JSON.stringify(badgeOf(confined.tree) && badgeOf(confined.tree).title))
-check('7 受限:受限数量来自聚合 confinedCount(载荷 2)', noteTexts(confined.tree)[0].includes('2 个会话'), JSON.stringify(noteTexts(confined.tree)))
-check('7 受限:没有 .envd-statuschip / 逐会话节点', statusChips(confined.tree).length === 0 && !findOneByClass(confined.tree, 'envd-sessions') && findAllByClass(confined.tree, 'envd-srow').length === 0)
-check('7 受限:详情照常(扫描计数 + chips)', (await (async () => { await confined.clickNode(cmdButton(confined.tree, COPY.diag)); return Boolean(statOf(confined.tree)) && shellChips(confined.tree).length === HOST_TOOLS.length })()))
+check('7 受限信息只进备注:badge 仍是 ok「就绪」', badgeState(confined.tree) === 'ok' && badgeOf(confined.tree).text === COPY.additive, emoji(headerBadges(confined.tree)))
+check('7 受限信息只进备注:badge 不带 warn 色(不再出现「受限」)', !hasClass(badgeOf(confined.tree).cls, 'warn'))
+check('7 受限信息只进备注:受限时工具仍是已注册的 envd_shell', textOf(ownTool(confined.tree)) === 'envd_shell')
+check('7 受限信息只进备注:备注只剩受限一行', noteNodes(confined.tree).length === 1, 'notes=' + JSON.stringify(noteTexts(confined.tree)))
+check('7 受限信息只进备注:文案明确「另有 N 个会话」', noteTexts(confined.tree)[0] === COPY.fence(2) && noteTexts(confined.tree)[0].startsWith('另有 2 个会话'), JSON.stringify(noteTexts(confined.tree)))
+check('7 受限信息只进备注:受限备注带 warn 类与 ⚠ 图标', hasClass(noteClass(noteNodes(confined.tree)[0]), 'warn') && textOf(noteNodes(confined.tree)[0]).startsWith('⚠'), describe(noteNodes(confined.tree)[0]))
+check('7 受限信息只进备注:badge title 带上这一行(悬停可读)', Boolean(badgeOf(confined.tree)) && String(badgeOf(confined.tree).title || '').includes(COPY.fence(2)), JSON.stringify(badgeOf(confined.tree) && badgeOf(confined.tree).title))
+check('7 受限信息只进备注:受限数量来自聚合 confinedCount(载荷 2)', noteTexts(confined.tree)[0].includes('2 个会话'), JSON.stringify(noteTexts(confined.tree)))
+check('7 受限信息只进备注:没有 .envd-statuschip / 逐会话节点', statusChips(confined.tree).length === 0 && !findOneByClass(confined.tree, 'envd-sessions') && findAllByClass(confined.tree, 'envd-srow').length === 0)
+check('7 受限信息只进备注:详情照常(扫描计数 + chips)', (await (async () => { await confined.clickNode(cmdButton(confined.tree, COPY.diag)); return Boolean(statOf(confined.tree)) && shellChips(confined.tree).length === HOST_TOOLS.length })()))
+
 
 // ───────────────────────────────── 8) 没注册 + 受限:只展示,不教训受限 ──
 const muteAndConfined = await mountPanel(
@@ -732,12 +732,14 @@ check('11 缺 commandTool:「其它」段写「没有其它命令工具」', tex
 check('11 缺 commandTool:badge 是 muted「只展示」', badgeState(noCt.tree) === 'muted', emoji(headerBadges(noCt.tree)))
 check('11 缺 commandTool:一整棵树里没有状态胶囊', statusChips(noCt.tree).length === 0)
 
-// ───────────────────────────────── 12) badge 三态互斥(唯一状态结论) ──
-const triStates = [ready, noTerminal, confined].map((panel) => ({ state: badgeState(panel.tree), text: badgeOf(panel.tree).text }))
-check('12 三态:ok / muted / warn 各出现一次', JSON.stringify(triStates.map((x) => x.state)) === JSON.stringify(['ok', 'muted', 'warn']), JSON.stringify(triStates))
-check('12 三态:三句话分别是 就绪 / 只展示 / 受限', JSON.stringify(triStates.map((x) => x.text)) === JSON.stringify([COPY.additive, COPY.displayOnly, COPY.confined]), JSON.stringify(triStates))
-check('12 三态:每个面板整树只有一个 badge', [ready, noTerminal, confined].every((panel) => findAllByClass(panel.tree, 'envd-badge').length === 1))
-check('12 三态:badge 不再出现 bad 色(没有「无命令工具」这种终局)', [ready, noTerminal, confined].every((panel) => !hasClass(badgeOf(panel.tree).cls, 'bad')))
+// ───────────────────────────────── 12) badge 二态互斥(唯一状态结论) ──
+const twoStates = [ready, noTerminal].map((panel) => ({ state: badgeState(panel.tree), text: badgeOf(panel.tree).text }))
+check('12 二态:ok / muted 各出现一次', JSON.stringify(twoStates.map((x) => x.state)) === JSON.stringify(['ok', 'muted']), JSON.stringify(twoStates))
+check('12 二态:两句话分别是 就绪 / 只展示', JSON.stringify(twoStates.map((x) => x.text)) === JSON.stringify([COPY.additive, COPY.displayOnly]), JSON.stringify(twoStates))
+check('12 二态:受限载荷也落在 ok(「受限」这个 badge 已删除)', badgeState(confined.tree) === 'ok' && badgeOf(confined.tree).text === COPY.additive, emoji(headerBadges(confined.tree)))
+check('12 二态:每个面板整树只有一个 badge', [ready, noTerminal, confined].every((panel) => findAllByClass(panel.tree, 'envd-badge').length === 1))
+check('12 二态:badge 不再出现 bad 色(没有「无命令工具」这种终局)', [ready, noTerminal, confined].every((panel) => !hasClass(badgeOf(panel.tree).cls, 'bad')))
+
 
 // ───────────────────────────────── 13) 删掉的东西:DOM / 源码 / 词条 ──
 const DEAD_CLASSES = ['envd-statuschip', 'envd-chipfam', 'envd-chiplabel', 'envd-sep', 'envd-sessions', 'envd-srow', 'envd-sdot', 'envd-sid', 'envd-skind', 'envd-stool', 'envd-sreason', 'envd-chips-sm', 'envd-legacy', 'envd-diag-sum', 'envd-shelltools', 'envd-learned']
@@ -769,25 +771,28 @@ check('13 删除:整树没有 .envd-note 之外的状态词', !visibleText(ready
 
 // 词条:新增的中英成对,删掉的中英都不在
 const NEW_KEYS = [
-  'statusAdditive', 'statusDisplayOnly', 'statusConfined', 'cmdHintEnvDock', 'cmdHintHost',
-  'skipNoFamilyTerminal', 'skipNoUnconfined', 'skipTaken', 'envHint', 'hostToolsNone',
+  'statusAdditive', 'statusDisplayOnly', 'cmdHintEnvDock', 'cmdHintHost',
+  'skipNoFamilyTerminal', 'skipNoUnconfined', 'skipTaken', 'hostToolsNone',
   // 0.6 两族词条
   'famBash', 'famPwsh', 'famManual', 'autoShellHint',
   'noteHiddenPwsh', 'noteNotBlocked', 'noteNoBashHost', 'noteFamilyFallback', 'noteMixed',
   'subtitle', 'advanced', 'briefOffDetail',
   'blockOtherFamily', 'blockOtherFamilyHint', 'blockOtherFamilyHintTitle',
-  'dRestrictApplied', 'dGuardRefusals', 'hostToolHidden', 'hostToolRefused', 'displayOnlyTag',
+  'hostToolHidden', 'hostToolRefused', 'displayOnlyTag',
 ]
 const keyPresent = (block, key) => new RegExp('^\\s{8}' + key + ':', 'm').test(block)
 for (const key of NEW_KEYS) {
   check('13 词条:新增 ' + key + ' 中英都有', keyPresent(ZH_BLOCK, key) && keyPresent(EN_BLOCK, key), 'zh=' + keyPresent(ZH_BLOCK, key) + ' en=' + keyPresent(EN_BLOCK, key))
 }
+const DEAD_PANEL_KEYS = ['statusConfined', 'envHint', 'dRestrictApplied', 'dGuardRefusals']
+const deadPanelKeys = DEAD_PANEL_KEYS.filter((key) => keyPresent(ZH_BLOCK, key) || keyPresent(EN_BLOCK, key))
+check('13 词条:0.6.1 收掉的「受限」/环境差异/累计计数词条都已删除', deadPanelKeys.length === 0, JSON.stringify(deadPanelKeys))
 check('13 词条:0.5 的 skipSameFamily 已从两份词典删除', !keyPresent(ZH_BLOCK, 'skipSameFamily') && !keyPresent(EN_BLOCK, 'skipSameFamily'))
 check('13 词条:语法标签中英各自成对(bash 语法 / bash syntax)', ZH_BLOCK.includes("famBash: 'bash 语法'") && EN_BLOCK.includes("famBash: 'bash syntax'") && ZH_BLOCK.includes("famPwsh: 'PowerShell 语法'") && EN_BLOCK.includes("famPwsh: 'PowerShell syntax'"))
 const DEAD_KEYS = ['statusTakeover', 'statusMixed', 'statusConflict', 'statusHost', 'statusSandbox', 'statusYield', 'statusAnomaly', 'statusNoTool', 'takeoverAuto', 'takeoverOn', 'takeoverOff', 'sandboxTakeover', 'sandboxDelegate', 'sandboxRefuse', 'sandboxDelegateHint', 'modeLabel', 'scopeConfined', 'scopeHidden', 'sessionKindTakeover', 'sessionKindHost', 'noteSandbox', 'notePolicyUnknown', 'diagHealthy', 'syncYieldTicks', 'syncGuardDenials', 'syncDelegate', 'nSessions', 'nDirect', 'nHost', 'nYield', 'nSandbox']
 const deadPairs = DEAD_KEYS.filter((key) => keyPresent(ZH_BLOCK, key) || keyPresent(EN_BLOCK, key))
 check('13 词条:接管/逐会话词条中英都已删除', deadPairs.length === 0, JSON.stringify(deadPairs))
-check('13 词条:环境差异提示与受限提示都在中英词典里', keyPresent(ZH_BLOCK, 'envHint') && keyPresent(EN_BLOCK, 'envHint') && keyPresent(ZH_BLOCK, 'noteConfined') && keyPresent(EN_BLOCK, 'noteConfined'))
+check('13 词条:受限提示还在中英词典里(只进备注)', keyPresent(ZH_BLOCK, 'noteConfined') && keyPresent(EN_BLOCK, 'noteConfined'))
 check('13 词条:最近错误标签保留(详情要用)', keyPresent(ZH_BLOCK, 'noteLastError') && keyPresent(EN_BLOCK, 'noteLastError'))
 
 // ───────────────────────────────── 14) 长名字溢出防护 ──
@@ -990,10 +995,10 @@ check('20 en:副标题是英文用途说明', textOf(findOneByClass(enReady.tree
 check('20 en:命令行「其它」段是 Other: + 工具名', textOf(hostNode(enReady.tree)) === 'Other: ops_bash', textOf(hostNode(enReady.tree)))
 check('20 en:envd_shell 的 title 是英文提示', String((ownTool(enReady.tree) || {}).props && ownTool(enReady.tree).props.title || '') === 'Command tool provided by EnvDock: runs with your terminal and PATH', JSON.stringify(ownTool(enReady.tree) && ownTool(enReady.tree).props.title))
 check('20 en:语法标签是「bash syntax」(自动不加后缀)', famBadgeText(enReady.tree) === 'bash syntax', famBadgeText(enReady.tree) || '(missing)')
-check('20 en:备注两行 = 已隐藏 pwsh + 英文环境差异', JSON.stringify(noteTexts(enReady.tree)) === JSON.stringify(['Hid pwsh (to avoid mixing the two syntaxes)', 'Other command tools may use a different environment and PATH than your terminal; use envd_shell when you need your own tools']), JSON.stringify(noteTexts(enReady.tree)))
+check('20 en:备注只剩已隐藏一行(环境差异已进 title)', JSON.stringify(noteTexts(enReady.tree)) === JSON.stringify(['Hid pwsh (to avoid mixing the two syntaxes)']), JSON.stringify(noteTexts(enReady.tree)))
 const enConfined = await mountPanel(payload({ commandTool: commandTool({ sandbox: { confinedCount: 2, sessionCount: 3, anyUnconfined: true } }) }), { locale: 'en' })
-check('20 en:受限态 badge 是「Limited」', badgeState(enConfined.tree) === 'warn' && badgeOf(enConfined.tree).text === 'Limited', emoji(headerBadges(enConfined.tree)))
-check('20 en:受限备注是英文且带数量', noteTexts(enConfined.tree)[0] === '2 sessions are sandbox-limited: envd_shell will not run there; use another command tool', JSON.stringify(noteTexts(enConfined.tree)))
+check('20 en:受限也只影响备注,badge 仍是「Ready」', badgeState(enConfined.tree) === 'ok' && badgeOf(enConfined.tree).text === 'Ready', emoji(headerBadges(enConfined.tree)))
+check('20 en:受限备注是英文且明确 other sessions', noteTexts(enConfined.tree)[0] === '2 other sessions are sandbox-limited: envd_shell will not run there; use another command tool' && noteTexts(enConfined.tree)[0].includes('other sessions'), JSON.stringify(noteTexts(enConfined.tree)))
 const enMuted = await mountPanel(payload({ commandTool: commandTool({ registered: false, visible: false, skipReason: 'no-family-terminal' }) }), { locale: 'en' })
 check('20 en:未提供 badge 是「Display only」', badgeState(enMuted.tree) === 'muted' && badgeOf(enMuted.tree).text === 'Display only', emoji(headerBadges(enMuted.tree)))
 check('20 en:没终端的备注是英文', noteTexts(enMuted.tree)[0] === 'No usable terminal found (bash syntax needs Git Bash, PowerShell syntax needs pwsh)', JSON.stringify(noteTexts(enMuted.tree)))
@@ -1162,7 +1167,7 @@ check('27 真机:语法标签 = PowerShell 语法 · 手动', famBadgeText(realW
 check('27 真机:命令行 = envd_shell · 其它：pwsh · ops_bash(手动 PowerShell 不隐藏)', textOf(hostNode(realWorld.tree)) === COPY.hostPrefix + 'pwsh · ops_bash', textOf(hostNode(realWorld.tree)))
 check('27 真机:两族同时可见时第一行是混用警告', noteTexts(realWorld.tree)[0] === COPY.mixedNote, JSON.stringify(noteTexts(realWorld.tree)))
 check('27 真机:混用警告是 warn 级 + ⚠ 图标', hasClass(noteClass(noteNodes(realWorld.tree)[0]), 'warn') && textOf(noteNodes(realWorld.tree)[0]).startsWith('⚠'), describe(noteNodes(realWorld.tree)[0]))
-check('27 真机:第二行仍是环境差异提示', noteTexts(realWorld.tree)[1] === COPY.envHint, JSON.stringify(noteTexts(realWorld.tree)))
+check('27 真机:备注只剩混用一行(环境差异说明在「其它」title 里)', noteNodes(realWorld.tree).length === 1 && noteTexts(realWorld.tree)[0] === COPY.mixedNote && String((hostNode(realWorld.tree) || {}).props.title || '').includes('envd_shell'), JSON.stringify(noteTexts(realWorld.tree)))
 await realWorld.clickNode(cmdButton(realWorld.tree, COPY.diag))
 check('27 真机:手动 PowerShell 时 0 个名字被隐藏', hiddenChips(realWorld.tree).length === 0 && visibleChips(realWorld.tree).length === 2, describeAll(shellChips(realWorld.tree)))
 
@@ -1258,19 +1263,21 @@ check('29 语法标签:无族时命令行与 chip 都不显示语法信息', !fa
   check('31 标签:四个名字各占一格 chip(不另起一行)', onlyChips.length === 4 && findAllByClass(detailOf(onlyNames.tree), 'envd-diag-only').length === 0, describeAll(onlyChips))
 }
 
-// ───────────────────────────────── 32) 详情新计数:restrictApplied / guardRefusals ──
+// ───────────────────────────────── 32) 详情计数:只留稳定三项,历史累计不上面板 ──
+// 截图事故:PowerShell 族、此刻什么都没隐藏,详情却写着「隐藏 9 次」(历史累计),误导用户。
 {
-  const statsPanel = await mountPanel(payload({ syncStats: syncStats({ restrictApplied: 7, guardRefusals: 2 }) }))
+  const statsPanel = await mountPanel(payload({ syncStats: syncStats({ restrictApplied: 9, guardRefusals: 3 }) }))
   await statsPanel.clickNode(cmdButton(statsPanel.tree, COPY.diag))
   const statText = textOf(statOf(statsPanel.tree) || '')
-  check('32 计数:隐藏次数来自 restrictApplied', statText.includes('隐藏 7 次'), statText || '(missing)')
-  check('32 计数:拒绝次数来自 guardRefusals', statText.includes('拒绝 2 次'), statText || '(missing)')
-  check('32 计数:原有三项计数仍在(扫描 / 最近 / 注册尝试)', statText.includes('扫描 3 次') && statText.includes('最近 12ms') && statText.includes('注册尝试 2'), statText || '(missing)')
-  check('32 计数:详情按钮 title 也带上新计数(收起时能读到)', String((cmdButton(statsPanel.tree, COPY.diag) || {}).props && cmdButton(statsPanel.tree, COPY.diag).props.title || '').includes('隐藏 7 次'), JSON.stringify((cmdButton(statsPanel.tree, COPY.diag) || {}).props && cmdButton(statsPanel.tree, COPY.diag).props.title))
+  check('32 计数:历史累计(restrictApplied 很大)也不进详情', statText === countsText(), statText || '(missing)')
+  check('32 计数:详情里不再出现「隐藏 N 次 / 拒绝 N 次」', !statText.includes('隐藏') && !statText.includes('拒绝'), statText)
+  check('32 计数:详情按钮 title 也只有三项', String((cmdButton(statsPanel.tree, COPY.diag) || {}).props && cmdButton(statsPanel.tree, COPY.diag).props.title || '') === countsText(), JSON.stringify((cmdButton(statsPanel.tree, COPY.diag) || {}).props && cmdButton(statsPanel.tree, COPY.diag).props.title))
+  check('32 计数:API 字段仍在载荷里(只是面板不显示)', syncStats({ restrictApplied: 9, guardRefusals: 3 }).restrictApplied === 9 && syncStats({ restrictApplied: 9, guardRefusals: 3 }).guardRefusals === 3)
   const zeroStats = await mountPanel(payload({ syncStats: syncStats({ restrictApplied: 0, guardRefusals: 0 }) }))
   await zeroStats.clickNode(cmdButton(zeroStats.tree, COPY.diag))
-  check('32 计数:0 值不显示(不摆一排 0)', !textOf(statOf(zeroStats.tree) || '').includes('隐藏') && !textOf(statOf(zeroStats.tree) || '').includes('拒绝'), textOf(statOf(zeroStats.tree) || ''))
+  check('32 计数:0 值同样只有三项', textOf(statOf(zeroStats.tree) || '') === countsText(), textOf(statOf(zeroStats.tree) || ''))
 }
+
 
 // ───────────────────────────────── 33) 备注优先级:最多两行,警告不被淹没 ──
 {
@@ -1284,7 +1291,7 @@ check('29 语法标签:无族时命令行与 chip 都不显示语法信息', !fa
   check('33 优先级:围栏 + 混用都出现时仍不超过两行', noteNodes(bothWarn.tree).length === 2, 'notes=' + JSON.stringify(noteTexts(bothWarn.tree)))
   check('33 优先级:围栏在前、混用在后(先说出路,再提醒语法)', noteTexts(bothWarn.tree)[0] === COPY.fence(2) && noteTexts(bothWarn.tree)[1] === COPY.mixedNote, JSON.stringify(noteTexts(bothWarn.tree)))
   const bashHiddenConfined = await mountPanel(payload({ commandTool: commandTool({ hostTools: BASH_HOST_TOOLS, hidden: ['pwsh'], sandbox: { confinedCount: 1, sessionCount: 2, anyUnconfined: true } }) }))
-  check('33 优先级:围栏 + 已隐藏两行,环境差异被让位', noteTexts(bashHiddenConfined.tree)[0] === COPY.fence(1) && noteTexts(bashHiddenConfined.tree)[1] === COPY.hiddenPwsh('pwsh') && !noteTexts(bashHiddenConfined.tree).includes(COPY.envHint), JSON.stringify(noteTexts(bashHiddenConfined.tree)))
+  check('33 优先级:受限 + 已隐藏正好两行(没有第三条环境差异)', noteTexts(bashHiddenConfined.tree)[0] === COPY.fence(1) && noteTexts(bashHiddenConfined.tree)[1] === COPY.hiddenPwsh('pwsh') && noteNodes(bashHiddenConfined.tree).length === 2, JSON.stringify(noteTexts(bashHiddenConfined.tree)))
 }
 
 // ───────────────────────────────── 34) 手动族回退:familyFallback ──
@@ -1307,7 +1314,7 @@ check('29 语法标签:无族时命令行与 chip 都不显示语法信息', !fa
   )
   check('34 回退:familyFallback=true 渲染一条 warn 备注', noteNodes(fallbackPanel.tree).length >= 1 && noteTexts(fallbackPanel.tree)[0] === COPY.familyFallback, JSON.stringify(noteTexts(fallbackPanel.tree)))
   check('34 回退:回退备注是 warn 级 + ⚠ 图标', hasClass(noteClass(noteNodes(fallbackPanel.tree)[0]), 'warn') && textOf(noteNodes(fallbackPanel.tree)[0]).startsWith('⚠'), describe(noteNodes(fallbackPanel.tree)[0]))
-check('34 回退:备注说清原因(没有对应终端或命令工具)', noteTexts(fallbackPanel.tree)[0].includes('没有对应终端') && noteTexts(fallbackPanel.tree)[0].includes('命令工具'), JSON.stringify(noteTexts(fallbackPanel.tree)))
+  check('34 回退:备注说清原因(没有对应终端或命令工具)', noteTexts(fallbackPanel.tree)[0].includes('没有对应终端') && noteTexts(fallbackPanel.tree)[0].includes('命令工具'), JSON.stringify(noteTexts(fallbackPanel.tree)))
   check('34 回退:徽标显示生效族且不带「手动」后缀', famBadgeText(fallbackPanel.tree) === COPY.famBash && !famBadgeText(fallbackPanel.tree).includes(COPY.manual), famBadgeText(fallbackPanel.tree) || '(missing)')
   check('34 回退:badge 也按生效族说话(不暗示手动族还在生效)', badgeOf(fallbackPanel.tree).text === COPY.additive, badgeOf(fallbackPanel.tree).text)
   check('34 回退:备注仍最多两行(回退 + 已隐藏)', noteNodes(fallbackPanel.tree).length === 2 && noteTexts(fallbackPanel.tree)[1] === COPY.hiddenPwsh('pwsh'), JSON.stringify(noteTexts(fallbackPanel.tree)))
@@ -1316,7 +1323,7 @@ check('34 回退:备注说清原因(没有对应终端或命令工具)', noteTex
   delete noFallbackField.familyFallback
   delete noFallbackField.commandTool.familyFallback
   const oldish = await mountPanel(noFallbackField)
-  check('34 回退:旧载荷没有 familyFallback 时不渲染假告警', !noteTexts(oldish.tree).includes(COPY.familyFallback) && noteNodes(oldish.tree).length === 2, JSON.stringify(noteTexts(oldish.tree)))
+  check('34 回退:旧载荷没有 familyFallback 时不渲染假告警', !noteTexts(oldish.tree).includes(COPY.familyFallback) && noteNodes(oldish.tree).length === 1, JSON.stringify(noteTexts(oldish.tree)))
   check('34 回退:familyFallback=false 时也不告警', !noteTexts(ready.tree).includes(COPY.familyFallback), JSON.stringify(noteTexts(ready.tree)))
   // 顶层缺字段、只有 commandTool 报回退时也要认(两个字段取并集)。
   const ctOnly = payload({ commandTool: commandTool({ familyFallback: true, hostTools: BASH_HOST_TOOLS, hidden: ['pwsh'] }) })
@@ -1341,6 +1348,9 @@ check('34 回退:备注说清原因(没有对应终端或命令工具)', noteTex
   check('35 收敏:自动选语法时命令行不出现「· 自动」', !textOf(cmdRow(ready.tree)).includes('自动'), textOf(cmdRow(ready.tree) || null))
   check('35 收敏:手动选语法时命令行带「· 手动」', textOf(cmdRow(realWorld.tree)).includes('· ' + COPY.manual), textOf(cmdRow(realWorld.tree) || null))
   check('35 收敏:首屏只留四块(命令卡 / 工具链 / 简报 / 高级设置行)', Boolean(findOneByClass(ready.tree, 'envd-card')) && sections(ready.tree).length === 2 && Boolean(findOneByClass(ready.tree, 'envd-advanced')), 'sections=' + sections(ready.tree).length)
+  const quietPwsh = await mountPanel(payload({ family: 'powershell', familySource: 'auto', shell: { key: 'pwsh', label: 'PowerShell 7', family: 'powershell', path: 'E:/tools/pwsh7/pwsh.exe', version: '7.4.6' }, commandTool: commandTool({ family: 'powershell', familySource: 'auto', hostTools: PWSH_HOST_TOOLS, hidden: [] }) }))
+  check('35 收敏:PowerShell 会话什么都没隐藏时备注为空(不再有常驻长句)', noteNodes(quietPwsh.tree).length === 0, JSON.stringify(noteTexts(quietPwsh.tree)))
+  check('35 收敏:这种安静状态下 badge 是 ok「就绪」', badgeState(quietPwsh.tree) === 'ok' && badgeOf(quietPwsh.tree).text === COPY.additive, emoji(headerBadges(quietPwsh.tree)))
   check('35 收敏:高级设置默认收起(首屏不摆开关)', !findOneByClass(ready.tree, 'envd-adv'))
   check('35 收敏:footer 只有复制反馈 + 脚注,没有开关', findAllByClass(footerOf(ready.tree), 'envd-switch').length === 0 && Boolean(findOneByClass(ready.tree, 'envd-copy-note')) && Boolean(findOneByClass(ready.tree, 'envd-footmeta')))
 }
