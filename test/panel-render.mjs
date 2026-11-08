@@ -1,22 +1,26 @@
 /**
- * EnvDock 面板渲染回归测试(简洁一屏 / 接管可视化 / 22 组回归)。
+ * EnvDock 面板渲染回归测试(简洁一屏 / 接管可视化 / 23 组回归)。
  *
  * client.js 是浏览器脚本(`window.__ModuleLoader__.load`),不能在 Node 里 import;
  * 但它渲染出来的东西完全由 /envdock-api 的 JSON 决定 —— 所以这里用一套极简 React
  * 运行时替身(useState/useEffect/useMemo/useCallback/useRef)+ 桩 slots/locale/fetch,
  * 把 client.js 真跑起来,捕获 EnvDockPanel 的真实渲染树再按 class 断言。
  *
- * 2026-11 面板重做后的 DOM(冻结版):
- *   头部  .envd-head > .envd-h1 / .envd-headline / .envd-badge(唯一胶囊) / .envd-btn.primary
+ * 2026-11 面板第三次收紧后的 DOM(冻结版 md5 b40eb11c):
+ *   头部  .envd-head > .envd-h1 / .envd-headline / .envd-badge(唯一状态胶囊,全树 1 个) / .envd-btn.primary
+ *         状态结论只在这里出现一次;.envd-statuschip 已彻底删除(全树 0 个)。
  *   接管卡 .envd-card
  *     .envd-row(终端 .envd-tag + .envd-chips > .envd-chip)
- *     .envd-row(命令 .envd-tag + .envd-statuschip + .envd-tool + .envd-sub
- *               + ghost 会话(仅 scopes 非空)/ 设置 / 详情)
+ *     .envd-row(命令 .envd-tag + .envd-tool(无工具名时整个节点不渲染)+
+ *               .envd-sub(会话计数)+ ghost 会话(仅 scopes 非空)/ 设置 / 详情)
  *     .envd-notes > .envd-note(.warn/.bad)
  *     设置区(默认收起,点「设置」才出现):两组 .envd-chips.envd-chips-sm
- *     .envd-sessions > .envd-srow(异常一定展开;.envd-sdot/.envd-sid/.envd-skind/.envd-stool/.envd-sreason)
- *     .envd-shelltools > .envd-shellchip(仅 scopes 数组或 runtimeShellTools 非空)
- *     .envd-diag-detail(点「详情」才出现;统计 + notes 的 .w/.e 条目)
+ *     .envd-sessions > .envd-srow —— 按 (bad|kind|tool|confined|reason) 分组:
+ *       同组多个 id 在 .envd-sid 里用 ` · ` 并列、超过 4 个显示 ` +N`;
+ *       完整 id 与「已挡 xxx」只在 .envd-srow 的 title 里(换行分隔),.envd-sid 无 title。
+ *       行内只有 .envd-sdot / .envd-sid / .envd-skind / .envd-stool / .envd-sreason,没有 .envd-sub。
+ *     .envd-diag-detail(点「详情」才出现):统计 + notes 的 .w/.e 条目 +
+ *       .envd-diag-shelltools > .envd-shellchip(已识别宿主工具只在详情里;默认全树 0 个 chip)
  *   工具链 .envd-sec > .envd-sec-h(h2 + .n 尾注) / .envd-trow(.envd-tgroup/.envd-tname/.envd-tver/.envd-tpath/.envd-tact)
  *         多版本 .envd-vlist > .envd-vrow;管理器行多带 .envd-manager
  *         健康:健康时 .envd-flag.ok 一行,有问题 .envd-fold-health 折叠行 + .envd-issues > .envd-issue
@@ -24,8 +28,8 @@
  *   底部   .envd-foot > 两个 .envd-switch + .envd-copy-note(role=status) + .envd-footmeta
  *
  * 替身会保存并执行 effect cleanup,所以卸载路径(轮询定时器要清掉)也测得到。
- * 所有数字/文案都从载荷与 DICT 推导,不写死「2 个」「3 行」—— 把实现改成「读 stats 不读 scopes」
- * 或删掉异常排序/自动展开会直接失败,这是变异敏感的来源。
+ * 所有数字/文案都从载荷与 DICT 推导,不写死「2 个」「3 行」—— 把实现改成「读 stats 不读 scopes」、
+ * 删掉异常排序/自动展开/分组合并会直接失败,这是变异敏感的来源。
  *
  * 零依赖,Windows 上直接 `node test/panel-render.mjs` 可跑。
  */
@@ -470,6 +474,17 @@ const badgeOf = (tree) => headerBadges(tree)[0] || null
 const rowCount = (tree) => findAllByClass(tree, 'envd-srow').length
 const badRows = (tree) => findAllByClass(tree, 'envd-srow').filter((el) => classTokens(el).includes('bad'))
 const shellChips = (tree) => findAllByClass(tree, 'envd-shellchip')
+const shellToolsBlocks = (tree) => findAllByClass(tree, 'envd-diag-shelltools')
+// 状态胶囊已被删掉:整个面板只允许头部一个 .envd-badge,0 个 .envd-statuschip
+const statusChips = (tree) => findAllByClass(tree, 'envd-statuschip')
+const noStatusChip = (tree) => statusChips(tree).length === 0
+// 短 id 规则与 client.js 的 shortId 一致:去掉 session- 前缀再截 8 位
+const shortIdOf = (id) => {
+  const raw = String(id || '?')
+  return (raw.startsWith('session-') ? raw.slice('session-'.length) : raw).slice(0, 8) || '?'
+}
+const rowTitles = (tree) => findAllByClass(tree, 'envd-srow').map((el) => String(el.props.title || ''))
+const rowIds = (tree) => findAllByClass(tree, 'envd-sid').map(textOf)
 const noteNodes = (tree) => findAllByClass(tree, 'envd-note')
 const noteClass = (el) => (typeof el.props.className === 'string' ? el.props.className : '')
 const subTexts = (tree) => findAllByClass(tree, 'envd-sub').map(textOf)
@@ -538,8 +553,7 @@ check('1 混合:badge title 不出现孤立的「模型可见」', Boolean(mixed
 const mixedHeadline = findOneByClass(mixed.tree, 'envd-headline')
 check('1 混合:headline 只留终端名+版本(状态词只在 badge/卡片)', Boolean(mixedHeadline) && textOf(mixedHeadline) === 'PowerShell v7.4.0', mixedHeadline ? textOf(mixedHeadline) : '(missing)')
 check('1 混合:接管卡片存在', Boolean(findOneByClass(mixed.tree, 'envd-card')))
-const mixedChip = findOneByClass(mixed.tree, 'envd-statuschip')
-check('1 混合:状态 chip 与头部 badge 是同一句结论且恰 1 个', Boolean(mixedChip) && hasClass(mixedChip.props.className, 'warn') && textOf(mixedChip) === mixedBadge.text, mixedChip ? textOf(mixedChip) : '(missing)')
+check('1 混合:状态只在头部 badge 出现一次(.envd-statuschip 已删,全树 0 个)', Boolean(mixedBadge) && hasClass(mixedBadge.cls, 'warn') && noStatusChip(mixed.tree), 'badge=' + (mixedBadge && mixedBadge.text) + ' chips=' + statusChips(mixed.tree).length)
 const mixedTool = findOneByClass(mixed.tree, 'envd-tool')
 check('1 混合:命令行列出实际命令工具名', Boolean(mixedTool) && textOf(mixedTool).includes('envd_shell') && textOf(mixedTool).includes('ops_bash'), mixedTool ? textOf(mixedTool) : '(missing)')
 check('1 混合:.envd-tool 带 title 保留完整工具名', Boolean(mixedTool) && String(mixedTool.props.title || '').includes('envd_shell'), mixedTool ? String(mixedTool.props.title) : '(missing)')
@@ -548,6 +562,7 @@ check('1 混合:会话计数一句话说清(直连/让路/沙箱各几)', mixedS
 check('1 混合:逐会话默认收起(.envd-sessions 不出现、0 行)', !findOneByClass(mixed.tree, 'envd-sessions') && rowCount(mixed.tree) === 0, 'sessions=' + Boolean(findOneByClass(mixed.tree, 'envd-sessions')) + ' rows=' + rowCount(mixed.tree))
 check('1 混合:设置区默认收起(不占常显区,0 组 chips)', findAllByClass(mixed.tree, 'envd-chips-sm').length === 0, 'chips-sm=' + findAllByClass(mixed.tree, 'envd-chips-sm').length)
 check('1 混合:常显区标签只有 终端 / 命令', JSON.stringify(cardTags(mixed.tree)) === JSON.stringify(['终端', '命令']), JSON.stringify(cardTags(mixed.tree)))
+check('1 混合:默认 0 个已识别宿主工具 chip(整块挪进「详情」)', shellChips(mixed.tree).length === 0 && shellToolsBlocks(mixed.tree).length === 0, 'chips=' + shellChips(mixed.tree).length + ' blocks=' + shellToolsBlocks(mixed.tree).length)
 const mixedNotes = noteNodes(mixed.tree)
 check('1 混合:围栏备注以 muted 单行常显(不加 warn/bad 类)', mixedNotes.length === 1 && noteClass(mixedNotes[0]) === 'envd-note' && textOf(mixedNotes[0]).includes('围栏'), describeAll(mixedNotes))
 check('1 混合:详情默认收起(.envd-diag-detail 不出现)', !findOneByClass(mixed.tree, 'envd-diag-detail'))
@@ -583,16 +598,19 @@ check('1 混合:会话点颜色按终局(直连 ok / 让路与沙箱 warn)', (()
   return dots.length === MIXED_SCOPES.length && dots.filter((c) => hasClass(c, 'ok')).length === 1 && dots.filter((c) => hasClass(c, 'warn')).length === MIXED_NON_TAKEOVER.length
 })(), JSON.stringify(findAllByClass(mixed.tree, 'envd-sdot').map((el) => el.props.className)))
 check('1 混合:无异常会话时不给原因列', findAllByClass(mixed.tree, 'envd-sreason').length === 0)
-check('1 混合:takeover 行在 .envd-sub 里说明已挡掉的宿主工具', findAllByClass(mixed.tree, 'envd-srow').some((el) => textOf(el).includes('已挡 bash')), JSON.stringify(mixedRowTexts))
+check('1 混合:会话行内没有 .envd-sub(围栏/已挡都进了 title)', findAllByClass(mixed.tree, 'envd-srow').every((el) => findAllByClass(el, 'envd-sub').length === 0))
+check('1 混合:takeover 行把「已挡 bash」放进 .envd-srow.title,行内只留短 id', findAllByClass(mixed.tree, 'envd-srow').some((el) => String(el.props.title || '').includes('已挡 bash')), JSON.stringify(rowTitles(mixed.tree)))
 // 详细诊断:默认收起 → 点开才有统计
 await mixed.clickNode(cmdButton(mixed.tree, '详情'))
 const mixedDetail = findOneByClass(mixed.tree, 'envd-diag-detail')
 check('1 混合:点「详情」展开统计(含注册/tick 计数)', Boolean(mixedDetail) && textOf(mixedDetail).includes('注册') && textOf(mixedDetail).includes('tick'), mixedDetail ? textOf(mixedDetail) : '(missing)')
 check('1 混合:详情里 notes 以 .w 条目出现(与常显备注同源)', Boolean(mixedDetail) && findAllByClass(mixedDetail, 'w').length === mixedNotes.length, mixedDetail ? describeAll(findAllByClass(mixedDetail, 'w')) : '(missing)')
 const mixedShell = shellChips(mixed.tree)
-check('1 混合:已识别宿主命令工具 chips 数量 === 载荷数量', mixedShell.length === SHELL_TOOLS.length, 'chips=' + mixedShell.length)
+const mixedShellBlock = shellToolsBlocks(mixed.tree)[0]
+check('1 混合:点「详情」后出现 .envd-diag-shelltools 且带「已识别宿主工具」引导词', Boolean(mixedShellBlock) && textOf(mixedShellBlock).includes('已识别宿主工具'), mixedShellBlock ? textOf(mixedShellBlock) : '(missing)')
+check('1 混合:详情里的已识别宿主工具 chips 数量 === 载荷数量', mixedShell.length === SHELL_TOOLS.length, 'chips=' + mixedShell.length + ' expect=' + SHELL_TOOLS.length)
+check('1 混合:已识别工具 chip 全部在详情块内(常显区不重复摆)', Boolean(mixedDetail) && mixedShell.length > 0 && findAllByClass(mixedDetail, 'envd-shellchip').length === mixedShell.length, mixedDetail ? describeAll(findAllByClass(mixedDetail, 'envd-shellchip')) : '(missing)')
 check('1 混合:chips 带完整 title(截断时可读)', mixedShell.every((chip, i) => String(chip.props.title || '').includes(SHELL_TOOLS[i].name)), JSON.stringify(mixedShell.map((c) => c.props.title)))
-check('1 混合:.envd-shelltools 有「已识别宿主工具」引导词', subTexts(mixed.tree).includes('已识别宿主工具'), JSON.stringify(subTexts(mixed.tree)))
 check('1 混合:工具链分组有标题 + 计数尾注', Boolean(findTag(sectionByTitle(mixed.tree, '工具链'), 'h2')) && sectionTail(sectionByTitle(mixed.tree, '工具链')).includes('个工具'), sectionTail(sectionByTitle(mixed.tree, '工具链')))
 check('1 混合:底部两个开关(简报注入 + 允许局域网)', findAllByClass(mixed.tree, 'envd-switch').length === 2, 'switches=' + findAllByClass(mixed.tree, 'envd-switch').length)
 
@@ -603,6 +621,8 @@ const mismatchBadge = badgeOf(mismatch.tree)
 check('2 stats 不一致:单一让路会话 = 灰黄「让路」终局,不再算成 N 个计数', Boolean(mismatchBadge) && hasClass(mismatchBadge.cls, 'warn') && mismatchBadge.text === '让路' && Number.isNaN(badgeNumber(mismatchBadge)), emoji(headerBadges(mismatch.tree)))
 check('2 stats 不一致:计数来自 scopes(1 个会话),不来自 sandboxHiddenScopes(5)', subTexts(mismatch.tree).some((text) => text.includes(String(MISMATCH_SCOPES.length) + ' 个会话')) && !subTexts(mismatch.tree).some((text) => text.includes('5 个会话')), JSON.stringify(subTexts(mismatch.tree)))
 check('2 stats 不一致:badge title 也只带 scopes 的 1 个会话', Boolean(mismatchBadge) && String(mismatchBadge.title || '').includes('1 个会话') && !String(mismatchBadge.title || '').includes('5 个会话'), 'title=' + JSON.stringify(mismatchBadge && mismatchBadge.title))
+check('2 stats 不一致:只有 1 个会话时不再拼「· 1 让路」分解', subTexts(mismatch.tree).includes('1 个会话') && !subTexts(mismatch.tree).some((text) => text.includes('1 个会话 ·')), JSON.stringify(subTexts(mismatch.tree)))
+check('2 stats 不一致:单个会话也不出现状态胶囊(状态只在 badge)', noStatusChip(mismatch.tree), JSON.stringify(statusChips(mismatch.tree).map((el) => el.props.className)))
 check('2 stats 不一致:有会话时给出「会话」开关', Boolean(cmdButton(mismatch.tree, '会话')))
 
 // ───────────────────────────────── 3) 纯 takeover ──
@@ -618,9 +638,12 @@ check('3 纯接管:恰 1 个 ok「接管中」badge(新文案,不再是「模型
 check('3 纯接管:没有 warn/异常 badge', !pureBadges.some((b) => hasClass(b.cls, 'warn') || hasClass(b.cls, 'bad')), emoji(pureBadges))
 check('3 纯接管:逐会话默认收起(0 行)', rowCount(pure.tree) === 0, 'rows=' + rowCount(pure.tree))
 check('3 纯接管:设置区默认收起', findAllByClass(pure.tree, 'envd-chips-sm').length === 0, 'chips-sm=' + findAllByClass(pure.tree, 'envd-chips-sm').length)
-check('3 纯接管:状态 chip 是 ok 色', Boolean(findWithClasses(pure.tree, 'envd-statuschip', 'ok')), JSON.stringify(findAllByClass(pure.tree, 'envd-statuschip').map((el) => el.props.className)))
+check('3 纯接管:整树 0 个状态胶囊(结论只由 badge 表达)', noStatusChip(pure.tree) && hasClass(pureBadges[0].cls, 'ok'), JSON.stringify(statusChips(pure.tree).map((el) => el.props.className)))
+check('3 纯接管:同终局的多个会话只写「2 个会话」(终局种类唯一,不拼分解)', subTexts(pure.tree).includes('2 个会话') && !subTexts(pure.tree).some((text) => text.includes('2 个会话 ·')), JSON.stringify(subTexts(pure.tree)))
 await pure.clickNode(cmdButton(pure.tree, '会话'))
-check('3 纯接管:会话行数 === scopes 长度', rowCount(pure.tree) === 2, 'rows=' + rowCount(pure.tree))
+check('3 纯接管:同终局同工具的会话合并成 1 行(不是 scopes 数)', rowCount(pure.tree) === 1 && findAllByClass(pure.tree, 'envd-sid').length === 1, 'rows=' + rowCount(pure.tree))
+check('3 纯接管:合并行的 .envd-sid 并列两个短 id', textOf(findOneByClass(pure.tree, 'envd-sid') || '') === shortIdOf(TAKEOVER_ID) + ' · ' + shortIdOf(TAKEOVER2_ID), textOf(findOneByClass(pure.tree, 'envd-sid') || '(missing)'))
+check('3 纯接管:合并行的 title 保留两个完整 id(换行分隔)', rowTitles(pure.tree).some((title) => title.includes(TAKEOVER_ID) && title.includes(TAKEOVER2_ID)), JSON.stringify(rowTitles(pure.tree)))
 check('3 纯接管:每行都标「直连」', findAllByClass(pure.tree, 'envd-srow').every((el) => textOf(el).includes('直连')), JSON.stringify(findAllByClass(pure.tree, 'envd-srow').map(textOf)))
 await pure.clickNode(cmdButton(pure.tree, '设置'))
 check('3 纯接管:设置展开后两组仍都在(新 DOM 不按 sandbox.capable 隐藏)', findAllByClass(pure.tree, 'envd-chips-sm').length === 2, 'sm=' + findAllByClass(pure.tree, 'envd-chips-sm').length)
@@ -640,12 +663,18 @@ check('4 异常:数字 === 载荷异常会话数(不是 scopes 总数)', Boolean
 check('4 异常:逐会话自动展开(异常不许被折叠藏住)', rowCount(anomaly.tree) === BAD_SCOPES.length && Boolean(findOneByClass(anomaly.tree, 'envd-sessions')), 'rows=' + rowCount(anomaly.tree))
 check('4 异常:会话开关自动变「收起」且 aria-expanded=true', (() => { const b = cmdButton(anomaly.tree, '收起'); return Boolean(b) && b.props['aria-expanded'] === true })())
 check('4 异常:异常行染红且只红 N 行', badRows(anomaly.tree).length === EXPECTED_BAD.length, 'badRows=' + badRows(anomaly.tree).length + ' expect=' + EXPECTED_BAD.length)
-const anomalyReasons = findAllByClass(anomaly.tree, 'envd-sreason').map((el) => ({ text: textOf(el), title: el.props.title }))
-check('4 异常:异常行尾给原因(看不到命令工具 / 宿主工具仍可见 / 对账异常)', anomalyReasons.length === EXPECTED_BAD.length && anomalyReasons.every((r) => r.text.length > 0 && String(r.title || '').includes(r.text)), JSON.stringify(anomalyReasons))
+const anomalyReasons = findAllByClass(anomaly.tree, 'envd-sreason').map(textOf)
+check('4 异常:异常行尾给原因(看不到命令工具 / 宿主工具仍可见 / 对账异常)', anomalyReasons.length === EXPECTED_BAD.length && anomalyReasons.every((text) => text.length > 0), JSON.stringify(anomalyReasons))
 check('4 异常:四类原因各出现一次(缺工具 / 不可见 / 泄漏 / 对账标红)', (() => {
-  const joined = anomalyReasons.map((r) => r.text).join(' | ')
+  const joined = anomalyReasons.join(' | ')
   return joined.includes('看不到命令工具') && joined.includes('宿主 bash 仍可见') && joined.includes('对账异常')
-})(), JSON.stringify(anomalyReasons.map((r) => r.text)))
+})(), JSON.stringify(anomalyReasons))
+check('4 异常:行内只留 8 位短 id,完整 id 在 .envd-srow.title', (() => {
+  const ids = rowIds(anomaly.tree)
+  const titles = rowTitles(anomaly.tree)
+  return ids.length === rowCount(anomaly.tree) && ids.every((id) => id.length === 8) && titles.length === ids.length && BAD_SCOPES.every((sc) => titles.some((title) => title.includes(String(sc.id))))
+})(), 'ids=' + JSON.stringify(rowIds(anomaly.tree)) + ' titles=' + JSON.stringify(rowTitles(anomaly.tree)))
+check('4 异常:会话行内没有 .envd-sub(围栏/已挡信息进 title)', findAllByClass(anomaly.tree, 'envd-srow').every((el) => findAllByClass(el, 'envd-sub').length === 0))
 check('4 异常:正常会话没有被染红、也没有原因列', findAllByClass(anomaly.tree, 'envd-srow').some((el) => textOf(el).includes(id8(NORMAL_HOST_ID)) && !classTokens(el).includes('bad') && findAllByClass(el, 'envd-sreason').length === 0), JSON.stringify(findAllByClass(anomaly.tree, 'envd-srow').map(textOf)))
 check('4 异常:异常行排在最前(异常优先)', (() => {
   const rows = findAllByClass(anomaly.tree, 'envd-srow')
@@ -668,15 +697,21 @@ for (let i = 0; i < 4; i += 1) MANY.push(scopeFact({ id: 'ok' + i + 'bbbbbbbbbb'
 for (let i = 0; i < 6; i += 1) MANY.push(scopeFact({ id: 'bad' + i + 'aaaaaaaaaa', kind: 'host', tool: null, hostTool: null }))
 const ANOMALIES_IN_MANY = 6
 const many = await mountPanel(payload({ syncStats: syncStats({}), commandTool: commandTool({ scopes: MANY }) }))
-check('5 异常优先:默认就展开全部会话(不再截断 5 行)', rowCount(many.tree) === MANY.length, 'rows=' + rowCount(many.tree) + ' expect=' + MANY.length)
-check('5 异常优先:异常行全部排在最前(不按载荷顺序)', (() => {
+const MANY_BAD = MANY.filter((sc) => sc.id.startsWith('bad'))
+const MANY_OK = MANY.filter((sc) => sc.id.startsWith('ok'))
+check('5 异常优先:默认自动展开,10 个会话都被行 title 覆盖(不再截断 5 行)', Boolean(findOneByClass(many.tree, 'envd-sessions')) && (() => { const titles = rowTitles(many.tree).join('\n'); return MANY.every((sc) => titles.includes(sc.id)) })(), 'rows=' + rowCount(many.tree) + ' titles=' + JSON.stringify(rowTitles(many.tree)))
+check('5 异常优先:同终局会话分组后只有 2 行,异常组排最前', rowCount(many.tree) === 2 && badRows(many.tree).length === 1 && classTokens(findAllByClass(many.tree, 'envd-srow')[0]).includes('bad'), 'rows=' + rowCount(many.tree) + ' bad=' + badRows(many.tree).length + ' classes=' + JSON.stringify(findAllByClass(many.tree, 'envd-srow').map((el) => el.props.className)))
+check('5 异常优先:异常组行内并列 4 个短 id + ` +2`(超过 4 个折叠成计数)', (() => {
+  const sid = textOf(findOneByClass(badRows(many.tree)[0], 'envd-sid') || '')
+  const expected = MANY_BAD.slice(0, 4).map((sc) => shortIdOf(sc.id)).join(' · ') + ' +' + (MANY_BAD.length - 4)
+  return sid === expected
+})(), textOf(findOneByClass(badRows(many.tree)[0], 'envd-sid') || '(missing)'))
+check('5 异常优先:异常组 title 保留全部 6 个完整 id', (() => { const title = rowTitles(many.tree)[0] || ''; return MANY_BAD.every((sc) => title.includes(sc.id)) })(), JSON.stringify(rowTitles(many.tree)[0]))
+check('5 异常优先:异常组之后才是正常组(4 个直连同终局并一行)', (() => {
   const rows = findAllByClass(many.tree, 'envd-srow')
-  return badRows(many.tree).length === ANOMALIES_IN_MANY && rows.slice(0, ANOMALIES_IN_MANY).every((el) => classTokens(el).includes('bad'))
-})(), 'rows=' + rowCount(many.tree) + ' bad=' + badRows(many.tree).length)
-check('5 异常优先:异常之后才是正常行(顺序由载荷推导)', (() => {
-  const rows = findAllByClass(many.tree, 'envd-srow')
-  return rows.slice(ANOMALIES_IN_MANY).every((el) => !classTokens(el).includes('bad') && textOf(el).includes('直连'))
-})(), JSON.stringify(findAllByClass(many.tree, 'envd-srow').map(textOf)))
+  const okRow = rows[1]
+  return Boolean(okRow) && !classTokens(okRow).includes('bad') && textOf(okRow).includes('直连') && rowTitles(many.tree)[1].includes(MANY_OK[0].id)
+})(), JSON.stringify(rowTitles(many.tree)))
 check('5 异常优先:不再有「还有 N 个」折叠按钮(.envd-morebtn 已删除)', !findOneByClass(many.tree, 'envd-morebtn'))
 check('5 异常优先:badge 数字 === 异常会话数', Boolean(badgeOf(many.tree)) && badgeNumber(badgeOf(many.tree)) === ANOMALIES_IN_MANY, emoji(headerBadges(many.tree)))
 check('5 异常优先:会话计数一句话说清(总 10 / 4 直连 / 6 未接管)', subTexts(many.tree).some((text) => text.includes(String(MANY.length) + ' 个会话') && text.includes('4 直连') && text.includes(String(ANOMALIES_IN_MANY) + ' 未接管')), JSON.stringify(subTexts(many.tree)))
@@ -688,6 +723,7 @@ check('6 健康:环境检查健康时「一行 ✓ 通过」', (() => { const fl
 check('6 健康:健康时不出现折叠的健康行(.envd-fold-health)', !findOneByClass(healthy.tree, 'envd-fold-health'))
 check('6 健康:没有异常会话行', badRows(healthy.tree).length === 0)
 check('6 健康:没有 .envd-issue 条目', findAllByClass(healthy.tree, 'envd-issue').length === 0)
+check('6 健康:整树 0 个状态胶囊(状态只在头部 badge)', noStatusChip(healthy.tree))
 check('6 健康:常显备注里没有 warn/bad 级', noteNodes(healthy.tree).every((el) => noteClass(el) === 'envd-note'), describeAll(noteNodes(healthy.tree)))
 const healthyDiagBtn = cmdButton(healthy.tree, '详情')
 check('6 健康:详情摘要为「对账正常」', Boolean(healthyDiagBtn) && String(healthyDiagBtn.props.title || '').includes('对账正常'), 'title=' + JSON.stringify(healthyDiagBtn && healthyDiagBtn.props.title))
@@ -705,9 +741,11 @@ const legacyNotes = noteNodes(legacy.tree)
 check('7 旧版:.envd-note.warn 里出现「旧版」文案', legacyNotes.length === 1 && hasClass(noteClass(legacyNotes[0]), 'warn') && textOf(legacyNotes[0]).includes('旧版'), describeAll(legacyNotes))
 check('7 旧版:逐会话不渲染(没有 scopes 就没有 .envd-sessions / 行 / 会话按钮)', !findOneByClass(legacy.tree, 'envd-sessions') && rowCount(legacy.tree) === 0 && !cmdButton(legacy.tree, '会话'), 'rows=' + rowCount(legacy.tree))
 check('7 旧版:不再有旧的 .envd-legacy 大段警告块', !findOneByClass(legacy.tree, 'envd-legacy'))
-check('7 旧版:状态 chip 是汇总终局而不是逐会话结论', (() => { const chip = findOneByClass(legacy.tree, 'envd-statuschip'); return Boolean(chip) && textOf(chip) === '接管中' })())
+check('7 旧版:状态只在 badge(整树 0 个状态胶囊),汇总终局是「接管中」', noStatusChip(legacy.tree) && textOf(findOneByClass(legacy.tree, 'envd-badge') || '') === '接管中', JSON.stringify(statusChips(legacy.tree).map((el) => el.props.className)))
 check('7 旧版:没有「N 个会话」计数(逐会话事实不可用)', !subTexts(legacy.tree).some((text) => text.includes('个会话')), JSON.stringify(subTexts(legacy.tree)))
-check('7 旧版:.envd-shelltools 仍渲染(有 scopes 字段?没有,但旧版据此不显示)', !findOneByClass(legacy.tree, 'envd-shelltools'))
+check('7 旧版:默认没有任何已识别工具 chip(旧版没 scopes,详情里也没有)', shellChips(legacy.tree).length === 0 && shellToolsBlocks(legacy.tree).length === 0, 'chips=' + shellChips(legacy.tree).length)
+await legacy.clickNode(cmdButton(legacy.tree, '详情'))
+check('7 旧版:展开详情后依然没有 .envd-diag-shelltools(runtimeShellTools 为空)', Boolean(findOneByClass(legacy.tree, 'envd-diag-detail')) && shellChips(legacy.tree).length === 0, 'chips=' + shellChips(legacy.tree).length)
 
 // ───────────────────────────────── 8) 新构建 scopes:[](零会话) ──
 const emptyScopes = await mountPanel(payload({ syncStats: syncStats({}), commandTool: commandTool({ scopes: [] }) }))
@@ -716,7 +754,10 @@ check('8 零会话:头部 ok「接管中」(工具注册了,只是还没有会�
 check('8 零会话:提示「当前无会话」而不是「旧版构建」', subTexts(emptyScopes.tree).includes('当前无会话') && !allText(emptyScopes.tree).includes('旧版构建'), JSON.stringify(subTexts(emptyScopes.tree)))
 check('8 零会话:title 不含旧版说明', !String(emptyBadges[0].title || '').includes('旧版构建'))
 check('8 零会话:没有会话按钮也没有会话行', !cmdButton(emptyScopes.tree, '会话') && rowCount(emptyScopes.tree) === 0)
-check('8 零会话:.envd-shelltools 仍在(有 scopes 数组)且提示未识别宿主工具', Boolean(findOneByClass(emptyScopes.tree, 'envd-shelltools')) && subTexts(emptyScopes.tree).includes('未识别到宿主工具'), JSON.stringify(subTexts(emptyScopes.tree)))
+check('8 零会话:会话计数就是「当前无会话」(不拼分解)', subTexts(emptyScopes.tree).includes('当前无会话') && !subTexts(emptyScopes.tree).some((text) => text.includes('当前无会话 ·')), JSON.stringify(subTexts(emptyScopes.tree)))
+check('8 零会话:没有已识别工具 chip / 没有 .envd-shelltools 常显节点', shellChips(emptyScopes.tree).length === 0 && !findOneByClass(emptyScopes.tree, 'envd-shelltools'))
+await emptyScopes.clickNode(cmdButton(emptyScopes.tree, '详情'))
+check('8 零会话:展开详情后仍没有 chip(未识别到宿主工具)', Boolean(findOneByClass(emptyScopes.tree, 'envd-diag-detail')) && shellChips(emptyScopes.tree).length === 0 && shellToolsBlocks(emptyScopes.tree).length === 0, 'chips=' + shellChips(emptyScopes.tree).length + ' blocks=' + shellToolsBlocks(emptyScopes.tree).length)
 
 // ───────────────────────────────── 9) 全部会话都未接管(host):灰「未接管」,不挂黄 ──
 const HOST_ONLY = [
@@ -726,14 +767,15 @@ const HOST_ONLY = [
 const hostOnly = await mountPanel(payload({ syncStats: syncStats({}), commandTool: commandTool({ scopes: HOST_ONLY }) }))
 const hostOnlyBadges = headerBadges(hostOnly.tree)
 check('9 全未接管:头部灰「未接管」而不是黄色汇总', hostOnlyBadges.length === 1 && hasClass(hostOnlyBadges[0].cls, 'muted') && !hasClass(hostOnlyBadges[0].cls, 'warn') && hostOnlyBadges[0].text === '未接管', emoji(hostOnlyBadges))
-check('9 全未接管:状态 chip 也是未接管色', Boolean(findWithClasses(hostOnly.tree, 'envd-statuschip', 'muted')), JSON.stringify(findAllByClass(hostOnly.tree, 'envd-statuschip').map((el) => el.props.className)))
-check('9 全未接管:会话计数逐个终局说清', subTexts(hostOnly.tree).some((text) => text.includes(String(HOST_ONLY.length) + ' 个会话') && text.includes(String(HOST_ONLY.length) + ' 未接管')), JSON.stringify(subTexts(hostOnly.tree)))
+check('9 全未接管:整树 0 个状态胶囊,结论只在 badge', noStatusChip(hostOnly.tree) && hasClass(hostOnlyBadges[0].cls, 'muted'), JSON.stringify(statusChips(hostOnly.tree).map((el) => el.props.className)))
+check('9 全未接管:全是同一种终局 → 会话计数只写「2 个会话」', subTexts(hostOnly.tree).includes('2 个会话') && !subTexts(hostOnly.tree).some((text) => text.includes('2 个会话 ·')), JSON.stringify(subTexts(hostOnly.tree)))
 // 混合(部分 host + 部分 takeover)才挂黄色汇总 —— 这是「未接管」和「混合」的分界
 const MIXED_KIND = [HOST_ONLY[0], TAKEOVER]
 const mixedKinds = await mountPanel(payload({ syncStats: syncStats({}), commandTool: commandTool({ scopes: MIXED_KIND }) }))
 const mixedKindBadge = badgeOf(mixedKinds.tree)
 check('9 混合(host + takeover):挂黄色汇总且数字 === host 会话数', Boolean(mixedKindBadge) && hasClass(mixedKindBadge.cls, 'warn') && badgeNumber(mixedKindBadge) === 1, emoji(headerBadges(mixedKinds.tree)))
 check('9 混合(host + takeover):工具名两个都列(不谎报单一接管)', (() => { const node = findOneByClass(mixedKinds.tree, 'envd-tool'); const text = node ? textOf(node) : ''; return text.includes(HOST_ONLY[0].tool) && text.includes('envd_shell') })(), (() => { const node = findOneByClass(mixedKinds.tree, 'envd-tool'); return node ? textOf(node) : '(missing)' })())
+check('9 混合(host + takeover):终局种类 > 1 才拼分解', subTexts(mixedKinds.tree).some((text) => text.includes('2 个会话 · 1 直连 · 1 未接管')), JSON.stringify(subTexts(mixedKinds.tree)))
 
 // ───────────────────────────────── 9b) i18n / 文案细节(静态检查) ──
 // 源码里中文/英文词条的「自定义路径示例」应是 4 个反斜杠(渲染成 \\tools\\ 形式),中英各一处
@@ -745,14 +787,15 @@ check('9b 文案:新终局词条中英都有(工具并存 / 无命令工具 / �
 // ───────────────────────────────── 10) 诊断只有 warn 级:常显备注 + 详情可开关(不假死) ──
 const warnOnly = await mountPanel(payload({ syncStats: syncStats({ unrestrictable: ['bash'] }), commandTool: commandTool({ scopes: [TAKEOVER] }) }))
 const warnNotes = noteNodes(warnOnly.tree)
-check('10 warn 级诊断:常显 .envd-note.warn 点名挡不掉的名字', warnNotes.length === 1 && hasClass(noteClass(warnNotes[0]), 'warn') && textOf(warnNotes[0]).includes('挡不掉') && textOf(warnNotes[0]).includes('bash'), describeAll(warnNotes))
+check('10 warn 级诊断:常显 .envd-note.warn 点名被挡的工具(新文案「无法遮挡」)', warnNotes.length === 1 && hasClass(noteClass(warnNotes[0]), 'warn') && textOf(warnNotes[0]).includes('无法遮挡') && textOf(warnNotes[0]).includes('bash'), describeAll(warnNotes))
+check('10 warn 级诊断:不再出现旧文案「与 envd_shell 并存」', warnNotes.every((el) => !textOf(el).includes('并存') && !textOf(el).includes('挡不掉')), describeAll(warnNotes))
 check('10 warn 级诊断:没有 bad 级备注(不是硬故障)', warnNotes.every((el) => !hasClass(noteClass(el), 'bad')), describeAll(warnNotes))
 check('10 warn 级诊断:头部 badge 仍是 ok「接管中」(warn 不改终局)', Boolean(badgeOf(warnOnly.tree)) && hasClass(badgeOf(warnOnly.tree).cls, 'ok'), emoji(headerBadges(warnOnly.tree)))
 check('10 warn 级诊断:详情默认收起', !findOneByClass(warnOnly.tree, 'envd-diag-detail'))
 await warnOnly.clickNode(cmdButton(warnOnly.tree, '详情'))
 const warnDetail = findOneByClass(warnOnly.tree, 'envd-diag-detail')
 const warnDetailW = warnDetail ? findAllByClass(warnDetail, 'w') : []
-check('10 warn 级诊断:点开后有 warn 条目(.w)且文案含挡不掉的名字', warnDetailW.length === warnNotes.length && textOf(warnDetailW[0]).includes('挡不掉') && textOf(warnDetailW[0]).includes('bash'), describeAll(warnDetailW))
+check('10 warn 级诊断:点开后有 warn 条目(.w)且文案含被挡工具名', warnDetailW.length === warnNotes.length && textOf(warnDetailW[0]).includes('无法遮挡') && textOf(warnDetailW[0]).includes('bash'), describeAll(warnDetailW))
 check('10 warn 级诊断:详情里没有红条目(.e)', warnDetail ? findAllByClass(warnDetail, 'e').length === 0 : false)
 // 详情按钮文案固定是「详情」,靠 aria-expanded 表达开关状态
 await warnOnly.clickNode(cmdButton(warnOnly.tree, '详情'))
@@ -760,7 +803,12 @@ check('10 warn 级诊断:再点「详情」真的收起(不假死)', !findOneByC
 check('10 warn 级诊断:收起后 aria-expanded=false', Boolean(cmdButton(warnOnly.tree, '详情')) && cmdButton(warnOnly.tree, '详情').props['aria-expanded'] === false, cmdButton(warnOnly.tree, '详情') ? JSON.stringify(cmdButton(warnOnly.tree, '详情').props['aria-expanded']) : '(missing)')
 await warnOnly.clickNode(cmdButton(warnOnly.tree, '详情'))
 check('10 warn 级诊断:第三次点击又能展开', Boolean(findOneByClass(warnOnly.tree, 'envd-diag-detail')))
-check('10 warn 级诊断:badge title 带上备注文案', Boolean(badgeOf(warnOnly.tree)) && String(badgeOf(warnOnly.tree).title || '').includes('挡不掉'), 'title=' + JSON.stringify(badgeOf(warnOnly.tree) && badgeOf(warnOnly.tree).title))
+check('10 warn 级诊断:badge title 带上备注文案', Boolean(badgeOf(warnOnly.tree)) && String(badgeOf(warnOnly.tree).title || '').includes('无法遮挡'), 'title=' + JSON.stringify(badgeOf(warnOnly.tree) && badgeOf(warnOnly.tree).title))
+// 让路态是另一句文案(真让路,不是并存):工具名 + 「已让路」
+const yieldedNote = await mountPanel(payload({ syncStats: syncStats({ unrestrictable: ['ops_bash'] }), commandTool: commandTool({ scopes: [YIELD] }) }))
+const yieldedNotes = noteNodes(yieldedNote.tree)
+check('10 warn 级诊断:真让路时备注说「已让路」并点名工具', yieldedNotes.length === 1 && hasClass(noteClass(yieldedNotes[0]), 'warn') && textOf(yieldedNotes[0]).includes('ops_bash') && textOf(yieldedNotes[0]).includes('已让路'), describeAll(yieldedNotes))
+check('10 warn 级诊断:让路态 badge 是 warn「让路」', Boolean(badgeOf(yieldedNote.tree)) && hasClass(badgeOf(yieldedNote.tree).cls, 'warn') && badgeOf(yieldedNote.tree).text === '让路', emoji(headerBadges(yieldedNote.tree)))
 
 // ───────────────────────────────── 11) reuse(由其它插件提供) ──
 const reuse = await mountPanel(payload({ commandTool: commandTool({ reuse: true, takeover: false, name: 'other_shell' }) }))
@@ -784,8 +832,13 @@ check('12 denies:切了 deny 就没有会话按钮(零会话)', !cmdButton(denie
 const sandboxed = await mountPanel(payload({ commandTool: commandTool({ visible: false, sandbox: true, sandboxConfined: true }) }))
 const sandboxedBadge = badgeOf(sandboxed.tree)
 check('12 沙箱:可见=false 时挂灰「沙箱」而不是红色不可见', Boolean(sandboxedBadge) && hasClass(sandboxedBadge.cls, 'muted') && !hasClass(sandboxedBadge.cls, 'bad') && sandboxedBadge.text === '沙箱', emoji(headerBadges(sandboxed.tree)))
-check('12 沙箱:状态 chip 也是沙箱色', Boolean(findWithClasses(sandboxed.tree, 'envd-statuschip', 'muted')))
+check('12 沙箱:整树 0 个状态胶囊,灰色结论只在 badge', noStatusChip(sandboxed.tree) && hasClass(sandboxedBadge.cls, 'muted'), JSON.stringify(statusChips(sandboxed.tree).map((el) => el.props.className)))
 check('12 沙箱:没有 bad 级备注(围栏是设计内终局)', noteNodes(sandboxed.tree).every((el) => !hasClass(noteClass(el), 'bad')), describeAll(noteNodes(sandboxed.tree)))
+// 工具名缺失时 .envd-tool 整个节点不渲染(不写「没探测到命令工具」占位)
+const noToolName = await mountPanel(payload({ commandTool: commandTool({ name: '', visible: false, sandbox: false, denies: [] }) }))
+check('12 无工具名:命令行不渲染 .envd-tool 节点(不是显示占位)', !findOneByClass(noToolName.tree, 'envd-tool'), 'tool=' + describeAll(findAllByClass(noToolName.tree, 'envd-tool')))
+check('12 无工具名:broken 终局给 no-deny 的 bad 备注(不编被挡工具)', (() => { const bad = noteNodes(noToolName.tree).filter((el) => hasClass(noteClass(el), 'bad')); return bad.length === 1 && textOf(bad[0]).includes('envd_shell') })() , describeAll(noteNodes(noToolName.tree)))
+check('12 无工具名:badge 仍是 bad「无命令工具」', Boolean(badgeOf(noToolName.tree)) && hasClass(badgeOf(noToolName.tree).cls, 'bad') && badgeOf(noToolName.tree).text === '无命令工具', emoji(headerBadges(noToolName.tree)))
 
 // ───────────────────────────────── 13) 沙箱策略未知:常显 muted 备注(新旧 API 同一条) ──
 const policyUnknown = await mountPanel(
@@ -817,9 +870,11 @@ const policyScope = await mountPanel(
   }),
 )
 check('13 policyKnown=false:逐会话默认收起(策略未知不是异常,不抢地方)', rowCount(policyScope.tree) === 0)
+check('13 policyKnown=false:终局是 muted「沙箱」(策略未知按有围栏处理)', Boolean(badgeOf(policyScope.tree)) && hasClass(badgeOf(policyScope.tree).cls, 'muted') && badgeOf(policyScope.tree).text === '沙箱', emoji(headerBadges(policyScope.tree)))
+check('13 policyKnown=false:单会话计数只写「1 个会话」', subTexts(policyScope.tree).includes('1 个会话') && !subTexts(policyScope.tree).some((text) => text.includes('1 个会话 ·')), JSON.stringify(subTexts(policyScope.tree)))
 await policyScope.clickNode(cmdButton(policyScope.tree, '会话'))
 const policyRow = findAllByClass(policyScope.tree, 'envd-srow')[0]
-check('13 policyKnown=false:逐会话 .envd-sub 里出现「策略未知」', Boolean(policyRow) && textOf(findOneByClass(policyRow, 'envd-sub') || '').includes('策略未知'), policyRow ? describe(policyRow) : '(missing)')
+check('13 policyKnown=false:逐会话用 .envd-skind「沙箱」表达(不再拼 .envd-sub)', Boolean(policyRow) && textOf(findOneByClass(policyRow, 'envd-skind') || '') === '沙箱' && findAllByClass(policyRow, 'envd-sub').length === 0, policyRow ? describe(policyRow) : '(missing)')
 check('13 policyKnown=false:该行点不是 bad(策略未知不是异常)', Boolean(policyRow) && !classTokens(policyRow).includes('bad') && !findOneByClass(policyRow, 'envd-sdot.bad'), policyRow ? String((findOneByClass(policyRow, 'envd-sdot') || {}).props && findOneByClass(policyRow, 'envd-sdot').props.className) : '(missing)')
 
 // ───────────────────────────────── 14) 版本管理器行 ──
@@ -853,7 +908,7 @@ const enText = visibleText(enPanel.tree) + '\n' + titleAttrs.join('\n')
 check('16 en:渲染文本与 title 里都没有中文', !/[\u4e00-\u9fa5]/.test(enText), /[\u4e00-\u9fa5]+/.exec(enText) ? 'leak=' + /[\u4e00-\u9fa5]+/.exec(enText)[0] : '')
 check('16 en:词典里没有中文', !/[\u4e00-\u9fa5]/.test(EN_BLOCK), /[\u4e00-\u9fa5]+/.exec(EN_BLOCK) ? 'leak=' + /[\u4e00-\u9fa5]+/.exec(EN_BLOCK)[0] : '')
 check('16 en:badge / 卡片仍然渲染', headerBadges(enPanel.tree).length === 1 && Boolean(findOneByClass(enPanel.tree, 'envd-card')))
-check('16 en:状态句是英文(不再漏中文终局词)', textOf(findOneByClass(enPanel.tree, 'envd-statuschip') || '') === MIXED_NON_TAKEOVER.length + ' sessions use the host tool', textOf(findOneByClass(enPanel.tree, 'envd-statuschip') || ''))
+check('16 en:状态句只在 badge 且是英文(.envd-statuschip 全树 0 个)', noStatusChip(enPanel.tree) && String((badgeOf(enPanel.tree) || {}).text || '') === MIXED_NON_TAKEOVER.length + ' sessions use the host tool', 'badge=' + JSON.stringify((badgeOf(enPanel.tree) || {}).text) + ' chips=' + statusChips(enPanel.tree).length)
 check('16 en:健康行是英文', textOf(findWithClasses(enPanel.tree, 'envd-flag', 'ok') || '').includes('OK'), describeAll(findAllByClass(enPanel.tree, 'envd-flag')))
 
 // ───────────────────────────────── 17) 长名字溢出防护(结构 + CSS 规则) ──
@@ -867,14 +922,17 @@ const longPanel = await mountPanel(
     commandTool: commandTool({ scopes: [LONG_SCOPE] }),
   }),
 )
+check('17 长名字:默认 0 个已识别工具 chip(在「详情」里)', shellChips(longPanel.tree).length === 0, 'chips=' + shellChips(longPanel.tree).length)
+await longPanel.clickNode(cmdButton(longPanel.tree, '详情'))
 const longChip = shellChips(longPanel.tree)[0]
-check('17 长名字:chip 的 title 保留完整名字', Boolean(longChip && String(longChip.props.title || '').includes(LONG_NAME)), longChip ? String(longChip.props.title) : '(missing)')
+check('17 长名字:展开详情后 chip 的 title 保留完整名字', Boolean(longChip && String(longChip.props.title || '').includes(LONG_NAME)), longChip ? String(longChip.props.title) : '(missing)')
 check('17 长名字:headline 保留完整终端名(靠 CSS 省略而不是截断数据)', textOf(findOneByClass(longPanel.tree, 'envd-headline') || '') === LONG_SHELL_LABEL + ' v7.4.0', textOf(findOneByClass(longPanel.tree, 'envd-headline') || '(missing)'))
 check('17 长名字:.envd-tool 用 title 保留完整工具名', String((findOneByClass(longPanel.tree, 'envd-tool') || {}).props && findOneByClass(longPanel.tree, 'envd-tool').props.title || '').includes(LONG_NAME), String((findOneByClass(longPanel.tree, 'envd-tool') || {}).props && findOneByClass(longPanel.tree, 'envd-tool').props.title))
 await longPanel.clickNode(cmdButton(longPanel.tree, '会话'))
 const longSrow = findAllByClass(longPanel.tree, 'envd-srow')[0]
-check('17 长名字:会话 id 截成 8 位、完整值不塞进一行', Boolean(findOneByClass(longSrow || null, 'envd-sid')) && textOf(findOneByClass(longSrow, 'envd-sid')) === String(LONG_SCOPE.id).slice(0, 8), longSrow ? describe(longSrow) : '(missing)')
-check('17 长名字:.envd-stool 的 title 保留完整工具名', Boolean(findOneByClass(longSrow || null, 'envd-stool')) && String(findOneByClass(longSrow, 'envd-stool').props.title || '') === LONG_NAME, findOneByClass(longSrow || null, 'envd-stool') ? String(findOneByClass(longSrow, 'envd-stool').props.title) : '(missing)')
+check('17 长名字:会话 id 截成 8 位、完整值不塞进一行', Boolean(findOneByClass(longSrow || null, 'envd-sid')) && textOf(findOneByClass(longSrow, 'envd-sid')) === shortIdOf(LONG_SCOPE.id), longSrow ? describe(longSrow) : '(missing)')
+check('17 长名字:完整 id 放进 .envd-srow.title', rowTitles(longPanel.tree).some((title) => title.includes(LONG_SCOPE.id)), JSON.stringify(rowTitles(longPanel.tree)))
+check('17 长名字:.envd-stool 直接放完整工具名(靠 CSS 省略,没有 title)', Boolean(findOneByClass(longSrow || null, 'envd-stool')) && textOf(findOneByClass(longSrow, 'envd-stool')) === LONG_NAME, findOneByClass(longSrow || null, 'envd-stool') ? textOf(findOneByClass(longSrow, 'envd-stool')) : '(missing)')
 const css = cssText(longPanel.tree)
 check('17 溢出 CSS:headline 用 ellipsis', hasRule(css, '.envd-headline', 'text-overflow:ellipsis'))
 check('17 溢出 CSS:错误框允许 anywhere 换行', hasRule(css, '.envd-err', 'overflow-wrap:anywhere'))
@@ -1024,7 +1082,8 @@ check('22 无数据:.envd-copy-note 状态区仍在(复制反馈有地方放)', 
 
 // ───────────────────────────────── 23) 真实会话 id 形态(session-<uuid>)──
 // 真机 id 全是 `session-<uuid>`:直接 slice(0,8) 会让每一行都显示 "session-"。
-// 现在先去掉固定前缀再截 8 位,完整 id 进 title;host+被围栏的会话行显示「沙箱」而不是「未接管」。
+// 现在先去掉固定前缀再截 8 位,完整 id 进 .envd-srow.title(行内 .envd-sid 无 title);
+// host+被围栏的会话行显示「沙箱」而不是「未接管」。
 {
   const realScopes = [
     scopeFact({ id: 'session-9f1c2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f', kind: 'takeover', tool: 'envd_shell', hostTool: null, hostTools: [], confined: false }),
@@ -1036,10 +1095,14 @@ check('22 无数据:.envd-copy-note 状态区仍在(复制反馈有地方放)', 
   const sids = findAllByClass(real.tree, 'envd-sid').map(textOf)
   const kinds = findAllByClass(real.tree, 'envd-skind').map(textOf)
   check('23 会话 id:去掉 session- 前缀后前 8 位(不是 8 个 "session-")', sids.every((t) => !t.startsWith('session') && t.length === 8 && /^[0-9a-f]{8}$/.test(t)), JSON.stringify(sids))
-  check('23 会话 id:title 保留完整 id', findAllByClass(real.tree, 'envd-sid').every((el) => String(el.props.title || '').startsWith('session-')), JSON.stringify(findAllByClass(real.tree, 'envd-sid').map((el) => el.props.title)))
+  check('23 会话 id:完整 id 在 .envd-srow.title 里(行内 .envd-sid 不再挂 title)', (() => {
+    const titles = rowTitles(real.tree)
+    return realScopes.every((sc) => titles.some((title) => title.includes(sc.id))) && findAllByClass(real.tree, 'envd-sid').every((el) => el.props.title === undefined)
+  })(), 'titles=' + JSON.stringify(rowTitles(real.tree)) + ' sidTitles=' + JSON.stringify(findAllByClass(real.tree, 'envd-sid').map((el) => el.props.title)))
+  check('23 会话 id:两行分别展示各自短 id(不合并成一行)', rows.length === 2 && sids.length === 2 && sids[0] !== sids[1], JSON.stringify(sids))
   check('23 会话行:host + 确定被围栏的会话显示「沙箱」而不是「未接管」', kinds.includes('沙箱') && kinds.includes('直连'), JSON.stringify(kinds))
   check('23 两行 id 不重复(逐会话表能分清谁是谁)', new Set(sids).size === 2, JSON.stringify(sids))
-  check('23 会话行数 = 载荷数', rows.length === 2, 'rows=' + rows.length)
+  check('23 会话行数 = 载荷数(两种终局不合并)', rows.length === 2 && realScopes.length === 2, 'rows=' + rows.length)
 }
 
 console.log(failed === 0 ? '\nall panel-render cases passed (' + checked + ' checks)' : '\n' + failed + '/' + checked + ' check(s) failed')

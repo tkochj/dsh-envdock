@@ -90,7 +90,7 @@ window.__ModuleLoader__.load({
         noteBroken: 'envd_shell 不可见，已遮挡 {names}',
         noteBrokenNoDeny: 'envd_shell 不可见，而且没有任何遮挡生效；重启 dsh 或重装 EnvDock 试试',
         noteUnrestrictable: '宿主工具 {names} 挡不掉，已让路',
-        noteConflict: '宿主工具 {names} 挡不掉，与 envd_shell 并存',
+        noteConflict: '宿主工具 {names} 在会话层注册，无法遮挡',
         noteUnrestrictableHint: '这些工具注册在会话自己的层里，restrict 只过滤继承面；EnvDock 收起 envd_shell，保证一个会话只有一个命令工具。想改用 EnvDock 的终端接管，请在 dsh-ops 的设置里关掉它的 Publish Bash',
         noteBlocked: '{n} 个会话看不到 envd_shell，未遮挡宿主工具',
         noteLostDenies: '无主遮挡：{names} 已被挡住但撤销句柄丢失，重启 dsh 才能恢复',
@@ -226,7 +226,7 @@ window.__ModuleLoader__.load({
         noteBroken: 'envd_shell is invisible; hid {names}',
         noteBrokenNoDeny: 'envd_shell is invisible and no restriction took effect; restart dsh or reinstall EnvDock',
         noteUnrestrictable: 'Cannot hide host {names}; yielding',
-        noteConflict: 'Cannot hide host {names}; coexists with envd_shell',
+        noteConflict: 'Host {names} is registered in the session layer; cannot be hidden',
         noteUnrestrictableHint: 'These tools live in the session own layer, which restrict cannot filter; EnvDock hides envd_shell so each session keeps exactly one command tool. To use the EnvDock terminal instead, turn off Publish Bash in the dsh-ops settings',
         noteBlocked: '{n} sessions cannot see envd_shell; host tools left visible',
         noteLostDenies: 'Orphan restriction: {names} is hidden but the disposer was lost; restart dsh to restore',
@@ -380,6 +380,7 @@ window.__ModuleLoader__.load({
 
 /* 已识别宿主工具 */
 .envd-shelltools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.envd-diag-shelltools{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
 .envd-shellchip{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-2);font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .envd-shellchip .envd-mono{color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
 .envd-learned{color:var(--dsw-alias-brand-primary);font-weight:700}
@@ -932,8 +933,11 @@ window.__ModuleLoader__.load({
         if (kindCount.yield) sessionBits.push(fmt(t.nYield, { n: kindCount.yield }))
         if (kindCount['sandbox-host']) sessionBits.push(fmt(t.nSandbox, { n: kindCount['sandbox-host'] }))
       }
+      // 分解只在「终局不止一种」时才加:3 个会话都是直连,写「3 个会话」就够了,
+      // 「3 个会话 · 3 直连」是同一句话说两遍。
+      const distinctKinds = new Set(scopes.map((sc) => String(sc.kind || '')))
       const sessionsText = hasScopes
-        ? [fmt(t.nSessions, { n: scopes.length })].concat(sessionBits).filter(Boolean).join(' · ')
+        ? [fmt(t.nSessions, { n: scopes.length })].concat(distinctKinds.size > 1 ? sessionBits : []).filter(Boolean).join(' · ')
         : hasScopeField
           ? t.sessionsEmpty
           : ''
@@ -1105,50 +1109,48 @@ window.__ModuleLoader__.load({
       // ── 逐会话:异常一定展开;正常默认收起 ──
       const scopeRows = scopes.length ? (badScopes.length ? badScopes.concat(scopes.filter((sc) => !isBadScope(sc, t))) : scopes) : []
       const showSessions = hasScopes && (sessionsUser === undefined ? badScopes.length > 0 : sessionsUser)
-      const sessionList = showSessions
+      // 同终局 + 同原因 + 同工具的会话合并成一行(多 id 并列):
+      // 3 个会话都「直连 + 宿主 ops_bash 仍可见」时,逐行重复同一句话只是噪音。
+      const sessionGroups = []
+      if (showSessions) {
+        const byKey = new Map()
+        for (const sc of scopeRows) {
+          const reasons = scopeReasons(sc, t)
+          const bad = reasons.length > 0 || sc.anomaly === true
+          const confinedTone = sc.confined === true ? 'y' : sc.confined === false ? 'n' : '?'
+          const key = (bad ? 'bad|' : 'ok|') + String(sc.kind || '') + '|' + String(sc.tool || '') + '|' + confinedTone + '|' + reasons.join('·')
+          if (!byKey.has(key)) byKey.set(key, { bad, kind: sc.kind, tool: sc.tool, confined: sc.confined, reasons, ids: [], hidden: [] })
+          const group = byKey.get(key)
+          group.ids.push(String(sc.id || '?'))
+          if (Array.isArray(sc.hidden)) for (const name of sc.hidden) if (name) group.hidden.push(String(name))
+        }
+        sessionGroups.push(...byKey.values())
+      }
+      const sessionList = sessionGroups.length
         ? h(
             'div',
             { className: 'envd-sessions' },
-            scopeRows.map((sc, index) => {
-              const reasons = scopeReasons(sc, t)
-              const bad = reasons.length > 0 || sc.anomaly === true
-              const extras = []
-              if (Array.isArray(sc.hidden) && sc.hidden.length) extras.push(fmt(t.scopeHidden, { names: sc.hidden.filter(Boolean).map(String).join(', ') }))
-              if (sc.confined === true) extras.push(t.scopeConfined)
-              else if (sc.confined === null || sc.policyKnown === false) extras.push(t.scopePolicyUnknown)
+            sessionGroups.map((group, index) => {
+              const shownIds = group.ids.slice(0, 4).map(shortId)
+              const more = group.ids.length - shownIds.length
+              const idsText = shownIds.join(' · ') + (more > 0 ? ' +' + more : '')
+              const title = [group.ids.join('\n'), group.hidden.length ? fmt(t.scopeHidden, { names: group.hidden.join(', ') }) : ''].filter(Boolean).join('\n')
               return h(
                 'div',
-                { className: 'envd-srow' + (bad ? ' bad' : ''), key: 'sc-' + String(sc.id || index), 'data-kind': String(sc.kind || 'unknown') },
-                h('span', { className: 'envd-sdot ' + scopeTone(sc, t) }),
-                h('span', { className: 'envd-sid', title: String(sc.id || '') }, shortId(sc.id)),
-                h('span', { className: 'envd-skind', title: String(sc.id || '') }, scopeKindText(sc, t)),
-                h('span', { className: 'envd-stool', title: sc.tool ? String(sc.tool) : t.sessionNoTool }, sc.tool ? String(sc.tool) : t.sessionNoTool),
-                extras.length ? h('span', { className: 'envd-sub' }, extras.join(' · ')) : null,
-                reasons.length ? h('span', { className: 'envd-sreason', title: reasons.join(' · ') }, reasons.join(' · ')) : null,
+                { className: 'envd-srow' + (group.bad ? ' bad' : ''), key: 'sg-' + index, 'data-kind': String(group.kind || 'unknown'), title },
+                h('span', { className: 'envd-sdot ' + (group.bad ? 'bad' : group.kind === 'takeover' ? 'ok' : group.kind === 'host' ? 'idle' : 'warn') }),
+                h('span', { className: 'envd-sid' }, idsText),
+                h('span', { className: 'envd-skind' }, scopeKindText({ kind: group.kind, confined: group.confined }, t)),
+                h('span', { className: 'envd-stool' }, group.tool ? String(group.tool) : t.sessionNoTool),
+                group.reasons.length ? h('span', { className: 'envd-sreason' }, group.reasons.join(' · ')) : null,
               )
             }),
           )
         : null
 
       // ── 已识别宿主工具:学习的结果,一行说完 ──
-      const recognized = hasScopeField || runtimeShellTools.length
-        ? h(
-            'div',
-            { className: 'envd-shelltools' },
-            h('span', { className: 'envd-sub' }, t.recognized),
-            runtimeShellTools.length
-              ? runtimeShellTools.map((item) =>
-                  h(
-                    'span',
-                    { className: 'envd-shellchip', key: item.name, title: item.name + (item.family ? ' · ' + item.family : '') + (item.learned ? ' · ' + t.learnedTag : '') },
-                    h('span', { className: 'envd-mono' }, item.name),
-                    item.family ? h('span', {}, ' · ' + item.family) : null,
-                    item.learned ? h('span', { className: 'envd-learned', title: t.learnedTag }, ' ✦') : null,
-                  ),
-                )
-              : h('span', { className: 'envd-sub' }, t.recognizedNone),
-          )
-        : null
+      // 学习结果只在「详情」里展示:常显区已经有工具名与备注,再摆一行 chips 就是重复。
+      const recognizedTools = runtimeShellTools
 
       const diagBlock = diagOpen
         ? h(
@@ -1156,6 +1158,22 @@ window.__ModuleLoader__.load({
             { className: 'envd-diag-detail' },
             h('span', { key: 'dgc', title: diagTitleText }, diagTitleText || diagSummary),
             ...notes.map((note, i) => h('span', { key: 'dg' + i, className: note.tone === 'bad' ? 'e' : 'w' }, note.text)),
+            recognizedTools.length
+              ? h(
+                  'span',
+                  { key: 'dgr', className: 'envd-diag-shelltools' },
+                  t.recognized + ': ',
+                  recognizedTools.map((item) =>
+                    h(
+                      'span',
+                      { key: 'rs' + item.name, className: 'envd-shellchip', title: item.name + (item.family ? ' · ' + item.family : '') + (item.learned ? ' · ' + t.learnedTag : '') },
+                      h('span', { className: 'envd-mono' }, item.name),
+                      item.family ? ' · ' + item.family : '',
+                      item.learned ? ' ✦' : '',
+                    ),
+                  ),
+                )
+              : null,
           )
         : null
 
@@ -1395,7 +1413,6 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'envd-row' },
               h('span', { className: 'envd-tag' }, t.command),
-              h('span', { className: 'envd-statuschip ' + statusTone, title: diagTitleText || undefined }, h('span', { className: 'dot' }), statusText),
               toolText ? h('span', { className: 'envd-tool', title: toolText }, toolText) : null,
               sessionsText ? h('span', { className: 'envd-sub' }, sessionsText) : null,
               h('span', { className: 'envd-grow' }),
@@ -1419,7 +1436,6 @@ window.__ModuleLoader__.load({
               : null,
             settingsBlock,
             sessionList,
-            recognized,
             diagBlock,
           ),
         )
