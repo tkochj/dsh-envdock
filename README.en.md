@@ -44,11 +44,11 @@ On Windows it is common to have several Node / Python / Git installations side b
 
 **Requirements:** Windows and an installed DeepSeek Harness (dsh). Plugins are installed per profile; the commands below use `web`.
 
-> **The npm build may lag behind this repository.** For the newest features (the one-screen panel, the additive command tool, brief injection), install from a local directory / Git as described below; the npm package follows releases, and the repository's `package.json` is the source of truth for the current version.
+> **npm's `dsh-envdock@latest` is the published release of this repository (currently 0.2.0) — just install it.** The repository's `main` may be ahead of the latest release (work in progress); use the local directory / Git options below if you want those commits.
 >
 > **Versioning:** the repository used 0.5 / 0.6 build numbers during development; the public release version is **0.2.0** (npm goes from 0.1.0 to 0.2.0). The mapping is in CHANGELOG.
 
-### Option 1 — npm (may lag behind)
+### Option 1 — npm (recommended)
 
 ```powershell
 dsh plugin --profile web add dsh-envdock
@@ -56,7 +56,7 @@ dsh plugin --profile web add dsh-envdock
 
 Enable EnvDock in the plugin page if needed, then restart dsh. Replace `web` with `tui`, `headless`, etc. for other profiles.
 
-### Option 2 — Web plugin page (local directory / Git, recommended)
+### Option 2 — Web plugin page (local directory / Git)
 
 1. Open **Plugins** in the dsh sidebar.
 2. Choose install and provide the source:
@@ -64,7 +64,7 @@ Enable EnvDock in the plugin page if needed, then restart dsh. Replace `web` wit
    - or a Git URL
 3. Make sure **EnvDock** is enabled, then restart dsh.
 
-### Option 3 — Command line (local directory, recommended)
+### Option 3 — Command line (local directory)
 
 ```powershell
 # Install into the web profile; link: takes the plugin directory

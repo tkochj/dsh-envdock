@@ -46,11 +46,11 @@ Windows 上做开发，机器里常常并排放着好几套 Node / Python / Git�
 
 **前置条件**：Windows + 已安装 DeepSeek Harness（dsh）。插件以当前 profile 为单位安装，下面以 `web` 为例。
 
-> **npm 上的版本可能滞后于本仓库**。想用最新的功能（一屏面板、命令工具增补、环境简报注入），请用下面的本地目录 / Git 方式安装；npm 上的包跟随发布更新，安装前可以先看仓库 `package.json` 里的版本号。
+> **npm 上的 `dsh-envdock@latest` 就是本仓库的发布版本（当前 0.2.0），直接装即可。** 仓库 `main` 可能领先于最近一次发布（开发中的改动），想用那一版再用下面的本地目录 / Git 方式安装。
 >
 > **版本对应关系**：仓库开发期用 0.5 / 0.6 编号，对外的发布版本是 **0.2.0**（npm 从 0.1.0 升级到 0.2.0）；版本对应关系见 CHANGELOG。
 
-### 方式一：从 npm 安装
+### 方式一：从 npm 安装（推荐）
 
 ```powershell
 dsh plugin --profile web add dsh-envdock
@@ -58,7 +58,7 @@ dsh plugin --profile web add dsh-envdock
 
 安装后在插件页确认 EnvDock 已启用，然后重启 dsh。其他 profile 把 `web` 换成对应名字。
 
-### 方式二：在 dsh 插件页安装（本地目录 / Git，推荐）
+### 方式二：在 dsh 插件页安装（本地目录 / Git）
 
 1. 打开 dsh 侧边栏的 **插件** 页。
 2. 选择「安装」，填入插件来源，二选一：
@@ -66,7 +66,7 @@ dsh plugin --profile web add dsh-envdock
    - Git 地址：本仓库的 git URL
 3. 确认 **EnvDock** 处于开启状态，然后重启 dsh。
 
-### 方式三：命令行（本地目录，推荐）
+### 方式三：命令行（本地目录）
 
 ```powershell
 # 把插件装进 web profile；link: 后面是插件目录的绝对路径
