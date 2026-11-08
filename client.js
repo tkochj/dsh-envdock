@@ -15,15 +15,15 @@
  *   3. 装了哪些工具链(每个工具一行,点路径即复制);
  *   4. 有没有问题(没问题只说一句「通过」,有问题一行摘要可展开)。
  *
- * 0.6「两族」:一个会话只该用一套命令语法。
- *   · 终端 chip 带语法族短标(bash / pwsh / cmd / wsl);命令行用 .envd-fam 标出
- *     「bash 族 / PowerShell 族」,并写明是自动选族还是手动选的;
- *   · bash 族会话里 EnvDock 会遮挡宿主的 PowerShell 族内置命令工具(pwsh / powershell),
- *     面板如实说「已隐藏: pwsh」;详情里把它们划掉而不是假装还在;
- *   · 两族同时可见(手动选 PowerShell 但会话里有 bash 族工具 / 关掉开关)时给一条警告:
- *     各按自己的语法写命令,不要混写;
- *   · 手动选的族没有终端也没有该族宿主工具时宿主回退 auto:面板警告「已回退自动选族」,
- *     徽标只显示生效族(此时 familySource 已经是 auto,不写「手动」)。
+ * 0.6.1「首屏收敏」:陌生人打开面板 5 秒要看懂三件事 —— 这是什么插件 / AI 现在用什么
+ * 命令环境 / 去哪里改。做法是「一句人话 + 四块常显 + 高级收进折叠」:
+ *   · 头部下一行常显一句用途说明(.envd-subtitle);badge 只有白话三态:就绪 / 受限 / 只展示;
+ *   · 终端 chip 不再挂语法族小标(「pwsh」挂在每个 PowerShell 终端上既重复又误导),
+ *     语法只说一次:命令行 .envd-fam 写「bash 语法 / PowerShell 语法」,手动选才带「· 手动」;
+ *   · 备注全部改人话(已隐藏 / 受沙箱限制 / 别混用 / 已自动改回),仍最多两行;
+ *   · 底部 footer 只留复制反馈 + 环境脚注;注入开关放在「环境简报」区那一行,
+ *     「隐藏另一族命令工具 / 允许局域网访问」收进默认折叠的「高级设置」;
+ *   · 拿不到数据(403)时简报区不存在,allowLan 开关仍留在 footer(唯一入口)。
  *
  * 三条硬规则:
  *   · 常显区不放计数:计数只在「详情」里出现,常显区只留一句人话;
@@ -51,13 +51,13 @@ window.__ModuleLoader__.load({
         retry: '重试',
         // ── 头部 / 命令工具 ──
         terminal: '终端',
-        autoShell: '自动（按会话选族）',
-        autoShellHint: '按会话里看得见的命令工具选族：bash 族会话用 Git Bash，PowerShell 族会话用 pwsh',
-        // 语法族(0.6):徽标写全称,终端 chip 上的短标只用名字(bash / pwsh / cmd / wsl)
-        famBash: 'bash 族',
-        famPwsh: 'PowerShell 族',
+        subtitle: '告诉 AI 你的工具装在哪、用哪个版本、命令该写哪套语法。',
+        autoShell: '自动',
+        autoShellHint: '按会话自动选语法族（推荐）',
+        // 两套语法:首屏只说「语法」,「族」这种内部说法不进首屏
+        famBash: 'bash 语法',
+        famPwsh: 'PowerShell 语法',
         famManual: '手动',
-        famAuto: '自动',
         customShell: '自定义终端',
         customHint: '可执行文件绝对路径，如 C:\\\\tools\\\\rg.exe',
         customShellArgs: '终端参数模板',
@@ -72,42 +72,42 @@ window.__ModuleLoader__.load({
         dismiss: '知道了',
         actionFailed: '操作失败',
         command: '命令',
-        // badge 三态:整个面板唯一的状态结论
-        statusAdditive: '增补就绪',
+        // badge 三态:整个面板唯一的状态结论(白话,不带族)
+        statusAdditive: '就绪',
         statusDisplayOnly: '只展示',
-        statusConfined: '围栏',
+        statusConfined: '受限',
         // 命令行
-        hostPrefix: '宿主',
-        hostToolsNone: '未识别到宿主命令工具',
-        noteLegacyApi: '接口是旧版构建，重启 dsh 后可显示命令工具信息',
-        cmdHintEnvDock: 'EnvDock 增补的命令工具：用你的终端与 PATH',
-        cmdHintHost: '宿主命令工具：环境与 PATH 由宿主决定',
-        // 未注册原因(skipReason)
-        skipNoFamilyTerminal: '未找到可用终端（bash 族需要 Git Bash，PowerShell 族需要 pwsh）',
-        skipNoUnconfined: '没有无围栏会话，暂不注册',
-        skipTaken: '与其它插件同名，未注册',
-        skipError: '注册失败，未注册',
-        // 备注:遮挡/混用 / 未注册原因 / 围栏 / 环境差异(最多两行)
-        noteHiddenPwsh: 'PowerShell 族宿主工具已隐藏：{names}',
-        noteNotBlocked: '另一族命令工具未隐藏',
-        noteNoBashHost: '本会话看不到 bash 族宿主工具，PowerShell 族未遮挡',
-        noteFamilyFallback: '手动选择的族不可用，已回退自动选族（该族既没有终端，也没有按该族发布的宿主工具）',
-        noteMixed: '两族同时可见，各按自己的语法写命令，不要混写',
-        noteConfined: '{n} 个会话被围栏：envd_shell 会拒绝，请用宿主工具',
-        envHint: '宿主工具的环境/PATH 未必等于你的；需要你的终端时用 envd_shell',
+        hostPrefix: '其它：',
+        hostToolsNone: '没有其它命令工具',
+        noteLegacyApi: '界面拿到的还是旧版数据，重启 dsh 后就能看到命令环境',
+        cmdHintEnvDock: 'EnvDock 提供的命令工具：用你的终端和 PATH',
+        cmdHintHost: '其它命令工具：由 dsh 提供，环境与 PATH 跟你的终端可能不一样',
+        // 未提供命令工具的原因(skipReason)
+        skipNoFamilyTerminal: '没找到可用的终端（bash 语法需要 Git Bash，PowerShell 语法需要 pwsh）',
+        skipNoUnconfined: '没有不受沙箱限制的会话，暂时不会提供 envd_shell',
+        skipTaken: '和别的插件重名了，暂时不提供 envd_shell',
+        skipError: '没能提供命令工具（注册失败）',
+        // 备注:隐藏/混用 / 未提供原因 / 沙箱限制 / 环境差异(最多两行)
+        noteHiddenPwsh: '已隐藏 {names}（避免两套语法混用）',
+        noteNotBlocked: 'PowerShell 的命令工具没有隐藏（开关已关）',
+        noteNoBashHost: '这个会话没有 bash 命令工具，未隐藏 PowerShell 工具',
+        noteFamilyFallback: '手动选的语法不可用（没有对应终端，也没有对应命令工具），已自动改回按会话选择',
+        noteMixed: '手动选了 PowerShell 语法：PowerShell 与 bash 工具都在，各按自己的语法写，别混用',
+        noteConfined: '{n} 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令，请改用其它命令工具',
+        envHint: '其它命令工具的环境和 PATH 跟你的终端可能不一样；要用你自己的工具时用 envd_shell',
         // 详情
         diag: '详情',
-        hostTools: '宿主工具',
+        hostTools: '命令工具',
         learnedTag: '自动识别',
         noteLastError: '最近错误',
         dScan: '扫描 {n} 次',
         dLastScan: '最近 {n}ms',
         dRegisterTries: '注册尝试 {n}',
-        dRestrictApplied: '遮挡 {n} 次',
+        dRestrictApplied: '隐藏 {n} 次',
         dGuardRefusals: '拒绝 {n} 次',
-        hostToolHidden: '已遮挡',
+        hostToolHidden: '已隐藏',
         hostToolRefused: '调用会被拒绝',
-        displayOnlyTag: '只展示（未遮挡）',
+        displayOnlyTag: '只展示（没有隐藏）',
         // ── 工具链 ──
         tools: '工具链',
         toolCount: '{n} 个工具',
@@ -137,15 +137,19 @@ window.__ModuleLoader__.load({
         countItems: '{n} 项',
         brief: '环境简报',
         briefHint: '已注入给 AI',
-        briefOff: '简报注入已关闭',
+        briefOff: '未注入',
+        briefOffDetail: '简报注入已关闭',
         never: '尚未探测',
         copyBrief: '复制',
         injectBrief: '把环境简报注入给 AI',
+        advanced: '高级设置',
         blockOtherFamily: '隐藏另一族命令工具',
-        blockOtherFamilyHint: 'bash 族会话会隐藏宿主 pwsh/powershell；关掉则两族同时可见',
+        // 可见说明只留一行;「关掉会怎样」挪进开关的 title(长长的第二句会把开关挤成两行)
+        blockOtherFamilyHint: 'bash 会话里隐藏 PowerShell 的 pwsh / powershell',
+        blockOtherFamilyHintTitle: 'bash 会话里隐藏 PowerShell 的 pwsh / powershell；关掉则两族同时可见',
         allowLan: '允许局域网访问面板 API',
         allowLanHint: '只放行读取面板数据',
-        subprocessOff: '宿主没有 subprocess 服务，版本探测会缺失',
+        subprocessOff: '拿不到 dsh 的子进程能力，版本探测会缺失',
       },
       en: {
         title: 'EnvDock',
@@ -157,13 +161,13 @@ window.__ModuleLoader__.load({
         updatedAt: 'updated',
         retry: 'Retry',
         terminal: 'Terminal',
-        autoShell: 'Auto (pick by session)',
-        autoShellHint: 'Picks the family from the command tools this session can see: bash-family sessions use Git Bash, PowerShell-family sessions use pwsh',
-        // Syntax family (0.6): full label in the badge, short tag on the terminal chips
-        famBash: 'bash family',
-        famPwsh: 'PowerShell family',
+        subtitle: 'Tells the agent where your tools live, which version to use, and which shell syntax to write.',
+        autoShell: 'Auto',
+        autoShellHint: 'Picks the shell syntax per session (recommended)',
+        // Two syntaxes: the panel says "syntax" on the first screen
+        famBash: 'bash syntax',
+        famPwsh: 'PowerShell syntax',
         famManual: 'manual',
-        famAuto: 'auto',
         customShell: 'Custom terminal',
         customHint: 'Absolute path to an executable, e.g. C:\\\\tools\\\\rg.exe',
         customShellArgs: 'Argument template',
@@ -178,28 +182,28 @@ window.__ModuleLoader__.load({
         dismiss: 'Dismiss',
         actionFailed: 'Action failed',
         command: 'Command',
-        // badge: the panel's single status conclusion
-        statusAdditive: 'Additive',
+        // badge: the panel's single status conclusion (plain words, no family)
+        statusAdditive: 'Ready',
         statusDisplayOnly: 'Display only',
-        statusConfined: 'Confined',
-        hostPrefix: 'host',
-        hostToolsNone: 'No host command tool recognized',
-        noteLegacyApi: 'Old API build; restart dsh to see command-tool facts',
-        cmdHintEnvDock: 'EnvDock additive command tool: runs with your terminal and PATH',
-        cmdHintHost: 'Host command tool: environment and PATH come from the host',
-        skipNoFamilyTerminal: 'No usable terminal found (the bash family needs Git Bash; the PowerShell family needs pwsh)',
-        skipNoUnconfined: 'No unconfined session; not registered',
-        skipTaken: 'Name taken by another plugin; not registered',
-        skipError: 'Registration failed; not registered',
-        noteHiddenPwsh: 'PowerShell-family host tools hidden: {names}',
-        noteNotBlocked: 'The other family command tools are not hidden',
-        noteNoBashHost: 'This session sees no bash-family host tool; PowerShell-family tools are not hidden',
-        noteFamilyFallback: 'The manually picked family is unusable; fell back to auto (that family has neither a terminal nor a host tool)',
-        noteMixed: 'Both families are visible; write each command with its own syntax, do not mix them',
-        noteConfined: '{n} sessions are confined: envd_shell will refuse; use the host tool',
-        envHint: 'The host tool environment/PATH may differ from yours; use envd_shell for your terminal',
+        statusConfined: 'Limited',
+        hostPrefix: 'Other: ',
+        hostToolsNone: 'No other command tools',
+        noteLegacyApi: 'The panel is reading data from an older build; restart dsh to see the command environment',
+        cmdHintEnvDock: 'Command tool provided by EnvDock: runs with your terminal and PATH',
+        cmdHintHost: 'Other command tools: provided by dsh; their environment and PATH may differ from your terminal',
+        skipNoFamilyTerminal: 'No usable terminal found (bash syntax needs Git Bash, PowerShell syntax needs pwsh)',
+        skipNoUnconfined: 'No session outside the sandbox yet; envd_shell is not provided for now',
+        skipTaken: 'Name is taken by another plugin; envd_shell is not provided',
+        skipError: 'Could not provide the command tool (registration failed)',
+        noteHiddenPwsh: 'Hid {names} (to avoid mixing the two syntaxes)',
+        noteNotBlocked: 'PowerShell command tools are not hidden (the switch is off)',
+        noteNoBashHost: 'This session has no bash command tool, so PowerShell tools were not hidden',
+        noteFamilyFallback: 'The manually picked syntax is unavailable (no matching terminal or command tool); switched back to per-session selection',
+        noteMixed: 'PowerShell syntax was picked manually: both PowerShell and bash tools are available; write each command in its own syntax, do not mix them',
+        noteConfined: '{n} sessions are sandbox-limited: envd_shell will not run there; use another command tool',
+        envHint: 'Other command tools may use a different environment and PATH than your terminal; use envd_shell when you need your own tools',
         diag: 'Details',
-        hostTools: 'Host tools',
+        hostTools: 'Command tools',
         learnedTag: 'auto-detected',
         noteLastError: 'Last error',
         dScan: 'scans: {n}',
@@ -207,7 +211,7 @@ window.__ModuleLoader__.load({
         dRegisterTries: 'register tries: {n}',
         dRestrictApplied: 'hides: {n}',
         dGuardRefusals: 'refusals: {n}',
-        hostToolHidden: 'already hidden',
+        hostToolHidden: 'hidden',
         hostToolRefused: 'calls are refused',
         displayOnlyTag: 'display only (not hidden)',
         tools: 'Toolchains',
@@ -237,15 +241,19 @@ window.__ModuleLoader__.load({
         countItems: '{n} issues',
         brief: 'Agent brief',
         briefHint: 'Injected into the agent',
-        briefOff: 'Brief injection is off',
+        briefOff: 'Not injected',
+        briefOffDetail: 'Brief injection is turned off',
         never: 'Not scanned yet',
         copyBrief: 'Copy',
         injectBrief: 'Inject the environment brief into the agent',
+        advanced: 'Advanced',
         blockOtherFamily: 'Hide the other family command tools',
-        blockOtherFamilyHint: 'bash-family sessions hide the host pwsh/powershell tools; turn off to keep both families visible',
+        // Visible hint stays one line; "what happens when off" moves to the switch title.
+        blockOtherFamilyHint: "Hides PowerShell's pwsh / powershell in bash sessions",
+        blockOtherFamilyHintTitle: "Hides PowerShell's pwsh / powershell in bash sessions; turn off to keep both families visible",
         allowLan: 'Allow LAN access to the panel API',
         allowLanHint: 'Read-only access to panel data',
-        subprocessOff: 'No subprocess service on the host; version detection is incomplete',
+        subprocessOff: 'No subprocess capability from dsh; version detection is incomplete',
       },
     }
 
@@ -259,13 +267,15 @@ window.__ModuleLoader__.load({
 .envd-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace}
 .envd-muted{color:var(--dsw-alias-label-secondary)}
 
-/* 头部:标题 + 默认终端 + 1 个状态 badge + 重新探测 */
+/* 头部:标题 + 默认终端 + 1 个状态 badge + 重新探测,下面一行用途说明 */
+.envd-headblock{display:flex;flex-direction:column;gap:4px;min-width:0}
 .envd-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+.envd-subtitle{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary);min-width:0;overflow-wrap:anywhere}
 .envd-h1{margin:0;font-size:18px;font-weight:650;display:flex;align-items:center;gap:8px;letter-spacing:.1px;flex:none}
 .envd-headline{font-size:12.5px;color:var(--dsw-alias-label-secondary);white-space:nowrap;min-width:0;max-width:100%;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
 .envd-headline b{color:var(--dsw-alias-label-primary);font-weight:600}
 
-/* badge:整个面板只有「状态」用胶囊(三态:增补就绪 / 只展示 / 围栏) */
+/* badge:整个面板只有「状态」用胶囊(三态:就绪 / 只展示 / 受限) */
 .envd-badge{display:inline-flex;align-items:center;gap:6px;height:20px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:650;white-space:nowrap;flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
 .envd-badge .dot{width:5px;height:5px;border-radius:50%;background:currentColor;flex:none}
 .envd-badge.ok{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 14%,transparent)}
@@ -299,10 +309,6 @@ window.__ModuleLoader__.load({
 .envd-chip:hover{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary)}
 .envd-chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .envd-chip.on{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary) 55%,transparent);color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 10%,transparent);font-weight:600}
-/* 终端 chip 上的语法族短标(bash / pwsh / cmd / wsl):认不出族的终端不加 */
-.envd-chip .envd-chiplabel{min-width:0;overflow:hidden;text-overflow:ellipsis}
-.envd-chip .envd-chipfam{flex:none;height:16px;padding:0 5px;border-radius:4px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:10px;font-weight:650;letter-spacing:.2px;display:inline-flex;align-items:center}
-.envd-chip.on .envd-chipfam{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 18%,transparent);color:var(--dsw-alias-brand-primary)}
 
 /* 一行备注:常显区最多一行,不套盒子 */
 .envd-notes{display:flex;flex-direction:column;gap:2px;min-width:0}
@@ -311,16 +317,15 @@ window.__ModuleLoader__.load({
 .envd-note.warn{color:var(--dsw-alias-state-warn-primary)}
 .envd-note.bad{color:var(--dsw-alias-state-error-primary)}
 
-/* 命令行:自己的工具名 + 宿主工具列表(长名字靠省略,不截数据) */
+/* 命令行:自己的工具名 + 其它命令工具(长名字靠省略,不截数据) */
 .envd-cmdrow{flex-wrap:wrap}
-.envd-sep{color:var(--dsw-alias-label-secondary);flex:none}
 .envd-host{font-size:11.5px;color:var(--dsw-alias-label-secondary);min-width:0;flex:0 1 auto;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums}
 
-/* 语法族徽标:bash 族 / PowerShell 族(手动时带后缀);族为空(cmd / 自定义终端)时不显示 */
+/* 语法标签:bash 语法 / PowerShell 语法(手动选择时带后缀);认不出语法(cmd / 自定义终端)时不显示 */
 .envd-fam{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:650;white-space:nowrap;flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 11%,transparent)}
 .envd-fam .envd-famsrc{padding-left:4px;font-weight:500;color:var(--dsw-alias-label-secondary)}
 
-/* 宿主工具 chips:只在「详情」里出现 */
+/* 命令工具 chips:只在「详情」里出现 */
 .envd-diag-shelltools{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
 .envd-shellchip{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-2);font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .envd-shellchip .envd-mono{color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
@@ -330,7 +335,7 @@ window.__ModuleLoader__.load({
 /* 只能拒绝 / 只展示:不遮挡,但要在 chip 上说清楚它的状态 */
 .envd-shellchip.refused,.envd-shellchip.display{opacity:.85}
 
-/* 详情:默认折叠,展开只有「扫描计数 + 宿主工具 chips + 最近错误」 */
+/* 详情:默认折叠,展开只有「扫描计数 + 命令工具 chips + 最近错误」 */
 .envd-diag-detail{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--dsw-alias-label-secondary);align-items:center;min-width:0;border-top:1px solid var(--dsw-alias-border-l1);padding-top:8px}
 .envd-diag-stat{font-variant-numeric:tabular-nums;min-width:0;word-break:break-word}
 .envd-diag-detail .e{color:var(--dsw-alias-state-error-primary);min-width:0;word-break:break-word}
@@ -408,12 +413,20 @@ window.__ModuleLoader__.load({
 @keyframes envd-pulse{0%,100%{opacity:.55}50%{opacity:1}}
 @media (prefers-reduced-motion:reduce){.envd-skel{animation:none}}
 
-/* 底部:开关 + 安静的一行环境脚注 */
+/* 底部:只需要复制反馈 + 安静的一行环境脚注 */
 .envd-foot{display:flex;align-items:center;gap:18px;flex-wrap:wrap;border-top:1px solid var(--dsw-alias-border-l1);padding-top:11px;font-size:12px}
 .envd-foot-item{display:flex;align-items:center;gap:8px;color:var(--dsw-alias-label-secondary);min-width:0;max-width:100%}
 .envd-foot-hint{font-size:11px;color:var(--dsw-alias-label-secondary);min-width:0;max-width:320px;overflow-wrap:anywhere}
 .envd-copy-note{font-size:11.5px;color:var(--dsw-alias-label-secondary);min-width:0;overflow-wrap:anywhere}
 .envd-footmeta{font-size:11px;color:var(--dsw-alias-label-secondary);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* 高级设置:默认收起,把两个不常动的开关收进来(首屏只留四块) */
+.envd-advanced{display:flex;flex-direction:column;gap:8px;min-width:0}
+.envd-advanced-title{font-size:12.5px;font-weight:650;color:var(--dsw-alias-label-primary);flex:none}
+/* 展开后的内容:仿 .envd-sec-b 的细线 + 缩进,别让开关直接贴住折叠行 */
+.envd-adv{display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--dsw-alias-border-l1);padding-top:8px;min-width:0}
+.envd-adv .envd-foot-item{align-items:flex-start;flex-wrap:wrap;gap:8px}
+.envd-adv .envd-foot-item>span:first-child{padding-top:3px}
 
 @media (max-width:560px){
   .envd-scroll{padding:16px 16px 40px;gap:18px}
@@ -533,6 +546,7 @@ window.__ModuleLoader__.load({
       const [shellArgs, setShellArgs] = useState('')
       const [shellFormOpen, setShellFormOpen] = useState(false)
       const [briefOpen, setBriefOpen] = useState(false)
+      const [advancedOpen, setAdvancedOpen] = useState(false)
       const [healthOpen, setHealthOpen] = useState(false)
       const [diagOpen, setDiagOpen] = useState(false)
       const [openVersions, setOpenVersions] = useState({})
@@ -718,7 +732,7 @@ window.__ModuleLoader__.load({
       // ── 命令工具事实:面板只回答四件事 ──
       // 1) envd_shell 注册且可见吗;2) 本会话用哪个语法族、自动还是手动;
       // 3) 宿主有哪些命令工具(另一族此刻被遮挡了哪些);4) 有没有会话被围栏。
-      // 不推导「终局」:注册失败就是没注册,面板只摆宿主工具与遮挡事实。
+      // 不推导「终局」:注册失败就是没注册,面板只摆其它命令工具与隐藏事实。
       const ct = data && data.commandTool && typeof data.commandTool === 'object' ? data.commandTool : null
       const stats = data && data.syncStats && typeof data.syncStats === 'object' ? data.syncStats : null
       const hasOwn = (obj, key) => Boolean(obj) && typeof obj === 'object' && Object.prototype.hasOwnProperty.call(obj, key)
@@ -747,7 +761,8 @@ window.__ModuleLoader__.load({
       // 此刻 payload.family / familySource 报的已经是生效结果(auto),面板只负责把「你选的手动族被回退了」说出来。
       const familyFallback = hasOwn(data, 'familyFallback') ? data.familyFallback === true : hasOwn(ct, 'familyFallback') ? ct.familyFallback === true : false
       const famLabel = family === 'bash' ? t.famBash : family === 'powershell' ? t.famPwsh : ''
-      const famSourceTag = familySource === 'manual' ? t.famManual : familySource === 'auto' ? t.famAuto : ''
+      // 自动选时不再加后缀(「· 自动」属于噪音);只有手动选的语法才标一下,提醒这是你自己定的。
+      const famSourceTag = familySource === 'manual' ? t.famManual : ''
       // 终端 chip 上的短标:bash / pwsh / cmd / wsl。认不出就不加(不硬编一个假族)。
       const famShort = (value) => {
         const key = String(value || '').toLowerCase()
@@ -772,7 +787,7 @@ window.__ModuleLoader__.load({
       const displayOnlyNames = nameList(ct && ct.displayOnly)
       const mixed = Boolean(ct && ct.mixed === true)
 
-      // 宿主命令工具:排序由宿主负责(内置顺序优先,其余按名字),面板只做去重与兜底。
+      // 命令工具:排序由调用方负责(内置顺序优先,其余按名字),面板只做去重与兜底。
       // 旧形状只给一个 hostName(没有宿主工具列表),过渡期就展示它。
       const legacyHostTools = legacyApi && ct && ct.hostName ? [{ name: String(ct.hostName), family: '', learned: false, group: '' }] : []
       const hostTools = (legacyApi ? legacyHostTools : ct && Array.isArray(ct.hostTools) ? ct.hostTools : [])
@@ -789,7 +804,7 @@ window.__ModuleLoader__.load({
         .filter((item) => item.name)
       const hostNames = []
       for (const item of hostTools) if (!hostNames.includes(item.name)) hostNames.push(item.name)
-      const hostText = hostNames.length ? t.hostPrefix + ' ' + hostNames.join(' · ') : t.hostToolsNone
+      const hostText = hostNames.length ? t.hostPrefix + hostNames.join(' · ') : t.hostToolsNone
       // 按语法族分的宿主工具(备注要说「另一族此刻还在不在」)。
       const hostNamesInFamily = (short) => hostTools.filter((item) => famShort(item.family) === short).map((item) => item.name)
       const bashHostNames = hostNamesInFamily('bash')
@@ -800,21 +815,19 @@ window.__ModuleLoader__.load({
       const confinedCount = Math.max(0, Number(sandboxInfo.confinedCount) || 0)
       const confined = confinedCount > 0
 
-      // badge 三态(整个面板唯一的状态结论):
-      //   没注册 → 只展示;注册了且可见 → 有会话被围栏就是「围栏」,否则「增补就绪」。
-      // 族也标在 badge 上:面板没有具体会话,这里用 API 的全局族口径(无会话时按宿主并集判)。
+      // badge 三态(整个面板唯一的状态结论):白话三态,不挂族 —— 族只在命令行的语法标签里说。
+      //   没有命令工具 → 只展示;有且会话被沙箱限制 → 受限;否则就绪。
       const badgeTone = ready ? (confined ? 'warn' : 'ok') : 'muted'
       const badgeText = ready ? (confined ? t.statusConfined : t.statusAdditive) : t.statusDisplayOnly
-      const badgeLabel = famLabel ? badgeText + ' · ' + famLabel : badgeText
 
-      // 备注最多两行,按优先级取:未注册原因 → 围栏 → 混用警告 → 遮挡/未遮挡事实 → 环境差异。
+      // 备注最多两行,按优先级取:未提供原因 → 沙箱限制 → 语法回退 → 混用警告 → 隐藏/未隐藏 → 环境差异。
       // 「用 envd_shell」「已隐藏 pwsh」这类话只在 envd_shell 真的可用/事实真的成立时才说:
-      // 没注册就无工具可拒,也没挡任何东西 —— 那时只剩一句原因。
+      // 没提供工具就无工具可拒,也没挡任何东西 —— 那时只剩一句原因。
       const notes = []
       if (legacyApi) notes.push({ tone: 'warn', text: t.noteLegacyApi })
       if (!ready && !legacyApi) {
         if (skipReason === 'no-family-terminal') {
-          // 选中的族没有可用终端:说清两族各自需要什么,别让用户猜。
+          // 选中的语法没有可用终端:说清两套语法各自需要什么,别让用户猜。
           notes.push({ tone: 'muted', text: t.skipNoFamilyTerminal })
         } else if (skipReason === 'no-unconfined-session') {
           notes.push({ tone: 'muted', text: t.skipNoUnconfined })
@@ -825,16 +838,16 @@ window.__ModuleLoader__.load({
         }
       }
       if (ready && confined) notes.push({ tone: 'warn', text: fmt(t.noteConfined, { n: confinedCount }) })
-      // 手动选的族不可用、宿主已回退 auto:这是「用户的选择没生效」,必须让人看见(排在混用警告前面)。
+      // 手动选的语法不可用、已改回按会话选择:这是「用户的选择没生效」,必须让人看见。
       if (familyFallback) notes.push({ tone: 'warn', text: t.noteFamilyFallback })
-      // 两族同时可见 = 模型手里有两套语法,最容易出的错就是混写。警告优先于其它 muted 事实。
+      // 两套语法同时可见 = 模型手里有两套写法,最容易出的错就是混写。警告优先于其它 muted 事实。
       if (mixed) notes.push({ tone: 'warn', text: t.noteMixed })
-      // bash 族会话遮挡了 PowerShell 族内置名:这是此刻的事实,如实说被藏了谁。
+      // bash 会话隐藏了 PowerShell 内置命令工具:这是此刻的事实,如实说被藏了谁(名字不加引号,人话)。
       if (family === 'bash' && hiddenNames.length) {
-        notes.push({ tone: 'muted', text: fmt(t.noteHiddenPwsh, { names: hiddenNames.map((name) => '`' + name + '`').join(', ') }) })
+        notes.push({ tone: 'muted', text: fmt(t.noteHiddenPwsh, { names: hiddenNames.join(', ') }) })
       }
       if (family === 'bash' && !mixed && !blockOtherFamily && pwshHostNames.length) notes.push({ tone: 'muted', text: t.noteNotBlocked })
-      // 手动选了 bash 族、会话里却看不到 bash 族宿主工具:遮挡条件不成立,说清「未遮挡」。
+      // 手动选了 bash 语法、会话里却看不到 bash 命令工具:隐藏条件不成立,说清「没有隐藏」。
       if (family === 'bash' && familySource === 'manual' && bashHostNames.length === 0) notes.push({ tone: 'muted', text: t.noteNoBashHost })
       if (ready) notes.push({ tone: 'muted', text: t.envHint })
       const shownNotes = notes.slice(0, 2)
@@ -935,8 +948,7 @@ window.__ModuleLoader__.load({
             title: t.autoShellHint,
             onClick: () => post({ op: 'setShell', key: 'auto' }),
           },
-          h('span', { className: 'envd-chiplabel' }, t.autoShell),
-          famShort(family) ? h('span', { className: 'envd-chipfam' }, famShort(family)) : null,
+          t.autoShell,
         ),
         terminals
           .filter((x) => x.family !== 'wsl')
@@ -950,8 +962,7 @@ window.__ModuleLoader__.load({
                 title: term.path + (term.version ? ' · v' + term.version : ''),
                 onClick: () => post({ op: 'setShell', key: term.key }),
               },
-              h('span', { className: 'envd-chiplabel' }, term.label),
-              famShort(term.family) ? h('span', { className: 'envd-chipfam' }, famShort(term.family)) : null,
+              term.label,
             ),
           ),
         h('button', { className: 'envd-btn ghost', title: t.customShell, 'aria-label': t.customShell, onClick: () => setShellFormOpen((v) => !v) }, '+'),
@@ -1156,7 +1167,7 @@ window.__ModuleLoader__.load({
           )
         : h('div', { className: 'envd-row' }, h('span', { className: 'envd-tag' }, t.health), h('span', { className: 'envd-flag ok' }, '✓ ' + t.healthy))
 
-      // ── 头部 ──
+      // ── 头部:插件名 / 默认终端 / 一个状态 badge / 重新探测,下一行一句用途说明 ──
       const head = h(
         'div',
         { className: 'envd-head' },
@@ -1169,12 +1180,14 @@ window.__ModuleLoader__.load({
               shell.version ? ' v' + shell.version : '',
             )
           : h('span', { className: 'envd-headline' }, t.loading),
-        data ? badge(badgeTone, badgeLabel, { title: badgeTitle }) : null,
+        data ? badge(badgeTone, badgeText, { title: badgeTitle }) : null,
         h('span', { className: 'envd-grow' }),
         h('button', { className: 'envd-btn primary', disabled: busy, onClick: () => post({ op: 'refresh' }) }, busy ? t.detecting : t.refresh),
       )
+      // 陌生人第一眼要能回答「这插件是干嘛的」:一句用途说明常显,不折叠。
+      const headBlock = h('div', { className: 'envd-headblock' }, head, h('div', { className: 'envd-subtitle' }, t.subtitle))
 
-      const body = [head]
+      const body = [headBlock]
 
       if (error) {
         body.push(
@@ -1229,7 +1242,7 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'envd-row envd-cmdrow' },
               h('span', { className: 'envd-tag' }, t.command),
-              // 语法族徽标:自动选的也标出来 —— 「这个会话该写哪套语法」是这一行最重要的上下文。
+              // 语法标签:「这个会话该写哪套语法」是这一行最重要的上下文;自动选时不加后缀。
               famLabel
                 ? h(
                     'span',
@@ -1239,7 +1252,6 @@ window.__ModuleLoader__.load({
                   )
                 : null,
               h('span', { className: 'envd-tool', title: t.cmdHintEnvDock }, ownText),
-              h('span', { className: 'envd-sep' }, '·'),
               h('span', { className: 'envd-host', title: t.cmdHintHost }, hostText),
               h('span', { className: 'envd-grow' }),
               h('button', { className: 'envd-btn ghost', 'aria-expanded': diagOpen, title: countText || t.never, onClick: () => setDiagOpen((v) => !v) }, t.diag),
@@ -1282,7 +1294,7 @@ window.__ModuleLoader__.load({
           ),
         )
 
-        // ── 环境简报:默认一行 ──
+        // ── 环境简报:默认一行;注入开关就放在这一行(同一件事只说一遍) ──
         body.push(
           sec(
             t.brief,
@@ -1292,21 +1304,75 @@ window.__ModuleLoader__.load({
                 { className: 'envd-row' },
                 h('span', { className: 'envd-sub' }, options.injectBrief === true ? t.briefHint : t.briefOff),
                 h('span', { className: 'envd-grow' }),
+                h('button', {
+                  className: 'envd-switch' + (options.injectBrief === true ? ' on' : ''),
+                  'aria-pressed': options.injectBrief === true,
+                  'aria-label': t.injectBrief,
+                  title: t.injectBrief,
+                  onClick: () => post({ op: 'setOption', injectBrief: options.injectBrief !== true }),
+                }),
                 h('button', { className: 'envd-btn ghost', onClick: () => copy(data.brief || '', 'brief') }, copied === 'brief' ? '✓ ' + t.copied : t.copyBrief),
                 h('button', { className: 'envd-btn ghost', 'aria-expanded': briefOpen, onClick: () => setBriefOpen((v) => !v) }, briefOpen ? t.collapse : t.expand),
               ),
-              briefOpen ? h('pre', { className: 'envd-pre envd-mono' }, options.injectBrief === true ? data.brief || t.never : t.briefOff) : null,
+              briefOpen ? h('pre', { className: 'envd-pre envd-mono' }, options.injectBrief === true ? data.brief || t.never : t.briefOffDetail) : null,
             ],
             null,
             'brief',
           ),
         )
+
+        // ── 高级设置:默认收起,把两个不常动的开关收进来(首屏只留四块) ──
+        body.push(
+          h(
+            'div',
+            { className: 'envd-advanced', key: 'advanced' },
+            h(
+              'button',
+              { className: 'envd-foldrow envd-fold-advanced', 'aria-expanded': advancedOpen, onClick: () => setAdvancedOpen((v) => !v) },
+              h('span', { className: 'envd-advanced-title' }, t.advanced),
+              h('span', { className: 'envd-sub', style: { flex: '1 1 auto' } }),
+              h('span', { className: 'envd-sub', style: { flex: 'none' } }, advancedOpen ? t.collapse : t.expand),
+            ),
+            advancedOpen
+              ? h(
+                  'div',
+                  { className: 'envd-adv' },
+                  blockSwitchSupported
+                    ? h(
+                        'div',
+                        { className: 'envd-foot-item' },
+                        h('span', {}, t.blockOtherFamily),
+                        h('button', {
+                          className: 'envd-switch' + (blockOptionOn ? ' on' : ''),
+                          'aria-pressed': blockOptionOn,
+                          'aria-label': t.blockOtherFamily,
+                          title: t.blockOtherFamilyHintTitle,
+                          onClick: () => post({ op: 'setOption', blockOtherFamily: !blockOptionOn }),
+                        }),
+                        h('span', { className: 'envd-foot-hint', title: t.blockOtherFamilyHintTitle }, t.blockOtherFamilyHint),
+                      )
+                    : null,
+                  h(
+                    'div',
+                    { className: 'envd-foot-item' },
+                    h('span', { title: t.allowLanHint }, t.allowLan),
+                    h('button', {
+                      className: 'envd-switch' + (options.allowLan === true ? ' on' : ''),
+                      'aria-pressed': options.allowLan === true,
+                      'aria-label': t.allowLan,
+                      title: t.allowLanHint,
+                      onClick: () => post({ op: 'setOption', allowLan: options.allowLan !== true }),
+                    }),
+                  ),
+                )
+              : null,
+          ),
+        )
       }
 
-      // 底部:开关 + 复制反馈 + 安静的一行环境脚注
-      // allowLan 必须在 if (data) 之外 —— 被 403 挡在门外时它是唯一的解法;
-      // 简报注入 / 遮挡另一族这两个开关只在拿到数据时显示:403 时 options 是空壳,
-      // 显示一个假的「关闭」等于撒谎。
+      // 底部:复制反馈 + 安静的一行环境脚注。
+      // 有数据时 footer 不再放任何开关(简报注入在简报区、其余两个在高级设置里),避免同一件事说两遍;
+      // 拿不到数据(403 / 接口没响应)时简报区不存在,allowLan 是唯一的解法入口,必须留在 footer。
       const footMeta = [platform ? [platform.version, platform.arch, platform.host].filter(Boolean).join(' · ') : '', data && data.detectedAt ? t.updatedAt + ' ' + fmtTime(data.detectedAt) : '']
         .filter(Boolean)
         .join(' · ')
@@ -1315,43 +1381,19 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'envd-foot', key: 'foot' },
           data
-            ? h(
+            ? null
+            : h(
                 'div',
                 { className: 'envd-foot-item' },
-                h('span', {}, t.injectBrief),
+                h('span', { title: t.allowLanHint }, t.allowLan),
                 h('button', {
-                  className: 'envd-switch' + (options.injectBrief === true ? ' on' : ''),
-                  'aria-pressed': options.injectBrief === true,
-                  'aria-label': t.injectBrief,
-                  onClick: () => post({ op: 'setOption', injectBrief: options.injectBrief !== true }),
+                  className: 'envd-switch' + (options.allowLan === true ? ' on' : ''),
+                  'aria-pressed': options.allowLan === true,
+                  'aria-label': t.allowLan,
+                  title: t.allowLanHint,
+                  onClick: () => post({ op: 'setOption', allowLan: options.allowLan !== true }),
                 }),
-              )
-            : null,
-          data && blockSwitchSupported
-            ? h(
-                'div',
-                { className: 'envd-foot-item' },
-                h('span', {}, t.blockOtherFamily),
-                h('button', {
-                  className: 'envd-switch' + (blockOptionOn ? ' on' : ''),
-                  'aria-pressed': blockOptionOn,
-                  'aria-label': t.blockOtherFamily,
-                  onClick: () => post({ op: 'setOption', blockOtherFamily: !blockOptionOn }),
-                }),
-                h('span', { className: 'envd-foot-hint' }, t.blockOtherFamilyHint),
-              )
-            : null,
-          h(
-            'div',
-            { className: 'envd-foot-item' },
-            h('span', { title: t.allowLanHint }, t.allowLan),
-            h('button', {
-              className: 'envd-switch' + (options.allowLan === true ? ' on' : ''),
-              'aria-pressed': options.allowLan === true,
-              'aria-label': t.allowLan,
-              onClick: () => post({ op: 'setOption', allowLan: options.allowLan !== true }),
-            }),
-          ),
+              ),
           h('span', { className: 'envd-grow' }),
           h('span', { className: 'envd-copy-note', role: 'status', 'aria-live': 'polite' }, copyNote || (copied ? t.copied : '')),
           footMeta ? h('span', { className: 'envd-footmeta', title: footMeta }, footMeta) : null,

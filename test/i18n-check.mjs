@@ -29,8 +29,10 @@ function keysOf(block) {
   return out
 }
 
-const zh = keysOf(sliceLocale('zh'))
-const en = keysOf(sliceLocale('en'))
+const zhBlock = sliceLocale('zh')
+const enBlock = sliceLocale('en')
+const zh = keysOf(zhBlock)
+const en = keysOf(enBlock)
 const references = new Set()
 for (const m of source.matchAll(/\bt\.([A-Za-z0-9_]+)/g)) references.add(m[1])
 
@@ -75,18 +77,25 @@ check('注册了 sidebar.panellist', source.includes("slots.inject('sidebar.pane
 check('注册了 main 面板', source.includes("slots.inject('main'"))
 check('ModuleLoader id 与包名一致', source.includes("id: 'dsh-envdock'"))
 
-// ── 0.6「两族」口径:词条成对存在,0.5 的「同族不重复提供」不许回来 ──
+// ── 0.6/0.6.1 口径:两套语法的词条成对存在,0.5 的「同族不重复提供」不许回来 ──
 const FAMILY_KEYS = [
-  'famBash', 'famPwsh', 'famManual', 'famAuto', 'autoShellHint',
+  'famBash', 'famPwsh', 'famManual', 'autoShellHint',
   'noteHiddenPwsh', 'noteMixed', 'noteNotBlocked', 'noteNoBashHost', 'noteFamilyFallback', 'noteConfined',
-  'skipNoFamilyTerminal', 'blockOtherFamily', 'blockOtherFamilyHint',
+  'skipNoFamilyTerminal', 'blockOtherFamily', 'blockOtherFamilyHint', 'blockOtherFamilyHintTitle',
   'dRestrictApplied', 'dGuardRefusals', 'displayOnlyTag', 'hostToolHidden', 'hostToolRefused',
+  // 0.6.1 首屏收敏:一句用途说明 + 高级设置 + 简报关闭时的正文说明
+  'subtitle', 'advanced', 'briefOffDetail',
 ]
 const missingFamily = FAMILY_KEYS.filter((key) => !zh.has(key) || !en.has(key))
-check('0.6 两族词条中英成对存在', missingFamily.length === 0, missingFamily.join(','))
+check('0.6 两套语法词条中英成对存在', missingFamily.length === 0, missingFamily.join(','))
 check('0.5「同族不重复提供」文案已删除', !source.includes('same-family') && !source.includes('skipSameFamily') && !source.includes('不重复提供'))
 check('代码里不再引用 t.skipSameFamily', !/\bt\.skipSameFamily\b/.test(source))
-check('占位符 {names} 只在隐藏名单那条用', source.includes("{names}") && !source.includes('{tool}'))
+check('占位符 {names} 只在隐藏名单那条用', source.includes('{names}') && !source.includes('{tool}'))
+check('0.6.1 首屏不再出现黑话「宿主 / 围栏 / 增补」(zh)', !zhBlock.includes('宿主') && !zhBlock.includes('围栏') && !zhBlock.includes('增补'), ['宿主', '围栏', '增补'].filter((word) => zhBlock.includes(word)).join(','))
+check('0.6.1 首屏三态是白话(就绪 / 受限 / 只展示)', zhBlock.includes("statusAdditive: '就绪'") && zhBlock.includes("statusConfined: '受限'") && zhBlock.includes("statusDisplayOnly: '只展示'"))
+check('0.6.1 终端 chip 不再带族小标', !source.includes('envd-chipfam') && !source.includes('envd-chiplabel'))
+check('0.6.1 底部的「其它」前缀与语法标签都在', zhBlock.includes("hostPrefix: '其它：'") && zhBlock.includes("famBash: 'bash 语法'") && zhBlock.includes("famPwsh: 'PowerShell 语法'"))
+check('0.6.1 注入开关移进简报区(词条仍在,footer 不再重复)', zhBlock.includes("injectBrief:'把环境简报注入给 AI'") || zhBlock.includes("injectBrief: '把环境简报注入给 AI'"))
 
 console.log('\n' + (failures.length ? failures.length + ' 项失败:' : '全部通过'))
 for (const f of failures) console.log('  · ' + f)
