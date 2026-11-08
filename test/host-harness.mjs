@@ -2690,6 +2690,29 @@ for (const { dis } of [
   check('addCustomTool key=constructor → 400', ctorKey.status === 400, String(ctorKey.status))
 }
 
+
+// ── 现网回归:dsh-ops 的 ops_bash(restrict 抛真机文案)必须让路,不能「接管 + 泄漏」──
+// 真机 restrict 对会话私有注册抛 `names unknown global tool`,那条走 hardNames(10 分钟 TTL);
+// 如果让路判据只看 badNames,就会既不遮挡也不让路 → 模型两个命令工具并列 + anomaly。
+{
+  const hReal = makeHarness({
+    shippedTools: ['ops_bash', 'pwsh'],
+    agentIds: [{ id: 'session-real-1', session: { key: 'real-1' } }],
+    unrestrictable: ['ops_bash'],
+    unrestrictableRealMessage: true,
+    sandboxPolicy: { resolve: () => ({ mode: 'danger-full-access', workspaceRoot: process.cwd() }) },
+  })
+  apply(hReal.ctx, { syncIntervalMs: 40 })
+  await post(hReal, { op: 'setOption', shellTakeover: 'takeover' })
+  const real = await pollSnapshot(hReal, (s) => Array.isArray(s.commandTool.scopes) && s.commandTool.scopes.some((x) => x.kind === 'yield'), 8000)
+  const fact = (real.commandTool.scopes || []).find((x) => String(x.id) === 'session-real-1') || {}
+  check('真机文案(unknown global tool)也判让路:kind=yield', fact.kind === 'yield', JSON.stringify(fact))
+  check('让路后模型只有一个命令工具:ops_bash 仍可见、envd_shell 被藏', hReal.toolsFor('session-real-1').get('ops_bash') !== null && hReal.toolsFor('session-real-1').get('envd_shell') === null, JSON.stringify({ ops_bash: Boolean(hReal.toolsFor('session-real-1').get('ops_bash')), envd: Boolean(hReal.toolsFor('session-real-1').get('envd_shell')) }))
+  check('让路后不再报「接管下宿主仍可见」的 anomaly', fact.anomaly === false && (real.syncStats.scopeAnomalies || []).length === 0, JSON.stringify({ anomaly: fact.anomaly, scopeAnomalies: real.syncStats.scopeAnomalies }))
+  check('unrestrictable 仍如实报 ops_bash', (real.syncStats.unrestrictable || []).includes('ops_bash'), JSON.stringify(real.syncStats.unrestrictable))
+  check('结构性挡不掉不写 lastError(不刷红)', !real.syncStats.lastError, String(real.syncStats.lastError))
+}
+
 rmSync(home, { recursive: true, force: true })
 
 console.log(

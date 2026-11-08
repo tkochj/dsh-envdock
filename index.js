@@ -3830,8 +3830,13 @@ export function apply(ctx, config) {
         // 认不出家族既教不了语法,也保证不了「我们的工具能替代它」。
         const now = Date.now()
         const stuck = hosts.filter((name) => {
-          const until = cur.badNames.get(name)
-          const locked = until !== undefined && until > now
+          // 挡不掉有两种记法:临时性(badNames,30 秒重试)与结构性(hardNames,10 分钟重试)。
+          // 真机 restrict 对会话私有注册抛的是「unknown global tool」→ 进 hardNames;
+          // 这里只查 badNames 就会漏判:既不遮挡、也不让路,模型手里两个命令工具并列,
+          // 逐会话事实还会把它标成 anomaly(现网实测就是这个症状)。
+          const badUntil = cur.badNames.get(name)
+          const hardUntil = cur.hardNames.get(name)
+          const locked = (badUntil !== undefined && badUntil > now) || (hardUntil !== undefined && hardUntil > now)
           return (locked || !familyOf(rt, name)) && hasTool(cur.actx, name, cur.agent)
         })
         if (stuck.length) return { cur, gate, mask, hideOwn: true, yieldHost: true, stuck }

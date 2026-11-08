@@ -316,7 +316,13 @@ function createHarnessCore(options = {}) {
             typeof options.unrestrictableFor === 'function'
               ? Boolean(options.unrestrictableFor(scopeId, name))
               : blocked.includes(name)
-          if (scopeBlocked) throw new Error('scope-local tool ' + name)
+          if (scopeBlocked) {
+            // 真机(dsh-tools)对「作用域私有注册」抛的是这句:restrictableNames 只含继承面,
+            // 名字不在里面就直接抛。第二条是夹具自造的旧口径,供不同 TTL 分支用。
+            throw options.unrestrictableRealMessage
+              ? new Error('tools.restrict() names unknown global tool "' + name + '"; known global tools: bash')
+              : new Error('scope-local tool ' + name)
+          }
           if (!set.has(name)) {
             if (!noop) set.add(name)
             added.push(name)
