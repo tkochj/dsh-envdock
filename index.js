@@ -800,7 +800,7 @@ export function familyMask(input) {
  *   hostTools: [{ name, family, learned }],   // 本会话此刻看得见的宿主命令工具(不含被遮掉的内置名)
  *   hidden, refused, displayOnly,              // familyMask 的结果(或 runtime 快照的并集)
  *   mixed, blockOtherFamily, bashHostAvailable,
- *   confined, sessionless,
+ *   confined, delegate, sessionless,
  * }
  */
 export function familyBriefLine(spec) {
@@ -866,16 +866,21 @@ export function familyBriefLine(spec) {
 
   // 手动选的族不可用 → 已回退 auto:必须说清楚,否则面板/简报和模型的命令语法会打架。
   if (s.fallback === true) line += ';手动选择的族不可用(该族既没有终端、也没有按该族发布的宿主工具),已回退自动选族'
-  // 围栏:envd_shell 会被拒绝 —— 与 execute 的拒绝文案同一措辞,并**指向真正的出路**。
+  // 沙箱受限:
+  //   · 能委托宿主执行器(delegate)= 命令仍会执行,只是跑在沙箱里:说清「会在沙箱内执行」,
+  //     并提醒文件写入可能被拒绝,别让模型把策略拒绝当成工具坏了;
+  //   · 不能委托(没有沙箱执行器 / 族未知 / 目标终端族不支持)= 沿用拒绝口径并指向宿主工具。
   if (s.confined === true && s.sessionless !== true) {
-    if (family === FAMILY_BASH) {
+    if (s.delegate === true) {
+      line += ';本会话受沙箱限制:envd_shell 会通过宿主执行器在沙箱内执行(文件写入可能被拒绝)'
+    } else if (family === FAMILY_BASH) {
       line += bashHostAvailable
-        ? ';本会话被围栏:envd_shell 会拒绝,改用 ' + listed(hostBash.slice(0, 1)) + '(同语法)'
-        : ';本会话被围栏:envd_shell 会拒绝,且本会话没有 bash 族宿主工具可用'
+        ? ';本会话受沙箱限制且无法在沙箱内执行:改用 ' + listed(hostBash.slice(0, 1)) + '(同语法)'
+        : ';本会话受沙箱限制且无法在沙箱内执行,本会话也没有 bash 族宿主工具可用'
     } else if (family === FAMILY_POWERSHELL) {
-      line += ';本会话被围栏:envd_shell 会拒绝,改用宿主 ' + (hostPwsh.length ? listed(hostPwsh.slice(0, 1)) : '`pwsh`')
+      line += ';本会话受沙箱限制且无法在沙箱内执行:改用宿主 ' + (hostPwsh.length ? listed(hostPwsh.slice(0, 1)) : '`pwsh`')
     } else {
-      line += ';本会话被围栏:envd_shell 会拒绝'
+      line += ';本会话受沙箱限制且无法在沙箱内执行'
     }
   }
   if (registered && !s.sessionless && family === FAMILY_BASH && bashHostAvailable && s.confined !== true) {
@@ -1177,6 +1182,8 @@ function sandboxSummary(ctx, agentsList) {
     sessionCount,
     confinedCount,
     anyUnconfined,
+    // 受限会话里 envd_shell 能不能委托宿主执行器在沙箱内执行(而不是拒绝)
+    delegatable: canDelegate(ctx),
   }
 }
 
@@ -1901,6 +1908,104 @@ function shellInvocation(shell, line) {
   return [shell.path, '-NoLogo', '-NoProfile', '-Command', line]
 }
 
+/**
+ * 把「目标终端要跑的这一行」包装成**宿主执行器**能直接执行的一条命令。
+ *
+ * 沙箱受限的会话里 EnvDock 不能自己 spawn(subprocess 接口没有 sandboxPolicy 入口),
+ * 但可以委托给带围栏的 `ctx.shell`:围栏挂在宿主进程上,子终端继承它。命令本身**不拼进
+ * 字符串**,而是经环境变量 `ENVD_CMD` 传入 —— 宿主 → 目标终端那两层引号一次都不用写。
+ *
+ * 返回 { error } = 宿主族不支持安全委托(调用方据此拒绝,绝不猜语法硬拼)。
+ */
+function delegatedInvocation(hostFamily, shell, line) {
+  if (!shell || !shell.path) return { error: 'unsupported', reason: '没有可用的目标终端' }
+  if (hostFamily !== 'powershell' && hostFamily !== 'bash') {
+    return { error: 'unsupported', reason: '宿主执行器语法族无法安全包装(cmd/未知)' }
+  }
+  const quote = (value) => {
+    if (hostFamily === 'powershell') return "'" + String(value).replace(/'/g, "''") + "'"
+    return "'" + String(value).replace(/'/g, "'\\''") + "'"
+  }
+  const wrap = (argv) => ({
+    command:
+      (hostFamily === 'powershell' ? '& ' : '') +
+      argv.map((part) => quote(part)).join(' ') +
+      // 宿主启动失败时 $LASTEXITCODE 是 null(不是 0):必须显式给 127,
+      // 否则「目标终端没跑起来」会被报成 exit 0 的成功。
+      (hostFamily === 'powershell'
+        ? '; $ec=$LASTEXITCODE; if ($null -eq $ec) { exit 127 } else { exit $ec }'
+        : '; exit $?'),
+  })
+  const family = String(shell.family || '')
+  // 命令数据统一走 base64 载荷:命令行里永远没有用户命令,PowerShell 5.1 的引号吞噬无从触发。
+  const payload = Buffer.from(String(line), 'utf8').toString('base64')
+  if (payload.length > 30000) return { error: 'too-long', reason: '命令太长,超出委托安全上限' }
+  if (family === 'bash') {
+    // 目标 bash:外层 -lc 已经是登录 shell(与直跑 -lc 的 profile 语义一致),
+    // 内层再带 -l 会让 profile 跑第二次(重复的 PATH 拼接、重复的 rc 副作用),所以内层只 -s。
+    // ① 载荷缺失时 exit 127:否则 `printf %s "" | base64 -d | bash -s` 静默 exit 0,
+    //    插件会把「什么都没跑」报成成功。
+    // ② `</dev/null`:不加的话命令里的 read/cat 会吃掉 stdin 上的**脚本本身**,
+    //    后面的命令不再执行;直跑路径的 stdin 是 ignore,语义要一致。
+    return {
+      ...wrap([shell.path, '-lc', '[ -n "$ENVD_CMD" ] || exit 127; printf %s "$ENVD_CMD" | base64 -d | bash -s < /dev/null']),
+      envValue: payload,
+    }
+  }
+  if (family === 'cmd' || family === 'wsl' || family === 'custom') {
+    return { error: 'unsupported', reason: '目标终端(' + family + ')不支持安全委托执行' }
+  }
+  // 目标 powershell:嵌套 PowerShell 从 env 解码并 Invoke-Expression。
+  // [Console]::OutputEncoding 固定 UTF-8,避免非 65001 代码页下中文乱码。
+  const script =
+    "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); " +
+    "$c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:ENVD_CMD)); " +
+    // 载荷缺失时 exit 127:空脚本 Invoke-Expression 什么都不做,会静默 exit 0。
+    "if ([string]::IsNullOrEmpty($c)) { exit 127 }; " +
+    "& { Invoke-Expression $c }; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }"
+  return { ...wrap([shell.path, '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script]), envValue: payload }
+}
+
+/**
+ * 宿主执行器(ctx.shell)的语法族。委托时包装串必须按**执行器**的族写,不能按宿主
+ * 命令工具名猜:Windows 官方布局是 pwsh-sandbox(PowerShell),而模型手里的工具可能
+ * 是别的插件发布的 bash 工具 —— 拿 bash 包装器交给 PowerShell 执行必然 ParserError。
+ * 认不出返回 '' → 调用方拒绝委托,不冒险。
+ */
+function executorFamilyOf(ctx) {
+  const shell = readServiceFrom(ctx, 'shell')
+  if (!shell) return { family: '', source: 'absent' }
+  const probes = []
+  const push = (value) => {
+    const text = String(value || '')
+    if (text && !probes.includes(text)) probes.push(text)
+  }
+  try { push(shell.name) } catch {}
+  try { push(shell.id) } catch {}
+  try { push(shell.constructor && shell.constructor.name) } catch {}
+  try { push(shell.constructor && shell.constructor.id) } catch {}
+  // CamelCase 也要能分:`CmdSandboxExecutor` 先拆成 `Cmd Sandbox Executor` 再小写
+  const text = probes
+    .join(' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+  if (/pwsh|powershell/.test(text)) return { family: 'powershell', source: 'executor' }
+  if (/gitbash|msys|bash/.test(text)) return { family: 'bash', source: 'executor' }
+  if (/\bcmd\b/.test(text)) return { family: 'cmd', source: 'executor' }
+  // 官方 base 的默认布局:win32 只挂 pwsh-sandbox,其余平台只挂 bash-sandbox。
+  return { family: IS_WIN ? 'powershell' : 'bash', source: 'platform' }
+}
+
+/** 这个部署能不能把受限会话的命令委托给宿主沙箱执行器(面板/简报据此决定说什么)。 */
+function canDelegate(ctx) {
+  const shell = readServiceFrom(ctx, 'shell')
+  if (!shell || typeof shell.resolve !== 'function' || typeof shell.execute !== 'function') return false
+  const policy = readServiceFrom(ctx, 'sandboxPolicy')
+  if (!policy || typeof policy.resolve !== 'function') return false
+  const family = executorFamilyOf(ctx).family
+  return family === 'bash' || family === 'powershell'
+}
+
 // ─────────────────────────────────────────────────────── 健康检查 ──
 
 function healthIssues(detection, state) {
@@ -2031,6 +2136,7 @@ function brief(detection, state, probeIn, runtime) {
     blockOtherFamily: probe.blockOtherFamily !== undefined ? probe.blockOtherFamily : runtime && runtime.blockOtherFamily,
     bashHostAvailable: probe.bashHostAvailable === true || fallbackTools.some((tool) => tool && tool.family === FAMILY_BASH),
     confined: !sessionless && Boolean(gate && gate.confined !== false),
+    delegate: probe.delegate === true || Boolean(runtime && runtime.sandbox && runtime.sandbox.delegatable === true),
     sessionless,
   })
   lines.push(commandLine)
@@ -2249,7 +2355,7 @@ function envdTool(ctx, getDetection, getState, forceRefresh, runtime, gateFor, h
  * 它**不隐藏、不禁用**任何别人的工具;围栏会话里直接拒绝(不 spawn、不委托):
  * 拒绝的措辞要能让模型立刻改道去找宿主工具,而不是怀疑工具坏了或命令写错了。
  */
-function commandTool(ctx, activeShell, gateFor, familyFor) {
+function commandTool(ctx, activeShell, gateFor, familyFor, hostFamilyFor) {
   /**
    * 本会话的执行闸门。取不到就按「有围栏」保守处理,绝不猜成无围栏。
    */
@@ -2263,6 +2369,123 @@ function commandTool(ctx, activeShell, gateFor, familyFor) {
     }
     // 策略不可得(confined 为 null/undefined)一律按「被围栏」处理:宁可拒绝,不开无围栏旁路。
     return { ...gate, confined: gate.confined !== false }
+  }
+
+  /**
+   * 沙箱受限会话:委托宿主执行器在**沙箱内**执行(0.4 的实现搬回来)。
+   *
+   * 为什么这样是安全的:`ctx.shell` 是带围栏的执行器,围栏挂在它启动的进程上;我们把
+   * 目标终端当子进程拉起来,子进程继承同一份围栏。命令经 env 传入,不拼字符串,也不需要
+   * EnvDock 自己 spawn 一条没有 sandboxPolicy 的命令。
+   *
+   * 返回 null = 这个部署没法安全委托(执行器缺失 / 族未知 / 目标终端族不支持 / 策略不可得):
+   * 调用方据此拒绝,而不是退回无围栏 spawn。
+   */
+  const runDelegated = async (exec, gate, line, shell, cwd, timeoutMs) => {
+    const host = ctx.get('shell')
+    if (!host || typeof host.resolve !== 'function' || typeof host.execute !== 'function') {
+      return { unsupported: true, reason: '宿主没有可委托的沙箱执行器(resolve/execute 缺失)' }
+    }
+    const agent = exec && exec.agent ? exec.agent : null
+    // 没有会话就没有「本会话策略」可交给宿主执行器:这样的委托可能按部署默认档跑,拒绝。
+    if (!agent) return { unsupported: true, reason: '本会话信息缺失,无法把本会话沙箱策略交给宿主执行器' }
+    const hostFamily = typeof hostFamilyFor === 'function' ? String(hostFamilyFor() || '') : ''
+    if (hostFamily !== 'powershell' && hostFamily !== 'bash') {
+      return { unsupported: true, reason: '宿主执行器的语法族无法安全包装(cmd/未知),拒绝委托执行' }
+    }
+    const invocation = delegatedInvocation(hostFamily, shell, line)
+    if (!invocation || invocation.error) {
+      if (invocation && invocation.error === 'too-long') {
+        return { unsupported: true, reason: '命令太长(' + String(line).length + ' 字符),超出委托的安全上限' }
+      }
+      return {
+        unsupported: true,
+        reason:
+          '目标终端(' +
+          String((shell && shell.family) || 'unknown') +
+          ')不支持安全委托执行(只支持 bash / PowerShell 目标;cmd/WSL/自定义终端请用宿主工具)',
+      }
+    }
+    const policies = ctx.get('sandboxPolicy')
+    const session = agent.session
+    let policy = null
+    try {
+      if (policies && typeof policies.resolve === 'function') policy = policies.resolve(session ? { session } : {})
+    } catch {
+      policy = null
+    }
+    if (!policy || !SANDBOX_MODES.has(String(policy.mode || ''))) {
+      // 拿不到/拿到非法 policy 时不能委托:那等于用部署默认档执行,可能绕过本会话围栏。
+      return { unsupported: true, reason: '本会话沙箱策略不可得或非法,拒绝委托执行(不拿部署默认档冒充)' }
+    }
+    const env = invocation.envValue ? { ENVD_CMD: invocation.envValue } : {}
+    // 和官方 shell 工具一致:带上受管的 DSH_* 快照(subprocess 会剥掉父进程的 DSH_*)。
+    let dshEnv = null
+    try {
+      const shellEnv = ctx.get('shellEnv')
+      dshEnv = shellEnv && typeof shellEnv.collect === 'function' ? shellEnv.collect(exec) : null
+    } catch {
+      dshEnv = null
+    }
+    const request = {
+      command: invocation.command,
+      workdir: cwd,
+      timeoutMs,
+      signal: exec && exec.signal,
+      env,
+      sandboxPolicy: policy,
+    }
+    if (dshEnv && typeof dshEnv === 'object') request.dshEnv = dshEnv
+    const fail = (stage, error) => {
+      const message = String((error && (error.message || error.name)) || error)
+      if (/sandboxunavailable/i.test(String((error && error.name) || '')) || /sandbox|runner/i.test(message)) {
+        return { ok: false, text: '[sandbox] 委托宿主执行器失败(' + stage + '):围栏 runner 不可用,这条命令没有执行 —— ' + message }
+      }
+      return { ok: false, text: '[sandbox] 委托宿主执行器失败(' + stage + '): ' + message }
+    }
+    let spec = null
+    try {
+      spec = host.resolve(request)
+    } catch (error) {
+      return fail('解析', error)
+    }
+    let execution = null
+    try {
+      execution = await host.execute(spec)
+    } catch (error) {
+      return fail('启动', error)
+    }
+    let result = null
+    try {
+      result = await execution.result()
+    } catch (error) {
+      return fail('执行', error)
+    }
+    if (!result || typeof result !== 'object') return fail('结果', new Error('宿主执行器返回了空结果'))
+    const runnerFailed = Boolean(result.sandbox && result.sandbox.runnerFailed)
+    const aborted = result.aborted === true
+    const LIMIT = 16000
+    const clip = (text) => (text.length > LIMIT ? text.slice(0, LIMIT) + '\n…(已截断,原长 ' + text.length + ' 字符)' : text)
+    const mode = (policy && policy.mode) || gate.mode || '宿主的围栏'
+    const parts = [
+      result.sandbox
+        ? '[sandbox] 委托宿主执行器执行(' + ((result.sandbox && result.sandbox.mode) || mode) + ')'
+        : '[sandbox] 委托宿主执行器执行(策略 ' + mode + ';执行器未报告围栏事实)',
+    ]
+    if (result.sandbox) {
+      if (result.sandbox.runnerFailed) parts.push('[sandbox: 围栏 runner 失败,这条命令没有执行]')
+      if (result.sandbox.denied) parts.push('[sandbox: 文件操作被沙箱拒绝 —— 这是策略拒绝,不要换旁路重试]')
+    }
+    if (result.timedOut) parts.push('[timeout]')
+    if (result.aborted) parts.push('[aborted]')
+    const stdout = result.stdout && typeof result.stdout.text === 'string' ? result.stdout.text : ''
+    const stderr = result.stderr && typeof result.stderr.text === 'string' ? result.stderr.text : ''
+    if (stdout) parts.push(clip(stdout))
+    if (stderr) parts.push('[stderr]\n' + clip(stderr))
+    const exit = result.timedOut ? 'timeout' : result.exitCode !== null && result.exitCode !== undefined ? String(result.exitCode) : '?'
+    parts.push('[exit ' + exit + ']')
+    // runner 失败时命令根本没执行;aborted 是取消 —— 两者都不能回 ok:true。
+    return { ok: !runnerFailed && !aborted, text: parts.join('\n') }
   }
   /** 本会话的语法族(取不到就按全局默认,绝不猜成有终端)。 */
   const familyAt = (agent) => {
@@ -2281,7 +2504,7 @@ function commandTool(ctx, activeShell, gateFor, familyFor) {
       '在本机默认终端里执行一条命令并返回输出(EnvDock 的增补工具,用**本会话语法族**的终端与 PATH)。' +
       '终端是哪一个、必须用哪套语法,以「本机环境 (EnvDock)」简报里「默认终端 / 命令工具」那几行为准。' +
       'EnvDock 按会话的语法族工作:bash 族会话会隐藏宿主的 PowerShell 族命令工具(pwsh/powershell,面板开关可关);' +
-      '若本会话被宿主沙箱围栏,本工具会直接拒绝,请改用宿主命令工具。' +
+      '若本会话受沙箱限制,命令会**委托宿主沙箱执行器**在沙箱内执行(文件写入可能被拒绝;这个部署没有可委托的执行器时才拒绝)。' +
       'cwd 省略时用当前会话的工作目录;长输出会被截断。',
     parameters: {
       type: 'object',
@@ -2334,29 +2557,7 @@ function commandTool(ctx, activeShell, gateFor, familyFor) {
               : '请改用宿主命令工具,或在本机装好该族终端。'),
         }
       }
-      // 沙箱闸门:每一单都按**本会话**的有效策略复检(检查周期是 5 秒,策略可能在两次之间变严)。
-      // 围栏会话里直接拒绝:不 spawn、不委托(EnvDock 不持有围栏执行器,委托就是绕过沙箱)。
-      const gate = gateAt(agent)
-      if (gate.confined) {
-        const host = Array.isArray(at.facts.hostTools) ? at.facts.hostTools : []
-        const bashHost = host.filter((tool) => tool && tool.family === FAMILY_BASH).map((tool) => '`' + String(tool.name) + '`')
-        const pwshHost = host.filter((tool) => tool && tool.family === FAMILY_POWERSHELL).map((tool) => '`' + String(tool.name) + '`')
-        const wayOut = family === FAMILY_BASH ? bashHost.join(', ') || '宿主 bash 工具' : pwshHost.join(', ') || '宿主 pwsh'
-        return {
-          ok: false,
-          text:
-            '[sandbox] 本会话被宿主沙箱围栏(' +
-            (gate.mode || '策略未知') +
-            ');EnvDock 的 envd_shell 不执行命令。\n' +
-            '请改用宿主工具(本会话的 ' +
-            (family === FAMILY_BASH ? 'bash 族' : 'PowerShell 族') +
-            '命令工具:' +
-            wayOut +
-            ')。',
-        }
-      }
-      const argv = shellInvocation(shell, line)
-      if (!argv) return { ok: false, text: '默认终端不可用: ' + shell.label }
+      // 工作目录 / 超时先算好:委托路径也要用(沙箱执行器自己 spawn,不用我们拼 argv)。
       let cwd = args && args.cwd ? String(args.cwd) : ''
       if (!cwd) {
         // 会话的工作目录,不是 dsh 进程的 cwd:命令必须落在用户正在干活的那个目录里
@@ -2377,6 +2578,30 @@ function commandTool(ctx, activeShell, gateFor, familyFor) {
       } catch {}
       if (!isDir) return { ok: false, text: '工作目录不存在: ' + cwd }
       const timeoutMs = Math.min(Math.max(Number(args && args.timeoutMs) || 120000, 1000), 600000)
+      // 沙箱闸门:每一单都按**本会话**的有效策略复检(检查周期是 5 秒,策略可能在两次之间变严)。
+      // 受限会话不再直接拒绝:委托宿主执行器在**沙箱内**执行(它自己 spawn 并挂 sandboxPolicy)。
+      // 只有这个部署没法安全委托(没有执行器 / 族未知 / 目标终端族不支持 / 策略不可得)才拒绝。
+      const gate = gateAt(agent)
+      if (gate.confined) {
+        const delegated = await runDelegated(exec, gate, line, shell, cwd, timeoutMs)
+        if (delegated && !delegated.unsupported) return delegated
+        const host = Array.isArray(at.facts.hostTools) ? at.facts.hostTools : []
+        const hostNames = host.map((tool) => '`' + String(tool.name) + '`')
+        return {
+          ok: false,
+          text:
+            '[sandbox] 本会话受宿主沙箱限制(' +
+            (gate.mode || '策略未知') +
+            '),EnvDock 无法在沙箱内执行这条命令: ' +
+            String((delegated && delegated.reason) || '宿主沙箱执行器不可用') +
+            '。\n' +
+            '请改用宿主命令工具' +
+            (hostNames.length ? '(' + hostNames.join(', ') + ')' : '') +
+            ',它自带沙箱执行。',
+        }
+      }
+      const argv = shellInvocation(shell, line)
+      if (!argv) return { ok: false, text: '默认终端不可用: ' + shell.label }
       const service = ctx.get('subprocess')
       if (!service || typeof service.spawn !== 'function') return { ok: false, text: '宿主没有可用的 subprocess 服务' }
       let handle
@@ -2601,6 +2826,7 @@ export function apply(ctx, config) {
         blockOtherFamily: record.blockOtherFamily !== false,
         bashHostAvailable: record.bashHostAvailable === true,
         fallback: familyRuntime.fallback === true,
+        delegate: canDelegate(ctx),
       }
     }
     // 会话记录还没建立(首次 tick 之前):按手动选择 + 该作用域此刻可见的 bash 族名字
@@ -2625,6 +2851,7 @@ export function apply(ctx, config) {
       bashHostAvailable:
         family === FAMILY_BASH && (agent ? ['ops_bash', 'bash', 'sh', 'zsh', 'fish'].some((name) => hasToolFor(agent, name)) : rt.hostTools.some((tool) => tool && tool.family === FAMILY_BASH)),
       fallback: familyRuntime.fallback === true,
+      delegate: canDelegate(ctx),
     }
   }
 
@@ -3033,7 +3260,7 @@ export function apply(ctx, config) {
         return 'taken'
       }
       syncStats.registerTries++
-      const definition = commandTool(ctx, activeShell, gateFor, familyProbeFor)
+      const definition = commandTool(ctx, activeShell, gateFor, familyProbeFor, () => executorFamilyOf(ctx).family)
       let dispose = null
       try {
         dispose = ctx.tools.register(definition)
@@ -3248,9 +3475,10 @@ export function apply(ctx, config) {
         want = false
         skipReason = 'no-family-terminal'
         setLastError('主族没有可用终端: ' + shell.label)
-      } else if (sandbox.capable && !sandbox.anyUnconfined) {
-        // 有围栏执行器、却没有任何会话 resolve 出 danger-full-access:注册了也只能在
-        // 围栏会话里被拒绝,等于死工具 —— 不注册(§1.1 第 3 条)。
+      } else if (sandbox.capable && !sandbox.anyUnconfined && !sandbox.delegatable) {
+        // 有围栏执行器、却没有任何会话 resolve 出 danger-full-access,而且这个部署**不能**
+        // 把受限会话的命令委托给宿主沙箱执行器:注册了也只会拒绝,等于死工具 —— 不注册。
+        // 能委托时就照常注册:受限会话里通过宿主执行器在沙箱内执行。
         want = false
         skipReason = 'no-unconfined-session'
       }

@@ -64,7 +64,7 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 三条同时满足才注册（`reconcile()` 每个 tick 复核一次，状态一变就立刻重算）：
 
 1. **主族终端可用**：主族 = **生效族**（手动族可用时就是手动族；手动族不可用会回退 `auto`，见「两族」；`auto` 时按本机宿主工具并集判定，有 bash 族 → bash 族，否则 PowerShell 族）。解析出的终端有可用 path，否则 `skipReason='no-family-terminal'`。
-2. **沙箱允许**：没有沙箱执行器（`ctx.shell` 不存在）或执行器不围栏时直接注册；有围栏执行器时，要求**至少一个会话** `sandboxPolicy.resolve` 出 `danger-full-access`——否则注册了也只能在围栏会话里被拒绝，等于死工具（`skipReason='no-unconfined-session'`）。
+2. **沙箱允许**：没有沙箱执行器（`ctx.shell` 不存在）或执行器不围栏时直接注册；有围栏执行器时，只有「**没有任何会话** resolve 出 `danger-full-access`」**且**「这个部署**不能委托**（`canDelegate()` 为假：宿主没有 `shell.resolve` / `execute`、或执行器语法族不是 bash / PowerShell、或没有 `sandboxPolicy` 服务）」时才不注册（`skipReason='no-unconfined-session'`）。**能委托时即使全部会话受限也照常注册**——受限会话里的命令走沙箱内执行（见下）。
 3. **名字没被占**：`envd_shell` 不在工具表里，且 `ctx.tools.register()` 不抛错、注册后在表里确实是**我们那个定义对象**（登记身份，`tools.get(name) === ownDefinition`）；被别的层盖住算 `taken`，注册抛错算 `error`，失败按 30 秒退避重试，`tools/change` 时跳过退避立即重试。
 
 0.6 删除了原来的「家族不重复」条件与 `skipReason='same-family'`：同一个 shell 出现两份不再算「重复提供」——bash 族会话里 `envd_shell`（Git Bash）与宿主 `ops_bash` 并存是按族划分的预期状态，简报写分工（你的 PATH/终端 vs 后台作业/提权参数）。
@@ -75,13 +75,18 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 
 - **按调用会话的族取终端**：bash 族会话用 bash 族终端（本机的 bash 族终端是 Git Bash）；手动 `cmd` / `custom`（无族）或还没判过族的会话按全局默认终端。所以同一台机器上不同会话的 `envd_shell` 可能跑在不同终端里——这正是「每会话一个语法族」的意思。该族**没有可用终端**时明确拒绝并指路（返回 `[terminal]` 文案），不会静默换成另一族的 shell。
 - **无围栏**：`ctx.subprocess.spawn` 直跑（工作目录取当前会话，输出截断，支持 `cwd` / `timeoutMs`）。
-- **本会话被围栏**：**直接拒绝**，不 spawn、不委托——`ctx.subprocess` 没有 `sandboxPolicy` 入口，自己跑就是绕过沙箱。每一单都按本会话策略复检（检查周期 5 秒，策略可能在这期间变严），被围栏或策略不可知时返回：
+- **受限会话 → 委托宿主沙箱执行器在沙箱内执行**（0.6.2 恢复 0.4 的实现）：`gate.confined` 时不再一律拒绝，而是把命令交给宿主的 `ctx.shell`：`resolve(request)` → `execute(spec)` → `result()`。围栏挂在宿主进程上，我们把目标终端当子进程拉起来，它继承同一份围栏——EnvDock 自己**从不** spawn 一条没有 `sandboxPolicy` 的命令。
+  - **命令不拼字符串**：命令文本按 UTF-8 → base64，经环境变量 `ENVD_CMD` 传入；外层只包目标终端自己的启动 argv（宿主族是 bash 就用 bash 引号规则，是 PowerShell 就是 PowerShell 规则），命令内容里没有任何引号拼接。
+  - **request** 带本会话的 `sandboxPolicy`（逐会话 resolve，不用部署默认档）、`workdir`（当前会话的工作目录）、`timeoutMs`、`signal`，以及可选的 `dshEnv`（宿主 `shellEnv.collect` 的快照，subprocess 会剥掉父进程的 `DSH_*`）。
+  - **输出**以 `[sandbox] 委托宿主执行器执行(<mode>)` 开头；末尾固定 `[exit …]`；`runnerFailed`（围栏 runner 坏了、命令没执行）、`aborted`（取消）、`timedOut`（超时）都有独立标记，`runnerFailed` / `aborted` 时 `ok:false`（命令没执行或没跑完，不能报成功）；`[sandbox: 文件操作被沙箱拒绝 —— 这是策略拒绝,不要换旁路重试]` 提醒模型不要在沙箱外重试。
+- **仍然拒绝的情况**（输出格式）：
   ```
-  [sandbox] 本会话被宿主沙箱围栏(<mode>);EnvDock 的 envd_shell 不执行命令。
-  请改用宿主工具(宿主自带的命令工具,它在围栏内可执行)。
+  [sandbox] 本会话受宿主沙箱限制(<mode>),EnvDock 无法在沙箱内执行这条命令: <原因>。
+  请改用宿主命令工具(<a,b>),它自带沙箱执行。
   ```
-- 沙箱事实分三层：**能力位**（执行器会不会围栏）/ **部署默认档**（`shell.sandboxMode`，只用于展示）/ **本会话有效策略**（逐会话 `sandboxPolicy.resolve({ session })`）。合法策略是闭集 `read-only` / `workspace-write` / `danger-full-access`；resolve 返回 `{}`、空 mode 或闭集外的值一律按「策略不可知」处理，并按「被围栏」保守拒绝——**绝不回落到部署默认档**（回落会让围栏会话被当成无围栏直接 spawn）。
-- 删除：`delegatedInvocation` / `runDelegated` / 全部 `delegate*` 计数与包装器、`executorFamily`（0.5 起的精简执行器仍是唯一执行路径）。
+  原因集合：宿主没有 `shell.resolve` / `execute`；宿主执行器**语法族**不是 bash / PowerShell（cmd / 未知——包装串必须按执行器族写，认不出就不冒险）；目标终端是 `cmd` / WSL / 自定义终端（只支持 bash / PowerShell 目标）；拿不到合法 `sandboxPolicy`（**绝不拿部署默认档冒充**）；命令太长（base64 载荷 > 30000）；没有会话信息（拿不到「本会话策略」可交给执行器）。
+- **安全边界（不变）**：`ctx.subprocess` 没有 `sandboxPolicy` 入口，所以 EnvDock 自己 spawn 的路径永远不带围栏；**只有 `ctx.shell` 能挂围栏**。取不到策略就拒绝，绝不退回无围栏 spawn。
+- 沙箱事实分三层：**能力位**（执行器会不会围栏）/ **部署默认档**（`shell.sandboxMode`，只用于展示）/ **本会话有效策略**（逐会话 `sandboxPolicy.resolve({ session })`）。合法策略是闭集 `read-only` / `workspace-write` / `danger-full-access`；resolve 返回 `{}`、空 mode 或闭集外的值一律按「策略不可知」处理，并按「被围栏」保守处理。
 
 ### 宿主命令工具的识别
 
@@ -129,7 +134,7 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 - 开关关闭（`blockOtherFamily=false`）：不遮挡；bash 族简报写 `PowerShell 族宿主工具未隐藏(pwsh),两族同时可见,各按自己的语法写命令,不要混写`。手动 PowerShell 且会话里有 `ops_bash`：不遮挡，简报写「两族同时可见，各按自己的语法写命令，不要混写」。
 - 手动族回退 auto：补一句 `;手动选择的族不可用(该族既没有终端、也没有按该族发布的宿主工具),已回退自动选族`。
 - 未注册：按 `skipReason` 写原因（`no-family-terminal` / `no-unconfined-session` / `taken` / 注册失败）；只说事实，不再有「与 X 同族，不重复提供」。
-- 本会话被围栏：追加拒绝提示与**同语法**的出路（有 bash 族宿主工具就指向它，没有就直说没有）。
+- 本会话受限：**能委托**时追加 `;本会话受沙箱限制:envd_shell 会通过宿主执行器在沙箱内执行(文件写入可能被拒绝)`；**不能委托**时追加 `;本会话受沙箱限制且无法在沙箱内执行:改用 <同语法的宿主工具>`（有 bash 族宿主工具就指向它，没有就直说没有）。
 - 只展示的（启发式认出的 PowerShell 族名字）单独列一句，声明未遮挡。
 - 末尾两行保持：工具绝对路径与版本、`envd` 只能解析已探测工具。
 
@@ -141,7 +146,7 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 - **两层保护，单调叠加、不冲突**：dsh-ops 的 `deny-host-shell` 是 **guard**（dispatch 前拒绝），EnvDock 是 **restrict + guard**（继承层可 restrict 的直接隐藏，自有层挡不掉的才用 guard 拒绝）。同时开启时会有两层遮挡——同一批内置 PowerShell 名既被 EnvDock 挡、也被 dsh-ops 挡，**重复但无冲突**，不需要改 dsh-ops 配置。
 - **不再有「Publish Bash」这类话术**：两者并存即可，EnvDock 不争工具表；`ops_bash` 与 `envd_shell` 同属 bash 族，同时可见是**按族划分的预期状态**，分工写在简报里（需要你机器上的版本用 `envd_shell`，需要后台作业 / 提权参数用宿主工具）。
 - **借鉴来的做法仍在**：① 事件驱动（`tools/change` + 40ms 合并定时器）只用于「重新识别宿主工具 + 必要时重挂/拆自己的工具」，不做对账循环；② 登记身份（`tools.get(name) === 我注册的定义对象`）——同名工具被别的层盖住时，名字还在不代表是我们的，不能认领别人的发布生命周期；③ 宿主没有 `tools.definitions` 时按内置候选名各探一次可见性，名字集合有界。
-- **不学的部分**：dsh-ops 的 `ops_bash` 同样走 `ctx.subprocess`（没有 `sandboxPolicy` 入口），所以 EnvDock 自己的执行闸门原样保留：围栏会话绝不直连，只能拒绝。
+- **不学的部分**：dsh-ops 的 `ops_bash` 同样走 `ctx.subprocess`（没有 `sandboxPolicy` 入口）；EnvDock 受限会话也**不自己 spawn**，而是把命令委托给宿主自带的沙箱执行器 `ctx.shell`，交给它在沙箱内执行——只有这个部署没法安全委托时才拒绝并指路。
 
 ## 状态与面板 API
 
@@ -151,9 +156,9 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 - 面板 API 默认只放行 loopback：数据含本机绝对路径与终端。打开「允许局域网访问」（`allowLan`）后**局域网只能读**（GET）；所有写操作只允许本机，唯一例外是同源页面把 `allowLan` **关掉**（`Origin.host:port` 必须与 `Host` 完全一致，避免任意网页替用户关掉）。理由：写操作能改默认终端 argv，等于把命令注入面开到局域网。
 - **API 加固**：回环来源必须配**回环 Host 字面量**——攻击者把自己的域名重新解析到 `127.0.0.1`（DNS rebinding）后来源地址是回环，但 `Host` 仍是攻击者域名；只比较「Origin 与 Host 一致」会放行这种跨站写（实测可改自定义终端 argv ≈ 本机代码执行），所以 `Host` 为空或非回环一律 403，读写都覆盖。**严格同源**：写请求要求 `Origin.host:port === Host`（不只是「都是回环」——`other-port.localhost` 也能发跨源简单 POST）、`Content-Type` 含 `application/json`、`sec-fetch-site: cross-site` 一律 403、没有 `Origin` 却带 `Sec-Fetch-Site` 的按非面板处理。请求体 >1 MB 时在读 body **之前**就回 413（直接 `destroy` 会让客户端看到 `ECONNRESET`，既不是 413 也不可诊断）；`isLoopbackHost` 严格匹配（`localhost` / `::1` / `127.0.0.0/8`，`127.0.0.1.evil.example` 不算）；非 GET / POST 回 405，坏 JSON 回 400。
 - `/envdock-api` 的 `commandTool` 现在回答「模型在**这个会话**里到底能用什么」：注册了吗（`registered` + `skipReason`）、当前族与来源（`family` / `familySource`，来源是 `auto` 或 `manual`；手动 `cmd` / `custom` 时 `family` 为空）、手动族是否回退（`familyFallback`）、逐会话族的**聚合计数**（`sessions`：`total` / `bash` / `powershell` / `other`，只报数量、不外泄逐会话账本）、被隐藏的名字（`hidden`，`tools.restrict` 已生效）、只能拒绝的名字（`refuseOnly`，agent 自有层发布、`restrict` 挡不掉）、只展示的名字（`displayOnly`，启发式认出的 PowerShell 族）、是否两族同时可见（`mixed`）、开关当前值（`blockOtherFamily`），以及既有的 `shell{label,family,version,path}` / `refuseWhenConfined` / `hostTools[{name,family,learned,group}]` / `sandbox{...}`。0.5 删掉的 `scopes` / `kind` / `hostName` / `denies` 仍然不存在——遮挡只报**结果**（谁被藏了、谁只能拒绝），不报逐会话账本。载荷顶层另有 `family` / `familySource` / `familyFallback`（全局默认族、来源与回退标志），面板没有具体会话时用它（`shell` 行也按它解析，保证与简报的「默认终端」一致）。
-- `sandbox` 顶层仍是聚合值：`{ present, capable, defaultMode, policyKnown, sessionCount, confinedCount, anyUnconfined }`（无 `scopes`）。`confinedCount` 只用于面板的「N 个会话被围栏」与简报追加句。
+- `sandbox` 顶层仍是聚合值：`{ present, capable, defaultMode, policyKnown, sessionCount, confinedCount, anyUnconfined, delegatable }`（无 `scopes`，`commandTool.sandbox` 是同一份）。`delegatable` = 这个部署能不能把受限会话的命令委托给宿主沙箱执行器（面板 / 简报据此决定说「会在沙箱内执行」还是「不会执行」）；`confinedCount` 只用于面板的「另有 N 个会话受沙箱限制」与简报追加句。
 - `syncStats` 收敛为 11 个字段：`ticks` / `lastAt` / `intervalMs` / `detections` / `lastDetectMs` / `hostToolScans` / `registerTries` / `restrictApplied` / `guardRefusals` / `lastError` / `lastErrorAt`。它们是**稳态证据**：`ticks` 涨而 `registerTries` / `restrictApplied` 不涨，说明注册表与遮挡都没被反复拆建；`guardRefusals` 只在模型真的去调被拒绝的内置 PowerShell 名时才涨。
-- **过渡期旧版 API**：client.js 是热更新的，宿主进程里的 index.js 要重启 dsh 才换。旧载荷没有 `registered` / `hostTools`，也没有 0.6 的 `family` / `familySource` / `familyFallback` / `sessions` / `hidden` / `refuseOnly` / `displayOnly` / `mixed`；面板用旧的 `visible` 推断注册、用旧 `hostName` 填宿主工具，并显示「接口是旧版构建，重启 dsh 后可显示命令工具信息」——不把不知道的事说成「`—` / 未识别到」。
+- **过渡期旧版 API**：client.js 是热更新的，宿主进程里的 index.js 要重启 dsh 才换。旧载荷没有 `registered` / `hostTools`，也没有 0.6 的 `family` / `familySource` / `familyFallback` / `sessions` / `hidden` / `refuseOnly` / `displayOnly` / `mixed` / `sandbox.delegatable`；面板用旧的 `visible` 推断注册、用旧 `hostName` 填宿主工具，`delegatable` 缺失时按「不能委托」的保守文案（受限会话会拒绝），并显示「接口是旧版构建，重启 dsh 后可显示命令工具信息」——不把不知道的事说成「`—` / 未识别到」。
 
 ## 面板结构
 
@@ -180,7 +185,7 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 2. **置顶「命令工具」卡**：
    - `终端` chips：`自动` / 各终端 / `+` 自定义终端（`+` 展开路径 + 名称 + 参数模板）。chips **只显示终端名，不带族小标**；`自动` 的悬停说明是「按会话自动选语法族（推荐）」。
    - `命令` 行：语法标签（`bash 语法` / `PowerShell 语法`；**手动选择时才带「· 手动」**，自动不带后缀）· `envd_shell`（没提供时写 `—`）· `其它：ops_bash · pwsh`（没有就写「没有其它命令工具」）· 右侧「详情」。
-   - 备注（最多两行，全白话）：没提供的原因 / `另有 N 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令，请改用其它命令工具` / `已隐藏 pwsh（避免两套语法混用）` / `手动选了 PowerShell 语法：PowerShell 与 bash 工具都在，各按自己的语法写，别混用`。普通状态下没有备注。
+   - 备注（最多两行，全白话）：没提供的原因 / 受沙箱限制（能委托：`另有 N 个会话受沙箱限制：envd_shell 会在沙箱内执行（文件写入可能被拒绝）`；不能委托：`…在那些会话里不会执行命令，请改用其它命令工具`）/ `已隐藏 pwsh（避免两套语法混用）` / `手动选了 PowerShell 语法：PowerShell 与 bash 工具都在，各按自己的语法写，别混用`。普通状态下没有备注。
    - 详情（默认收起）：见「详情与轮询」。
 3. **工具链**：一行一个工具（分组 / 名称 / 版本 / 路径可点复制 / 行尾「N 个版本 ▾」），版本管理器一行一个（激活版本带 ←），末尾「+ 自定义工具」入口；**环境检查收在工具链末尾一行**：健康时 `✓ 通过`，有问题时 `⚠ N 项` + 第一条标题，点开展开列表。
 4. **环境简报**：一行「已注入给 AI / 未注入」+ **行内注入开关** + 复制 + 展开；展开才显示简报正文。开关挪到这里之后，底部 footer 不再重复同一件事。
@@ -205,7 +210,7 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 ### 备注规则（最多两行，全白话）
 
 - **没提供时**只说原因，按 `skipReason` 分支：`no-family-terminal` → 「没找到可用的终端（bash 语法需要 Git Bash，PowerShell 语法需要 pwsh）」；`no-unconfined-session` → 「没有不受沙箱限制的会话，暂时不会提供 envd_shell」；`taken` → 「和别的插件重名了，暂时不提供 envd_shell」；`error` → 「没能提供命令工具（注册失败）」。
-- **受沙箱限制**：一行 `另有 N 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令，请改用其它命令工具`（补「另有」是为了不让人以为说的是当前会话）。
+- **受沙箱限制**（两种，按 `commandTool.sandbox.delegatable`，旧载荷缺字段按不能委托）：能委托时 muted 一行 `另有 N 个会话受沙箱限制：envd_shell 会在沙箱内执行（文件写入可能被拒绝）`；不能委托时 warn 一行 `另有 N 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令，请改用其它命令工具`（补「另有」是为了不让人以为说的是当前会话）。
 - **手动选的语法不可用**：一行 `手动选的语法不可用（没有对应终端，也没有对应命令工具），已自动改回按会话选择`。
 - **两套语法同时可见**（手动 PowerShell + 会话里有 bash 工具）：一行 `手动选了 PowerShell 语法：PowerShell 与 bash 工具都在，各按自己的语法写，别混用`。
 - **隐藏生效**：一行 `已隐藏 pwsh（避免两套语法混用）`；开关关掉时写「PowerShell 的命令工具没有隐藏（开关已关）」；手动 bash 但会话看不到 bash 命令工具时写「这个会话没有 bash 命令工具，未隐藏 PowerShell 工具」。
@@ -232,7 +237,7 @@ npm test                     # 五个自测一次跑完（只在源代码检出�
 
 node test/parsers.mjs        # 版本管理器输出解析
 node test/i18n-check.mjs     # 中英词条键/占位符一致、slot 注册仍在
-node test/host-harness.mjs   # 用 Cordis 服务替身把 apply() 真跑起来，走完所有 API op / envd action / 注册 / 两族遮挡与围栏拒绝
+node test/host-harness.mjs   # 用 Cordis 服务替身把 apply() 真跑起来，走完所有 API op / envd action / 注册 / 两族遮挡 / 沙箱委托与拒绝分支
 node test/panel-render.mjs   # 用极简 React 运行时替身渲染面板，断言结构 / 文案 / 交互
 node test/family.mjs         # 两族纯逻辑：选族 / 锁定 / 10 秒升级窗 / 手动族 / 遮挡名单 / 简报行
 
@@ -245,17 +250,21 @@ node test/simulate.mjs --help   # 手动验证:起假宿主跑真实 index.js，
 
 - **遮挡只针对另一族的内置名**：`restrict` 的 `deny` 集合恒为 `{ pwsh, powershell }` 的子集，只在「开关开 + 会话族 bash + 该会话看得到 bash 族宿主工具」时调用；bash 族名字与启发式认出的名字**永不出现**在 deny / guard 名单里。
 - **「同族不重复提供」已删除**：`skipReason='same-family'` 在 API 与面板词条里都不再出现（断言不存在）。
-- **注册三条件各有用例**：无主族终端 → `no-family-terminal`；无执行器 → 注册；全部会话围栏 → `no-unconfined-session`；有会话无围栏 → 注册；名字被占 → `taken`。
+- **注册三条件各有用例**：无主族终端 → `no-family-terminal`；无执行器 → 注册；全部会话受限 + **不能委托** → `no-unconfined-session`；全部会话受限 + **能委托** → 注册（受限会话走沙箱内执行）；有会话无围栏 → 注册；名字被占 → `taken`。
 - **选族按会话并锁定**：会话首次判定后不再变；只有首次判成 PowerShell 族的 10 秒内允许升级一次；手动族覆盖自动族；`cmd` / `custom` 不被遮挡。
 - **遮挡记忆与「重新探测」边界**（host-harness 5.5）：`ops_bash` 出现后消失，会话族仍 bash、`pwsh` 仍 hidden（不来回闪）；显式 refresh 后族与遮挡一起重判（family 回 powershell、hide 空、deny 空），TTL 过期不触发。
 - **遮挡可撤销**：开关关闭 / 会话族变化 / agent disposed → 之前 restrict 掉的工具重新可见（restrict 返回的撤销句柄被调用）；guard 只拒绝、不 spawn。
-- **围栏会话调用 `envd_shell`** → 拒绝、**不 spawn**、文案含「围栏」与「宿主工具」；无围栏会话照常执行，且 bash 族会话用的是 bash 族终端（夹具断言 argv）。
+- **受限会话走沙箱委托**（host-harness §3.4）：有 `ctx.shell` 时 `envd_shell` 依次调 `resolve` → `execute`；`request` 带本会话 `sandboxPolicy.mode`、`workdir`、`timeoutMs`；宿主执行器拿到的 argv 里**没有**用户命令，`ENVD_CMD` base64 解出来才是原文；输出以 `[sandbox] 委托宿主执行器执行(<mode>)` 开头、含宿主 stdout 与 `[exit 0]`；EnvDock 自己的 `subprocess` 增量为 0（不自己 spawn）；`runnerFailed` → `ok:false` 且标「命令没有执行」。
+- **不能委托时拒绝**（§3.3 / §3.4 g·h·i）：执行器缺失、目标终端是 cmd、策略不可得 → 拒绝并含 `[sandbox]`、「无法在沙箱内执行」与具体原因，且**不 spawn**。
+- **注册条件放宽**（§3.3）：全部会话受限 + 有可委托执行器 → 仍注册；执行器只有 `sandboxMode`（不能委托）或没有 `sandboxPolicy` 服务 → `skipReason='no-unconfined-session'`。
+- **`/envdock-api` 的 `sandbox.delegatable`**：顶层与 `commandTool.sandbox` 都有，`true` / `false` 两种情形各有用例；简报与面板据此切换「会在沙箱内执行 / 不会执行」两种说法。
+- **无围栏会话**（§3.4 d）照常走 `subprocess.spawn`，且 bash 族会话用的是 bash 族终端（夹具断言 argv）。
 - **`/envdock-api`**：`commandTool` 有 `family` / `familySource` / `sessions` / `hidden` / `refuseOnly` / `displayOnly` / `mixed`，`syncStats` 为 11 项白名单（含 `restrictApplied` / `guardRefusals`）；0.5 的 `scopes` / `kind` / `denies` 仍不存在。
 - **状态文件**：旧 `shellTakeover` / `sandboxTakeover` 被忽略（读取不报错、写回不保留）。
 
 `family.mjs` 不依赖宿主夹具：选族、锁定、10 秒窗、遮挡名单与简报行都是纯函数，用表驱动用例钉住——「不挡 PowerShell 以外的名字 / 不挡 bash 名」这条边界最便宜的回归就在这里。
 
-`panel-render` 不引入 React：桩掉 slots / locale / fetch，加载 `client.js` 捕获真实渲染树，断言首屏用途一句、白话二态 badge（就绪 / 只展示）、终端 chips 无族标、命令行语法标签（手动才带「· 手动」）、两行白话备注、简报行内注入开关、高级设置折叠里的两个开关、footer 有数据时零开关 / 403 时保留 allowLan 入口、详情里的计数与标签（共 387 条），并保留**不存在**逐会话表 / 接管 chips / `.envd-statuschip`、首屏不出现「宿主 / 围栏 / 增补」黑话，以及长名字溢出、复制兜底、15 秒轮询去重与卸载清定时器。
+`panel-render` 不引入 React：桩掉 slots / locale / fetch，加载 `client.js` 捕获真实渲染树，断言首屏用途一句、白话二态 badge（就绪 / 只展示）、终端 chips 无族标、命令行语法标签（手动才带「· 手动」）、两行白话备注、受限备注的两种文案与色调（`delegatable=true` → muted「会在沙箱内执行」；`false` / 旧载荷缺字段 → warn「不会执行」）、简报行内注入开关、高级设置折叠里的两个开关、footer 有数据时零开关 / 403 时保留 allowLan 入口、详情里的标签（断言数随用例增加），并保留**不存在**逐会话表 / 接管 chips / `.envd-statuschip`、首屏不出现「宿主 / 围栏 / 增补」黑话，以及长名字溢出、复制兜底、15 秒轮询去重与卸载清定时器。
 
 `npm test` 只在**检出目录**可用：npm 包的 `files` 里没有 `test/`，从 npm 安装的插件没有这些自测可跑。
 
@@ -277,7 +286,7 @@ test/panel-render.mjs    面板渲染回归（极简 React 替身，零依赖）
 test/family.mjs          两族纯逻辑回归（选族 / 锁定 / 遮挡名单 / 简报行，零依赖）
 ```
 
-Host 半边**不 import 任何 `@deepseek-ai/*` 包**（本地目录安装是 link 检出，包内 import 解析不到 profile 的 node_modules），只用 `node:` 内置模块；命令探测走宿主的 `subprocess` 服务（只跑 `--version` 之类的只读探测，继承 dsh 的工作目录语义）。增补出来的 `envd_shell` **只走 `subprocess.spawn`**：那条路没有 `sandboxPolicy` 入口，所以围栏会话里它绝不执行——直接拒绝，让模型用宿主工具（宿主执行器自带围栏）。这是「增补」模型里唯一需要的执行闸门；0.6 的遮挡走 `tools.restrict` / `tools.guard` 两条注册表通道，不碰子进程。
+Host 半边**不 import 任何 `@deepseek-ai/*` 包**（本地目录安装是 link 检出，包内 import 解析不到 profile 的 node_modules），只用 `node:` 内置模块；命令探测走宿主的 `subprocess` 服务（只跑 `--version` 之类的只读探测，继承 dsh 的工作目录语义）。增补出来的 `envd_shell` 有两条执行路径：**无围栏**走 `subprocess.spawn`；**受限会话**走宿主沙箱执行器 `ctx.shell`（`resolve` → `execute` → `result`），围栏挂在宿主进程上、目标终端作为子进程继承它，EnvDock 自己从不 spawn 一条没有 `sandboxPolicy` 的命令。0.6 的遮挡走 `tools.restrict` / `tools.guard` 两条注册表通道，不碰子进程。
 
 ## 已知边界
 
@@ -291,8 +300,10 @@ Host 半边**不 import 任何 `@deepseek-ai/*` 包**（本地目录安装是 li
 - **非 Windows 没有测试覆盖**：两族判定依赖 Windows 上常见的宿主命令工具名（`pwsh` / `powershell` / `ops_bash` …）。POSIX 上逻辑同构但没跑过；族是按名字认的，不区分真实 shell 二进制。
 - **遮挡是否触发取决于该会话的工具表**：只有宿主工具里确实有内置 `pwsh` / `powershell` 时才会遮挡；dsh-ops 已经把官方 `pwsh` 顶掉的部署里就看不到遮挡效果（只有 `ops_bash`）。两种情况都由测试夹具覆盖，现场以 `/envdock-api` 的 `hidden` / `refuseOnly` 与简报里「已隐藏 / 会被拒绝」那句为准。
 - 增补出来的 `envd_shell` 是**精简执行器**：单次前台、输出截断、支持 `cwd` / `timeoutMs`；没有后台作业、没有 tail 落盘文件、没有 `sandbox_permissions` 升级参数。要这些能力就用宿主自带的命令工具（它一直在）。
-- 围栏会话里 `envd_shell` 直接拒绝（不 spawn、不委托）：`ctx.subprocess` 没有 `sandboxPolicy` 入口；策略不可知按「被围栏」保守处理。
-- 注册三条件任一不满足就不注册（面板只展示宿主工具），原因在备注与 `commandTool.skipReason` 里；全部会话被围栏时属「沙箱不允许」，不会创建死工具。
+- **委托依赖宿主执行器**：受限会话能不能跑，取决于宿主是否提供 `ctx.shell`（`resolve` / `execute` / `result`）与 `sandboxPolicy` 服务，且执行器语法族是 bash / PowerShell；缺一样就退回「拒绝 + 指路」，绝不自己 spawn。
+- **仍然拒绝的边界**：目标终端是 `cmd` / WSL / 自定义终端（只支持 bash / PowerShell 目标）；宿主执行器族是 cmd 或认不出；拿不到合法 `sandboxPolicy`（不拿部署默认档冒充）；命令太长（base64 载荷 > 30000）。
+- **沙箱内写文件可能被拒绝**：`read-only` / `workspace-write` 策略下写盘会被沙箱拒绝（输出里会出现 `[sandbox: 文件操作被沙箱拒绝 …]`），这是策略本身，不是工具坏了、也不要换旁路重试。
+- 注册三条件任一不满足就不注册（面板只展示其它命令工具），原因在备注与 `commandTool.skipReason` 里；全部会话受限时**只有这个部署不能委托**才属「沙箱不允许」（`no-unconfined-session`），能委托时照常注册。
 - 宿主命令工具的家族靠名字 token / 描述启发式认：认不出来会影响选族依据与 chips，但**永不影响模型怎么调那个工具**；遮挡名单只认内置 PowerShell 名，启发式认出的名字只展示。
 - 工作目录取**当前会话的工作目录**（不是 dsh 进程 cwd）。
 - 探测结果在内存里缓存 45 秒，只有默认终端 / 自定义终端 / 默认版本 / 自定义工具的写入会让它立即失效；「重新探测」强制重扫并清空版本号缓存（版本号本身缓存 10 分钟，key 含 mtime+size）。

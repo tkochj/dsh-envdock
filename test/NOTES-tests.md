@@ -309,7 +309,7 @@ node test/simulate.mjs --json                                   # 单行机器�
 | 11 | 不变量 | 夹具根层 restrict 直接抛错;全程(除有意探针)没有根层 restrict,更没成功落地 |
 | 12 | agent/disposed | 该作用域 deny 全清、agents.list 移除、pwsh 重新可见、简报不再说已隐藏;关开关后一个对账周期内 deny 全清 |
 | 13 | 振荡 | 稳定后连续 10 次对账 restrict 调用 ≤1 次、deny/hidden 不漂移 |
-| 14 | 围栏 bash 族会话 | 简报「本会话被围栏」+ ops_bash、不含旧「优先 envd_shell」;`[sandbox]` 拒绝文案保留且指向 ops_bash;无围栏会话照常执行 |
+| 14 | 受限 bash 族会话 | 简报「沙箱内执行」+ ops_bash、不含「会拒绝」/旧「优先 envd_shell」;执行走**委托宿主执行器**(不自己 spawn);无法委托的同构 fixture(5.14b)简报「无法在沙箱内执行」、执行被拒绝且指向 ops_bash |
 | 15 | 无 Git Bash + ops_bash | `skipReason='no-family-terminal'`、envd_shell 未注册、会话族仍 bash、遮挡仍生效、简报「未找到」 |
 | 16 | 手动 bash 但会话没有 bash 族工具 | 不遮挡(0 次/hide 空)、guard 放行、简报警告「未遮挡」 |
 | 17 | 手动 bash 但该族**既没有终端、也没有宿主工具** | 回退 auto:`familySource='auto'`、API 顶层与 `commandTool` 都 `familyFallback=true`、生效族按自动规则重判(powershell);简报追加「手动选择的族不可用……已回退自动选族」;注册该族宿主工具后**下一轮对账**自动回到 `manual`(`familyFallback=false`,不用重新探测) |
@@ -354,6 +354,82 @@ node test/simulate.mjs --host-tools ops_bash,pwsh --shell bash                  
   另外它要求本机在真实 PATH 下有 bash 族终端(否则前置的 `setShell bash` 就会 400)。
 - 依赖本机终端的用例(1/2/6/7/16/17)同样按快照里的 terminals 决定 SKIP,不假设机器装了什么。
 - `test/panel-render.mjs` 归 Lead 维护,未改;面板对新增字段的渲染不在本文件的断言范围。
-- `familyFallback` 目前只在 `test/host-harness.mjs` §5.17 断言;`test/family.mjs` 没有单独覆盖
-  `familyBriefLine` 的 fallback 文案(该轮 Lead 限定只动 harness/NOTES,需要的话可以补一条纯函数用例)。
+- `familyFallback` 在 `test/host-harness.mjs` §5.17(真实服务路径)与 `test/family.mjs`(familyBriefLine 的 fallback 文案)两边都有断言。
+
+
+---
+
+## 13. 0.6.2:沙箱委托执行(从 0.4 搬回 `runDelegated`)
+
+> 行为:受限会话不再一律拒绝。`envd_shell.execute` 在 `gate.confined` 时把命令**委托给宿主沙箱执行器**
+> (`ctx.shell.resolve/execute/result`),在宿主围栏内拉起目标终端;EnvDock 自己**不 spawn**。
+> 只有「无法安全委托」才拒绝(宿主没有 resolve/execute、执行器族不是 bash/powershell、目标终端是
+> cmd/wsl/custom、取不到合法 sandboxPolicy、命令 base64 超过 30000)。
+
+### 13.1 夹具(`test/fixture/host.mjs`)本轮**不需要改**
+
+`fakeSandboxedShell` 早就具备这次要观察的全部能力,直接复用:
+
+| 能力 | 用途 |
+| --- | --- |
+| `calls.resolved[]` / `calls.executed[]` | 断言「委托了一次」、检查 `request`/`spec` 透传 |
+| `resolve(request)` 返回 `{...request, onExpiry, stdoutMaxBytes}` | `spec.command/workdir/timeoutMs/env/sandboxPolicy` 原样可见 |
+| `execute(spec).result()` 返回 `sandbox:{mode,denied,runnerFailed}` + stdout/stderr/exitCode | 断言成功文本、runnerFailed、denied 三类结果 |
+| `state.runnerFailed` / `state.denied` / `state.abort()` / `state.fail='resolve'\|'execute'\|'result'` | 分阶段失败注入 |
+| `className:'BashSandboxExecutor'` | 让 `executorFamilyOf` 认成 bash 族,固定委托包装串的口径 |
+
+`fakeSandboxPolicy` 也够用:回调按 `session.key` 给 mode;传非法 mode(如 `'not-a-mode'`)可造「策略非法」;
+不传 `sandboxPolicy` 服务可造「策略不可得」。
+
+### 13.2 `test/host-harness.mjs`:§3.3 / §3.4 重写
+
+**§3.3 注册条件(委托可用性)**
+
+- 全部会话受限 + `fakeSandboxedShell` + policy → **注册**(`sandbox.delegatable=true`),不再是 `no-unconfined-session`;
+- 执行器只有 `{ sandboxMode }`(没有 resolve/execute)+ 全部受限 → `skipReason='no-unconfined-session'`,
+  `delegatable=false`,简报「无法在沙箱内执行 + 改用宿主」;
+- 没有 `sandboxPolicy` 服务 + 全部受限 → 同样 `no-unconfined-session`、`delegatable=false`;
+- 有 `danger-full-access` 会话的混合部署 → 注册,`sandbox.delegatable=true`。
+
+**§3.4 委托执行 / 无法委托时拒绝**(a–i)
+
+| 用例 | 断言 |
+| --- | --- |
+| (a) 委托成功 | `ok:true`、`[sandbox] 委托宿主执行器执行(workspace-write)`、宿主 stdout `host-ran`、`[exit 0]`;`subprocess` 增量 **0**;宿主 `execute` 恰好一次;`ENVD_CMD` base64 解码 == `echo owned`;`spec.sandboxPolicy.mode==='workspace-write'`;`spec.workdir`/`timeoutMs`;`spec.command` 按**执行器族**包装(bash:`; exit?`)且含目标终端 path;`resolve` 收到的 request 带 `sandboxPolicy` + `env.ENVD_CMD` |
+| (b) runnerFailed | `ok:false`、文本含「围栏 runner 失败」「这条命令没有执行」 |
+| (c) denied | 文本含「文件操作被沙箱拒绝」(命令本身执行了) |
+| (d) 无围栏会话 | 仍直跑(自己 spawn,argv 按会话族语法) |
+| (e) 无会话信息 | 拒绝(`[sandbox]` + 「本会话信息缺失」),不 spawn |
+| (f) 简报 | 受限会话「会通过宿主执行器在沙箱内执行」且不含「会拒绝」;无围栏会话不提沙箱限制;新会话首步也按自己的会话判 |
+| (g) 执行器不可委托 | 混合部署(为拿到注册)里受限会话 → 拒绝(`[sandbox]`+「无法在沙箱内执行」+「宿主命令工具」+「没有可委托的沙箱执行器」),不 spawn |
+| (h) 手动 cmd 目标终端 | 拒绝(「不支持安全委托执行」),不 spawn;`setShell` 复位 |
+| (i) 策略不可得/非法 | 拒绝(「策略不可得」+「无法在沙箱内执行」),不 spawn |
+
+**API 形状**:`sandbox`(顶层 + `commandTool.sandbox`)新增 `delegatable:boolean`;§3.6 的形状断言
+从 7 键扩到 8 键,并额外断言「没有 `ctx.shell` 时 `delegatable===false`」。
+
+**§5.14 重写**:受限 bash 族会话 → 简报含「会通过宿主执行器在沙箱内执行」+ `ops_bash`、不含「会拒绝」;
+执行时**委托**宿主执行器(`ok:true`、不自己 spawn),不再断言旧「围栏拒绝」文案。
+另加同构的 5.14b(`shell:{sandboxMode}` 无法委托):简报「无法在沙箱内执行」、执行被拒绝且指向 `ops_bash`。
+
+### 13.3 `test/family.mjs`(`familyBriefLine` 的 confined 两态)
+
+- `delegate=true` → 「本会话受沙箱限制:envd_shell 会通过宿主执行器在沙箱内执行(文件写入可能被拒绝)」,
+  不含「会拒绝」;
+- `delegate=false` → 「本会话受沙箱限制且无法在沙箱内执行:…」(bash 指向 `ops_bash` / powershell「改用宿主」);
+- bash / powershell 各两边,共 4 条;
+
+### 13.4 结果(本机)
+
+- `node test/family.mjs` → **92/92**
+- `node test/host-harness.mjs` → **320/320**、exit 0、0 SKIP
+- `parsers` / `i18n-check` / `panel-render`(Lead 维护)保持全绿;`simulate.mjs` 未改
+  (它的文件头注释仍写「围栏拒绝」,属描述性文字,不在 task-7 写作用域)。
+
+### 13.5 已知边界
+
+- (a) 里「按执行器族包装」用 `className:'BashSandboxExecutor'` 固定成 bash 包装串;不传 className 时
+  `executorFamilyOf` 走平台默认(Windows → powershell),两种都能委托,只是包装串不同。
+- (i) 用「policy 服务存在但返回非法 mode」造策略不可得;「policy 服务缺失」在 §3.3 里单独覆盖(此时不可委托、不注册)。
+- `runnerFailed`/`denied` 直接改夹具 shell 的 `state`,同一 fixture 内连续断言,记得用完复位(用例已复位)。
 

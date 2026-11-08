@@ -81,6 +81,8 @@ check('ModuleLoader id 与包名一致', source.includes("id: 'dsh-envdock'"))
 const FAMILY_KEYS = [
   'famBash', 'famPwsh', 'famManual', 'autoShellHint',
   'noteHiddenPwsh', 'noteMixed', 'noteNotBlocked', 'noteNoBashHost', 'noteFamilyFallback', 'noteConfined',
+  // 0.6.2 沙箱委托:受限会话里 envd_shell 会在沙箱内执行
+  'noteConfinedSandboxed',
   'skipNoFamilyTerminal', 'blockOtherFamily', 'blockOtherFamilyHint', 'blockOtherFamilyHintTitle',
   'displayOnlyTag', 'hostToolHidden', 'hostToolRefused',
   // 0.6.1 首屏收敏:一句用途说明 + 高级设置 + 简报关闭时的正文说明
@@ -101,6 +103,8 @@ check('0.6.1 终端 chip 不再带族小标', !source.includes('envd-chipfam') &
 check('0.6.1 底部的「其它」前缀与语法标签都在', zhBlock.includes("hostPrefix: '其它：'") && zhBlock.includes("famBash: 'bash 语法'") && zhBlock.includes("famPwsh: 'PowerShell 语法'"))
 check('0.6.1 注入开关移进简报区(词条仍在,footer 不再重复)', zhBlock.includes("injectBrief:'把环境简报注入给 AI'") || zhBlock.includes("injectBrief: '把环境简报注入给 AI'"))
 check('0.6.1 受限备注带主语「另有 N 个会话」', zhBlock.includes('另有 {n} 个会话受沙箱限制') && enBlock.includes('{n} other sessions are sandbox-limited'), 'zh=' + zhBlock.includes('另有 {n} 个会话受沙箱限制') + ' en=' + enBlock.includes('{n} other sessions are sandbox-limited'))
+check('0.6.2 沙箱委托的备注两条都在(会执行 / 不会执行)', zhBlock.includes("noteConfinedSandboxed: '另有 {n} 个会话受沙箱限制：envd_shell 会在沙箱内执行") && enBlock.includes('runs inside the sandbox') && zhBlock.includes("noteConfined: '另有 {n} 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令"), 'zh-sandboxed=' + zhBlock.includes('会在沙箱内执行'))
+check('0.6.2 面板代码按 delegatable 分流(缺字段走保守文案)', source.includes('confinedDelegatable') && source.includes("sandboxInfo.delegatable === true") && source.includes('t.noteConfinedSandboxed'))
 
 console.log('\n' + (failures.length ? failures.length + ' 项失败:' : '全部通过'))
 for (const f of failures) console.log('  · ' + f)

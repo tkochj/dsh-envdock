@@ -397,7 +397,7 @@ const commandTool = (over) => ({
   shell: { label: 'Git Bash', family: 'bash', version: '5.3.15', path: 'E:/Git/bin/bash.exe' },
   refuseWhenConfined: true,
   hostTools: HOST_TOOLS,
-  sandbox: { capable: true, present: true, defaultMode: 'workspace-write', anyUnconfined: true, confinedCount: 0, sessionCount: 1 },
+  sandbox: { capable: true, present: true, defaultMode: 'workspace-write', anyUnconfined: true, confinedCount: 0, sessionCount: 1, delegatable: true },
   ...over,
 })
 
@@ -420,7 +420,7 @@ const payload = (over) => ({
   detectedAt: 1700000000000,
   hasSubprocess: true,
   brief: 'demo brief',
-  sandbox: { present: true, capable: true, defaultMode: 'workspace-write', policyKnown: true, sessionCount: 1, confinedCount: 0, anyUnconfined: true },
+  sandbox: { present: true, capable: true, defaultMode: 'workspace-write', policyKnown: true, sessionCount: 1, confinedCount: 0, anyUnconfined: true, delegatable: true },
   syncStats: syncStats({}),
   // 默认就是这台机器此刻的样子:bash 族会话,pwsh 被隐藏。
   commandTool: commandTool({ hostTools: BASH_HOST_TOOLS, hidden: ['pwsh'] }),
@@ -459,6 +459,7 @@ const COPY = {
   taken: '和别的插件重名了，暂时不提供 envd_shell',
   registerFailed: '没能提供命令工具（注册失败）',
   fence: (n) => '另有 ' + String(n) + ' 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令，请改用其它命令工具',
+  fenceSandboxed: (n) => '另有 ' + String(n) + ' 个会话受沙箱限制：envd_shell 会在沙箱内执行（文件写入可能被拒绝）',
   hiddenPwsh: (names) => '已隐藏 ' + names + '（避免两套语法混用）',
   notBlocked: 'PowerShell 的命令工具没有隐藏（开关已关）',
   noBashHost: '这个会话没有 bash 命令工具，未隐藏 PowerShell 工具',
@@ -651,7 +652,7 @@ const noUnconfined = await mountPanel(
       registered: false,
       visible: false,
       skipReason: 'no-unconfined-session',
-      sandbox: { capable: true, present: true, defaultMode: 'workspace-write', anyUnconfined: false, confinedCount: 2, sessionCount: 2 },
+      sandbox: { capable: true, present: true, defaultMode: 'workspace-write', anyUnconfined: false, confinedCount: 2, sessionCount: 2, delegatable: false },
     }),
   }),
 )
@@ -676,22 +677,28 @@ check('6 注册失败:备注说「注册失败，未注册」', noteTexts(regFai
 check('6 注册失败:失败原因染 warn(要用户看见)', hasClass(noteClass(noteNodes(regFailed.tree)[0]), 'warn'), describeAll(noteNodes(regFailed.tree)))
 check('6 注册失败:命令行写「—」', textOf(ownTool(regFailed.tree)) === '—')
 
-// ───────────────────────────────── 7) 受限信息只进备注:badge 仍是「就绪」 ──
-// 面板是全局的,badge 不能拿「某些会话被限制」当面板结论(没主语的「受限」会被当成插件坏了)。
+// ───────────────────────────────── 7) 受限信息只进备注:可委托时说「会在沙箱内执行」 ──
+// 面板是全局的,badge 不能拿「某些会话被限制」当面板结论;0.6.2 起受限会话能把命令交给沙箱执行器。
 const confinedPayload = payload({
-  commandTool: commandTool({ sandbox: { capable: true, present: true, defaultMode: 'workspace-write', anyUnconfined: true, confinedCount: 2, sessionCount: 3 } }),
+  commandTool: commandTool({ sandbox: { capable: true, present: true, defaultMode: 'workspace-write', anyUnconfined: true, confinedCount: 2, sessionCount: 3, delegatable: true } }),
 })
 const confined = await mountPanel(confinedPayload)
 check('7 受限信息只进备注:badge 仍是 ok「就绪」', badgeState(confined.tree) === 'ok' && badgeOf(confined.tree).text === COPY.additive, emoji(headerBadges(confined.tree)))
 check('7 受限信息只进备注:badge 不带 warn 色(不再出现「受限」)', !hasClass(badgeOf(confined.tree).cls, 'warn'))
 check('7 受限信息只进备注:受限时工具仍是已注册的 envd_shell', textOf(ownTool(confined.tree)) === 'envd_shell')
 check('7 受限信息只进备注:备注只剩受限一行', noteNodes(confined.tree).length === 1, 'notes=' + JSON.stringify(noteTexts(confined.tree)))
-check('7 受限信息只进备注:文案明确「另有 N 个会话」', noteTexts(confined.tree)[0] === COPY.fence(2) && noteTexts(confined.tree)[0].startsWith('另有 2 个会话'), JSON.stringify(noteTexts(confined.tree)))
-check('7 受限信息只进备注:受限备注带 warn 类与 ⚠ 图标', hasClass(noteClass(noteNodes(confined.tree)[0]), 'warn') && textOf(noteNodes(confined.tree)[0]).startsWith('⚠'), describe(noteNodes(confined.tree)[0]))
-check('7 受限信息只进备注:badge title 带上这一行(悬停可读)', Boolean(badgeOf(confined.tree)) && String(badgeOf(confined.tree).title || '').includes(COPY.fence(2)), JSON.stringify(badgeOf(confined.tree) && badgeOf(confined.tree).title))
+check('7 受限信息只进备注:delegatable=true 时说「会在沙箱内执行」(不再吓人)', noteTexts(confined.tree)[0] === COPY.fenceSandboxed(2) && noteTexts(confined.tree)[0].includes('会在沙箱内执行'), JSON.stringify(noteTexts(confined.tree)))
+check('7 受限信息只进备注:可委托时是 muted 信息色、不带 ⚠', noteClass(noteNodes(confined.tree)[0]) === 'envd-note' && !textOf(noteNodes(confined.tree)[0]).startsWith('⚠') && textOf(noteNodes(confined.tree)[0]).startsWith('·'), describe(noteNodes(confined.tree)[0]))
+check('7 受限信息只进备注:badge title 带上这一行(悬停可读)', Boolean(badgeOf(confined.tree)) && String(badgeOf(confined.tree).title || '').includes(COPY.fenceSandboxed(2)), JSON.stringify(badgeOf(confined.tree) && badgeOf(confined.tree).title))
 check('7 受限信息只进备注:受限数量来自聚合 confinedCount(载荷 2)', noteTexts(confined.tree)[0].includes('2 个会话'), JSON.stringify(noteTexts(confined.tree)))
 check('7 受限信息只进备注:没有 .envd-statuschip / 逐会话节点', statusChips(confined.tree).length === 0 && !findOneByClass(confined.tree, 'envd-sessions') && findAllByClass(confined.tree, 'envd-srow').length === 0)
 check('7 受限信息只进备注:详情照常(扫描计数 + chips)', (await (async () => { await confined.clickNode(cmdButton(confined.tree, COPY.diag)); return Boolean(statOf(confined.tree)) && shellChips(confined.tree).length === HOST_TOOLS.length })()))
+// 向后兼容:delegatable=false / 旧载荷缺字段 → 仍是 warn「不会执行命令」。
+const confinedNoDelegate = await mountPanel(payload({ commandTool: commandTool({ sandbox: { capable: true, present: true, defaultMode: 'workspace-write', anyUnconfined: true, confinedCount: 2, sessionCount: 3, delegatable: false } }) }))
+check('7 受限信息只进备注:delegatable=false 仍是 warn「不会执行命令」', noteTexts(confinedNoDelegate.tree)[0] === COPY.fence(2) && hasClass(noteClass(noteNodes(confinedNoDelegate.tree)[0]), 'warn') && textOf(noteNodes(confinedNoDelegate.tree)[0]).startsWith('⚠'), describe(noteNodes(confinedNoDelegate.tree)[0]))
+const confinedLegacy = await mountPanel(payload({ commandTool: commandTool({ sandbox: { capable: true, present: true, defaultMode: 'workspace-write', anyUnconfined: true, confinedCount: 2, sessionCount: 3 } }) }))
+check('7 受限信息只进备注:旧载荷缺 delegatable 时同样 warn(不凭空许诺能跑)', noteTexts(confinedLegacy.tree)[0] === COPY.fence(2) && hasClass(noteClass(noteNodes(confinedLegacy.tree)[0]), 'warn'), describeAll(noteNodes(confinedLegacy.tree)))
+check('7 受限信息只进备注:两种说法都只占一行,不超过两行', noteNodes(confined.tree).length === 1 && noteNodes(confinedNoDelegate.tree).length === 1 && noteNodes(confinedLegacy.tree).length === 1)
 
 
 // ───────────────────────────────── 8) 没注册 + 受限:只展示,不教训受限 ──
@@ -701,7 +708,7 @@ const muteAndConfined = await mountPanel(
       registered: false,
       visible: false,
       skipReason: 'no-family-terminal',
-      sandbox: { capable: true, present: true, defaultMode: 'workspace-write', anyUnconfined: false, confinedCount: 2, sessionCount: 2 },
+      sandbox: { capable: true, present: true, defaultMode: 'workspace-write', anyUnconfined: false, confinedCount: 2, sessionCount: 2, delegatable: false },
     }),
   }),
 )
@@ -716,7 +723,7 @@ check('9 不可见:命令行仍写 envd_shell(注册过就是注册过)', textOf
 check('9 不可见:没有原因时就不硬编一条备注', noteNodes(invisible.tree).length === 0, describeAll(noteNodes(invisible.tree)))
 
 // ───────────────────────────────── 10) 一个其它命令工具都没识别到 ──
-const hostNone = await mountPanel(payload({ commandTool: commandTool({ hostTools: [], sandbox: { confinedCount: 0, sessionCount: 0 } }) }))
+const hostNone = await mountPanel(payload({ commandTool: commandTool({ hostTools: [], sandbox: { confinedCount: 0, sessionCount: 0, delegatable: true } }) }))
 check('10 无其它命令工具:命令行写「没有其它命令工具」', textOf(hostNode(hostNone.tree)) === COPY.hostNone, textOf(hostNode(hostNone.tree)))
 check('10 无命令工具:envd_shell 照常显示', textOf(ownTool(hostNone.tree)) === 'envd_shell')
 check('10 无命令工具:badge 仍是 ok「就绪」', badgeState(hostNone.tree) === 'ok', emoji(headerBadges(hostNone.tree)))
@@ -749,10 +756,10 @@ for (const dead of DEAD_CLASSES) {
 const DEAD_SOURCE_TOKENS = [
   'envd-statuschip', 'envd-sessions', 'envd-srow', 'envd-sdot', 'envd-sid', 'envd-skind', 'envd-stool', 'envd-sreason',
   'envd-chips-sm', 'envd-legacy', 'envd-diag-sum', 'takeover', 'sandboxTakeover', 'shellTakeover', 'scopeReasons', 'scopeKind',
-  'shortId', 'runtimeShellTools', 'delegate', 'yieldTicks', 'denyApplies',
+  'shortId', 'runtimeShellTools', 'yieldTicks', 'denyApplies',
   'envd-chipfam', 'envd-chiplabel', 'envd-sep',
 ]
-// 0.6 有意让 restrict / guard 回到事实层(隐藏计数),所以不再把它们当删除词。
+// 0.6 有意让 restrict / guard 回到事实层(隐藏计数);0.6.2 又让 delegate 回到沙箱执行,都不再当删除词。
 for (const token of DEAD_SOURCE_TOKENS) {
   check('13 删除:源码里不再出现 ' + token, !SOURCE.includes(token), 'still in client.js')
 }
@@ -996,9 +1003,9 @@ check('20 en:命令行「其它」段是 Other: + 工具名', textOf(hostNode(en
 check('20 en:envd_shell 的 title 是英文提示', String((ownTool(enReady.tree) || {}).props && ownTool(enReady.tree).props.title || '') === 'Command tool provided by EnvDock: runs with your terminal and PATH', JSON.stringify(ownTool(enReady.tree) && ownTool(enReady.tree).props.title))
 check('20 en:语法标签是「bash syntax」(自动不加后缀)', famBadgeText(enReady.tree) === 'bash syntax', famBadgeText(enReady.tree) || '(missing)')
 check('20 en:备注只剩已隐藏一行(环境差异已进 title)', JSON.stringify(noteTexts(enReady.tree)) === JSON.stringify(['Hid pwsh (to avoid mixing the two syntaxes)']), JSON.stringify(noteTexts(enReady.tree)))
-const enConfined = await mountPanel(payload({ commandTool: commandTool({ sandbox: { confinedCount: 2, sessionCount: 3, anyUnconfined: true } }) }), { locale: 'en' })
+const enConfined = await mountPanel(payload({ commandTool: commandTool({ sandbox: { confinedCount: 2, sessionCount: 3, anyUnconfined: true, delegatable: true } }) }), { locale: 'en' })
 check('20 en:受限也只影响备注,badge 仍是「Ready」', badgeState(enConfined.tree) === 'ok' && badgeOf(enConfined.tree).text === 'Ready', emoji(headerBadges(enConfined.tree)))
-check('20 en:受限备注是英文且明确 other sessions', noteTexts(enConfined.tree)[0] === '2 other sessions are sandbox-limited: envd_shell will not run there; use another command tool' && noteTexts(enConfined.tree)[0].includes('other sessions'), JSON.stringify(noteTexts(enConfined.tree)))
+check('20 en:可委托的受限备注是 muted 英文「runs inside the sandbox」', noteTexts(enConfined.tree)[0] === '2 other sessions are sandbox-limited: envd_shell runs inside the sandbox (file writes may be refused)' && noteClass(noteNodes(enConfined.tree)[0]) === 'envd-note' && !textOf(noteNodes(enConfined.tree)[0]).startsWith('⚠'), JSON.stringify(noteTexts(enConfined.tree)))
 const enMuted = await mountPanel(payload({ commandTool: commandTool({ registered: false, visible: false, skipReason: 'no-family-terminal' }) }), { locale: 'en' })
 check('20 en:未提供 badge 是「Display only」', badgeState(enMuted.tree) === 'muted' && badgeOf(enMuted.tree).text === 'Display only', emoji(headerBadges(enMuted.tree)))
 check('20 en:没终端的备注是英文', noteTexts(enMuted.tree)[0] === 'No usable terminal found (bash syntax needs Git Bash, PowerShell syntax needs pwsh)', JSON.stringify(noteTexts(enMuted.tree)))
@@ -1285,12 +1292,12 @@ check('29 语法标签:无族时命令行与 chip 都不显示语法信息', !fa
     payload({
       family: 'powershell',
       familySource: 'manual',
-      commandTool: commandTool({ family: 'powershell', familySource: 'manual', mixed: true, hostTools: [PWSH_HOST_TOOLS[0], BASH_HOST_TOOLS[0]], hidden: [], sandbox: { confinedCount: 2, sessionCount: 3, anyUnconfined: true } }),
+      commandTool: commandTool({ family: 'powershell', familySource: 'manual', mixed: true, hostTools: [PWSH_HOST_TOOLS[0], BASH_HOST_TOOLS[0]], hidden: [], sandbox: { confinedCount: 2, sessionCount: 3, anyUnconfined: true, delegatable: false } }),
     }),
   )
   check('33 优先级:围栏 + 混用都出现时仍不超过两行', noteNodes(bothWarn.tree).length === 2, 'notes=' + JSON.stringify(noteTexts(bothWarn.tree)))
   check('33 优先级:围栏在前、混用在后(先说出路,再提醒语法)', noteTexts(bothWarn.tree)[0] === COPY.fence(2) && noteTexts(bothWarn.tree)[1] === COPY.mixedNote, JSON.stringify(noteTexts(bothWarn.tree)))
-  const bashHiddenConfined = await mountPanel(payload({ commandTool: commandTool({ hostTools: BASH_HOST_TOOLS, hidden: ['pwsh'], sandbox: { confinedCount: 1, sessionCount: 2, anyUnconfined: true } }) }))
+  const bashHiddenConfined = await mountPanel(payload({ commandTool: commandTool({ hostTools: BASH_HOST_TOOLS, hidden: ['pwsh'], sandbox: { confinedCount: 1, sessionCount: 2, anyUnconfined: true, delegatable: false } }) }))
   check('33 优先级:受限 + 已隐藏正好两行(没有第三条环境差异)', noteTexts(bashHiddenConfined.tree)[0] === COPY.fence(1) && noteTexts(bashHiddenConfined.tree)[1] === COPY.hiddenPwsh('pwsh') && noteNodes(bashHiddenConfined.tree).length === 2, JSON.stringify(noteTexts(bashHiddenConfined.tree)))
 }
 

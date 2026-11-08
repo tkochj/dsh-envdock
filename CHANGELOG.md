@@ -2,6 +2,25 @@
 
 本文件记录 EnvDock 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.2] - 2026-11-08
+
+> 受限会话里 `envd_shell` 不再一律拒绝：恢复 0.4 的**沙箱委托执行**，把命令交给宿主的沙箱执行器 `ctx.shell` 在沙箱内执行。注册条件、API、简报与面板文案随之调整；安全边界不变——EnvDock 自己 spawn 的路径**永远不带** `sandboxPolicy`，只有 `ctx.shell` 能挂围栏。
+
+### Changed
+
+- **受限会话恢复委托执行**（0.5 删掉的能力回归，实现从 0.4 搬回）：`gate.confined` 时把命令委托给 `ctx.shell`（`resolve(request)` → `execute(spec)` → `result()`）；围栏挂在宿主进程上，目标终端作为子进程拉起并继承同一份围栏。命令文本按 UTF-8 → base64 经环境变量 `ENVD_CMD` 传入，**不拼字符串、不经 shell 引号**；`request` 带本会话的 `sandboxPolicy`、`workdir`、`timeoutMs`、`signal` 与可选 `dshEnv`（宿主 `shellEnv.collect`）。
+- **委托的输出与结局**：输出以 `[sandbox] 委托宿主执行器执行(<mode>)` 开头、末尾 `[exit …]`；`runnerFailed`（围栏 runner 坏了、命令没执行）/ `aborted`（取消）/ `timedOut`（超时）都有独立标记；`runnerFailed` / `aborted` 时 `ok:false`（命令没执行或没跑完，不能报成功）；文件写入被沙箱策略拒绝时标 `[sandbox: 文件操作被沙箱拒绝 —— 这是策略拒绝,不要换旁路重试]`。
+- **注册条件放宽**：`skipReason='no-unconfined-session'` 只在「有围栏执行器 + 没有任何 `danger-full-access` 会话 + **这个部署不能委托**」时出现；能委托时即使全部会话受限也照常注册（受限会话里走沙箱内执行）。
+- **`/envdock-api`**：`sandbox`（顶层与 `commandTool.sandbox`）新增 `delegatable`——这个部署能不能委托；面板 / 简报据此决定说「会在沙箱内执行」还是「不会执行」。
+- **简报（按会话）**：受限 + 能委托 → 追加「本会话受沙箱限制:envd_shell 会通过宿主执行器在沙箱内执行(文件写入可能被拒绝)」；受限 + 不能委托 → 追加「本会话受沙箱限制且无法在沙箱内执行:改用宿主工具」。
+- **面板**：受限备注在 `delegatable=true` 时由 warn 降为 muted「另有 N 个会话受沙箱限制：envd_shell 会在沙箱内执行（文件写入可能被拒绝）」；`false` / 旧载荷缺字段保持 warn「…在那些会话里不会执行命令，请改用其它命令工具」。
+- **仍然拒绝的边界**：宿主没有 `shell.resolve/execute`；宿主执行器语法族不是 bash / PowerShell（cmd / 认不出）；目标终端是 cmd / WSL / 自定义终端；拿不到合法 `sandboxPolicy`（绝不拿部署默认档冒充）；命令太长（base64 载荷 > 30000）。
+- **安全边界不变**：`ctx.subprocess` 仍然没有 `sandboxPolicy` 入口，所以 EnvDock 自己 spawn 的命令永远不带围栏；取不到策略就拒绝，绝不退回无围栏 spawn。
+
+### Fixed
+
+- **「受限会话里 `envd_shell` 完全不能用」**：以前受限会话一律拒绝（只能换宿主工具）；现在能安全委托时命令仍在沙箱内执行，只有真的无法安全委托才拒绝，并说明原因、指路宿主工具。
+
 ## [0.6.1] - 2026-11-08
 
 > 只改面板与文档，**宿主行为不变**（探测、两族选族、隐藏与执行语义都和 0.6.0 一致）。面板首屏面向第一次打开的用户重新排布：一句用途 + 白话 badge + 白话备注，技术细节收进「详情 / 高级设置」。

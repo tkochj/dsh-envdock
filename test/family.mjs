@@ -462,7 +462,35 @@ const lineManualBashNoHost = familyBriefLine({
 })
 check('手动 bash 但会话没有 bash 宿主工具 → 含「未遮挡」', has(lineManualBashNoHost, '未遮挡'), lineManualBashNoHost)
 
-const lineConfinedBash = familyBriefLine({
+// 受限会话:delegate=true → 命令会在宿主沙箱内执行;delegate=false → 无法在沙箱内执行
+const lineConfinedBashDelegate = familyBriefLine({
+  family: 'bash',
+  familySource: 'auto',
+  shellLabel: 'Git Bash',
+  terminalAvailable: true,
+  registered: true,
+  skipReason: null,
+  hostTools: [bashTool],
+  hidden: ['pwsh'],
+  refused: ['pwsh'],
+  displayOnly: [],
+  mixed: false,
+  blockOtherFamily: true,
+  bashHostAvailable: true,
+  confined: true,
+  delegate: true,
+})
+check(
+  '受限 bash 族会话(delegate=true):含「沙箱内执行」与 ops_bash,不含「会拒绝」/旧「优先 envd_shell」',
+  has(lineConfinedBashDelegate, '本会话受沙箱限制') &&
+    has(lineConfinedBashDelegate, '会通过宿主执行器在沙箱内执行') &&
+    has(lineConfinedBashDelegate, 'ops_bash') &&
+    !has(lineConfinedBashDelegate, '会拒绝') &&
+    !has(lineConfinedBashDelegate, '优先 `envd_shell`'),
+  lineConfinedBashDelegate,
+)
+
+const lineConfinedBashNoDelegate = familyBriefLine({
   family: 'bash',
   familySource: 'auto',
   shellLabel: 'Git Bash',
@@ -477,12 +505,14 @@ const lineConfinedBash = familyBriefLine({
   blockOtherFamily: true,
   bashHostAvailable: true,
   confined: true,
+  delegate: false,
 })
 check(
-  '围栏 bash 族会话:简报只讲 ops_bash(含「本会话被围栏」「ops_bash」,不含旧「优先 envd_shell」)',
-  has(lineConfinedBash, '本会话被围栏') && has(lineConfinedBash, 'ops_bash') && !has(lineConfinedBash, '优先 `envd_shell`'),
-  lineConfinedBash,
+  '受限 bash 族会话(delegate=false):含「无法在沙箱内执行」并指向 ops_bash',
+  has(lineConfinedBashNoDelegate, '本会话受沙箱限制且无法在沙箱内执行') && has(lineConfinedBashNoDelegate, 'ops_bash'),
+  lineConfinedBashNoDelegate,
 )
+
 
 const lineNoTerminal = familyBriefLine({
   family: 'bash',
@@ -517,12 +547,37 @@ const lineConfinedPs = familyBriefLine({
   blockOtherFamily: true,
   bashHostAvailable: false,
   confined: true,
+  delegate: false,
 })
 check(
-  'PowerShell 族围栏 → 含「改用宿主」(不再让人去找 ops_bash)',
-  has(lineConfinedPs, '改用宿主') && !has(lineConfinedPs, 'ops_bash'),
+  'PowerShell 族受限且无法委托 → 含「无法在沙箱内执行」与「改用宿主」',
+  has(lineConfinedPs, '无法在沙箱内执行') && has(lineConfinedPs, '改用宿主') && !has(lineConfinedPs, 'ops_bash'),
   lineConfinedPs,
 )
+
+const lineConfinedPsDelegate = familyBriefLine({
+  family: 'powershell',
+  familySource: 'auto',
+  shellLabel: 'PowerShell 7',
+  terminalAvailable: true,
+  registered: true,
+  skipReason: null,
+  hostTools: [pwshTool],
+  hidden: [],
+  refused: [],
+  displayOnly: [],
+  mixed: false,
+  blockOtherFamily: true,
+  bashHostAvailable: false,
+  confined: true,
+  delegate: true,
+})
+check(
+  'PowerShell 族受限但可委托 → 含「会通过宿主执行器在沙箱内执行」,不说「会拒绝」',
+  has(lineConfinedPsDelegate, '会通过宿主执行器在沙箱内执行') && !has(lineConfinedPsDelegate, '会拒绝'),
+  lineConfinedPsDelegate,
+)
+
 
 const lineDisplayOnly = familyBriefLine({
   family: 'bash',

@@ -26,6 +26,8 @@
  *   · 底部 footer 只留复制反馈 + 环境脚注;注入开关放在「环境简报」区那一行,
  *     「隐藏另一族命令工具 / 允许局域网访问」收进默认折叠的「高级设置」;
  *   · 详情计数只留扫描 / 最近 / 注册尝试(隐藏/拒绝是历史累计,API 仍给但面板不摆);
+ *   · 0.6.2:受限会话能把命令委托给沙箱执行器时(sandbox.delegatable),那条「另有 N 个会话
+ *     受沙箱限制」从 warn 降成 muted 信息(会在沙箱内执行,写文件可能被拒);不能委托才 warn;
  *   · 拿不到数据(403)时简报区不存在,allowLan 开关仍留在 footer(唯一入口)。
  *
  * 三条硬规则:
@@ -97,6 +99,8 @@ window.__ModuleLoader__.load({
         noteFamilyFallback: '手动选的语法不可用（没有对应终端，也没有对应命令工具），已自动改回按会话选择',
         noteMixed: '手动选了 PowerShell 语法：PowerShell 与 bash 工具都在，各按自己的语法写，别混用',
         noteConfined: '另有 {n} 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令，请改用其它命令工具',
+        // 0.6.2:沙箱执行器可委托时,受限会话里仍能执行(只是跑在沙箱里)
+        noteConfinedSandboxed: '另有 {n} 个会话受沙箱限制：envd_shell 会在沙箱内执行（文件写入可能被拒绝）',
         // 详情
         diag: '详情',
         hostTools: '命令工具',
@@ -201,6 +205,8 @@ window.__ModuleLoader__.load({
         noteFamilyFallback: 'The manually picked syntax is unavailable (no matching terminal or command tool); switched back to per-session selection',
         noteMixed: 'PowerShell syntax was picked manually: both PowerShell and bash tools are available; write each command in its own syntax, do not mix them',
         noteConfined: '{n} other sessions are sandbox-limited: envd_shell will not run there; use another command tool',
+        // 0.6.2: when the host can delegate, confined sessions still run envd_shell (inside the sandbox)
+        noteConfinedSandboxed: '{n} other sessions are sandbox-limited: envd_shell runs inside the sandbox (file writes may be refused)',
         diag: 'Details',
         hostTools: 'Command tools',
         learnedTag: 'auto-detected',
@@ -807,10 +813,13 @@ window.__ModuleLoader__.load({
       const bashHostNames = hostNamesInFamily('bash')
       const pwshHostNames = hostNamesInFamily('pwsh')
 
-      // 沙箱聚合:只用来回答「有没有会话被围栏」。
+      // 沙箱聚合:用来回答「有没有会话被围栏」,以及受限会话里 envd_shell 还能不能跑。
       const sandboxInfo = (ct && ct.sandbox && typeof ct.sandbox === 'object' ? ct.sandbox : null) || (data && data.sandbox && typeof data.sandbox === 'object' ? data.sandbox : null) || {}
       const confinedCount = Math.max(0, Number(sandboxInfo.confinedCount) || 0)
       const confined = confinedCount > 0
+      // 0.6.2:宿主能把命令委托给沙箱执行器时,受限会话里 envd_shell 仍会执行(只是跑在沙箱里,
+      // 写文件可能被拒绝)。旧载荷没有这个字段 → 走 0.6.1 的保守说法,不能凭空许诺能跑。
+      const confinedDelegatable = sandboxInfo.delegatable === true
 
       // badge 二态(整个面板唯一的状态结论):有命令工具 → 就绪,没有 → 只展示。
       // 「有会话被沙箱限制」不是面板级结论(面板是全局的):它只进备注,免得上 badge 变成没主语的「受限」。
@@ -835,7 +844,15 @@ window.__ModuleLoader__.load({
           notes.push({ tone: 'warn', text: t.skipError })
         }
       }
-      if (ready && confined) notes.push({ tone: 'warn', text: fmt(t.noteConfined, { n: confinedCount }) })
+      // 受限备注:能委托给沙箱执行器时只是信息(envd_shell 会在沙箱内执行,写文件可能被拒),
+      // 不能委托(含旧载荷缺字段)才是真问题(不会执行) —— 用 warn 提醒换工具。
+      if (ready && confined) {
+        notes.push(
+          confinedDelegatable
+            ? { tone: 'muted', text: fmt(t.noteConfinedSandboxed, { n: confinedCount }) }
+            : { tone: 'warn', text: fmt(t.noteConfined, { n: confinedCount }) },
+        )
+      }
       // 手动选的语法不可用、已改回按会话选择:这是「用户的选择没生效」,必须让人看见。
       if (familyFallback) notes.push({ tone: 'warn', text: t.noteFamilyFallback })
       // 两套语法同时可见 = 模型手里有两套写法,最容易出的错就是混写。警告优先于其它 muted 事实。

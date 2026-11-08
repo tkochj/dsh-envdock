@@ -44,6 +44,7 @@ import {
   waitForBrief,
   isReg,
   isVersion,
+  decodeBashPayload,
   withPath,
   makeStubBin,
   home,
@@ -737,44 +738,85 @@ check('不认领时别人的那份仍然在工具表里(没被拆)', hTaken.stat
 check('被占用时也不调用 restrict', hTaken.stats().restrictCalls === 0, String(hTaken.stats().restrictCalls))
 hTaken.dispose()
 
-// ── (3) 有执行器:全部会话围栏 → no-unconfined-session;有会话无围栏 → 注册 ──
-phase('§3.3 沙箱条件')
+// ── (3) 沙箱条件:全部会话受限但有可委托执行器 → 仍注册;不能委托 → no-unconfined-session ──
+phase('§3.3 沙箱条件(委托可用性)')
 const hConf = start({
   agentIds: [{ id: 'agent-w', session: { key: 'w1' } }],
   shell: fakeSandboxedShell({ mode: 'workspace-write' }),
   sandboxPolicy: fakeSandboxPolicy('workspace-write'),
 })
 await waitForBrief(hConf)
-const confSnap = await waitCommandTool(hConf, (c) => c.skipReason === 'no-unconfined-session')
+const confSnap = await waitCommandTool(hConf, (c) => c.registered === true)
+check('全部会话受限但执行器可委托 → 仍注册 envd_shell', confSnap.commandTool.registered === true && confSnap.commandTool.skipReason === null, JSON.stringify(confSnap.commandTool))
 check(
-  '有执行器 + 全部会话围栏 → skipReason=no-unconfined-session',
-  confSnap.commandTool.skipReason === 'no-unconfined-session' && confSnap.commandTool.registered === false,
-  JSON.stringify(confSnap.commandTool),
+  'sandbox.delegatable=true(执行器有 resolve/execute + 合法 sandboxPolicy)',
+  confSnap.commandTool.sandbox.delegatable === true && confSnap.sandbox.delegatable === true,
+  JSON.stringify({ ct: confSnap.commandTool.sandbox, top: confSnap.sandbox }),
 )
-check('围栏时不注册 envd_shell(注册了也只会被拒绝)', !hConf.state.toolDefs.has('envd_shell'))
 check(
-  'sandbox 聚合:capable / confinedCount / sessionCount / anyUnconfined',
+  'sandbox 聚合:capable / confinedCount / sessionCount / anyUnconfined / delegatable',
   confSnap.commandTool.sandbox.capable === true &&
     confSnap.commandTool.sandbox.present === true &&
     confSnap.commandTool.sandbox.sessionCount === 1 &&
     confSnap.commandTool.sandbox.confinedCount === 1 &&
-    confSnap.commandTool.sandbox.anyUnconfined === false,
+    confSnap.commandTool.sandbox.anyUnconfined === false &&
+    confSnap.commandTool.sandbox.delegatable === true,
   JSON.stringify(confSnap.commandTool.sandbox),
 )
 check('沙箱聚合与顶层 sandbox 一致', JSON.stringify(confSnap.sandbox) === JSON.stringify(confSnap.commandTool.sandbox), JSON.stringify(confSnap.sandbox))
+const confBrief = hConf.state.brief.text({ scope: hConf.state.agents[0] })
 check(
-  '围栏会话里的简报:本会话被围栏 + 改用宿主 pwsh(PowerShell 族)',
-  hConf.state.brief.text({ scope: hConf.state.agents[0] }).includes('本会话被围栏') && hConf.state.brief.text({ scope: hConf.state.agents[0] }).includes('改用宿主'),
-  hConf.state.brief.text({ scope: hConf.state.agents[0] }).split('\n').find((l) => l.includes('命令工具')) || '',
+  '受限会话简报:说会在沙箱内执行,不说「会拒绝」',
+  confBrief.includes('会通过宿主执行器在沙箱内执行') && !confBrief.includes('会拒绝'),
+  confBrief.split('\n').find((l) => l.includes('命令工具')) || '',
 )
 hConf.dispose()
+
+// 执行器只有 sandboxMode(没有 resolve/execute)+ 全部会话受限 → 不可委托 → 不注册
+const hNoDelegate = start({
+  agentIds: [{ id: 'agent-nd', session: { key: 'nd1' } }],
+  shell: { sandboxMode: 'workspace-write' },
+  sandboxPolicy: fakeSandboxPolicy('workspace-write'),
+})
+await waitForBrief(hNoDelegate)
+const ndConfSnap = await waitCommandTool(hNoDelegate, (c) => c.skipReason === 'no-unconfined-session')
+check(
+  '没有可委托执行器 + 全部会话受限 → skipReason=no-unconfined-session',
+  ndConfSnap.commandTool.skipReason === 'no-unconfined-session' && ndConfSnap.commandTool.registered === false,
+  JSON.stringify(ndConfSnap.commandTool),
+)
+check('没有可委托执行器时不注册 envd_shell', !hNoDelegate.state.toolDefs.has('envd_shell'))
+check('sandbox.delegatable=false(执行器没有 resolve/execute)', ndConfSnap.commandTool.sandbox.delegatable === false && ndConfSnap.sandbox.delegatable === false, JSON.stringify(ndConfSnap.sandbox))
+const ndBrief = hNoDelegate.state.brief.text({ scope: hNoDelegate.state.agents[0] })
+check(
+  '受限且无法委托的简报:无法在沙箱内执行 + 改用宿主',
+  ndBrief.includes('无法在沙箱内执行') && ndBrief.includes('改用宿主'),
+  ndBrief.split('\n').find((l) => l.includes('命令工具')) || '',
+)
+hNoDelegate.dispose()
+
+// 有围栏能力但没有 sandboxPolicy 服务 → 判不出策略 → 保守按受限,且不可委托 → 不注册
+const hNoPolicy = start({
+  agentIds: [{ id: 'agent-np', session: { key: 'np1' } }],
+  shell: fakeSandboxedShell({ mode: 'workspace-write' }),
+})
+await waitForBrief(hNoPolicy)
+const npSnap = await waitCommandTool(hNoPolicy, (c) => c.skipReason === 'no-unconfined-session')
+check(
+  '没有 sandboxPolicy 服务 + 全部会话受限 → skipReason=no-unconfined-session',
+  npSnap.commandTool.skipReason === 'no-unconfined-session' && npSnap.commandTool.registered === false,
+  JSON.stringify(npSnap.commandTool),
+)
+check('没有 sandboxPolicy 服务时 delegatable=false', npSnap.commandTool.sandbox.delegatable === false, JSON.stringify(npSnap.commandTool.sandbox))
+hNoPolicy.dispose()
 
 const hFull = start({
   agentIds: [
     { id: 'agent-free', session: { key: 'f1' } },
     { id: 'agent-locked', session: { key: 'l1' } },
   ],
-  shell: fakeSandboxedShell({ mode: 'workspace-write' }),
+  // 显式 bash 执行器族:委托包装串按**执行器**族写(Windows 默认布局会落到 powershell)
+  shell: fakeSandboxedShell({ mode: 'workspace-write', className: 'BashSandboxExecutor' }),
   sandboxPolicy: fakeSandboxPolicy('workspace-write', { f1: 'danger-full-access' }),
 })
 const fullSnap = await (async () => {
@@ -783,44 +825,158 @@ const fullSnap = await (async () => {
 })()
 check('有会话 resolve 出 danger-full-access → 注册 envd_shell', fullSnap.commandTool.registered === true, JSON.stringify(fullSnap.commandTool))
 check(
-  'sandbox 聚合:anyUnconfined=true / confinedCount=1 / sessionCount=2',
+  'sandbox 聚合:anyUnconfined=true / confinedCount=1 / sessionCount=2 / delegatable=true',
   fullSnap.commandTool.sandbox.anyUnconfined === true &&
     fullSnap.commandTool.sandbox.confinedCount === 1 &&
-    fullSnap.commandTool.sandbox.sessionCount === 2,
+    fullSnap.commandTool.sandbox.sessionCount === 2 &&
+    fullSnap.commandTool.sandbox.delegatable === true,
   JSON.stringify(fullSnap.commandTool.sandbox),
 )
 
-// ── (4) 围栏会话调用 → 拒绝、不 spawn;无围栏会话照常执行 ──
-phase('§3.4 围栏拒绝 / 无围栏执行')
+// ── (4) 受限会话:能委托 → 在宿主沙箱内执行;不能委托 → 拒绝(绝不自己 spawn) ──
+phase('§3.4 沙箱委托执行 / 无法委托时拒绝')
 const fullTool = hFull.state.toolDefs.get('envd_shell')
 const lockedAgent = hFull.state.agents.find((a) => a.id === 'agent-locked')
 const freeAgent = hFull.state.agents.find((a) => a.id === 'agent-free')
-const refuseBefore = hFull.subprocess.calls.length
-const refused = await fullTool.execute({ command: 'echo portable-bypass', cwd: process.cwd() }, { signal: null, agent: lockedAgent })
-const refuseSpawns = hFull.subprocess.calls.slice(refuseBefore)
-check('围栏会话调用 envd_shell → 拒绝', refused.ok === false && refused.text.startsWith('[sandbox]'), String(refused.text).slice(0, 160))
-check('拒绝文案含「围栏」与「宿主工具」', refused.text.includes('围栏') && refused.text.includes('宿主工具'), String(refused.text).slice(0, 200))
-check('拒绝时一个子进程都没起(不 spawn)', !refuseSpawns.some((c) => (c.argv || []).join(' ').includes('portable-bypass')), JSON.stringify(refuseSpawns.map((c) => c.argv)))
-check('拒绝的文案里说清本会话策略', refused.text.includes('workspace-write'), String(refused.text).slice(0, 160))
+const hostShell = hFull.services.shell
+
+// (a) 委托执行:宿主执行器 resolve + execute 各一次,EnvDock 自己不 spawn
+const delegatedBeforeSub = hFull.subprocess.calls.length
+const delegatedBeforeExec = hostShell.calls.executed.length
+const delegated = await fullTool.execute({ command: 'echo owned', cwd: process.cwd() }, { signal: null, agent: lockedAgent })
+const delegatedSpec = hostShell.calls.executed[delegatedBeforeExec]
+check('(a) 受限会话调用 envd_shell → 委托宿主执行器执行(ok:true)', delegated.ok === true && delegated.text.startsWith('[sandbox] 委托宿主执行器执行('), String(delegated.text).slice(0, 200))
+check('(a) 委托结果带宿主 stdout 与 exit 行', delegated.text.includes('host-ran') && /\[exit 0\]/.test(delegated.text), String(delegated.text).slice(0, 200))
+check('(a) EnvDock 自己不 spawn(subprocess 增量为 0)', hFull.subprocess.calls.length === delegatedBeforeSub, String(hFull.subprocess.calls.length - delegatedBeforeSub))
+check('(a) 宿主执行器被执行一次(execute 一次)', hostShell.calls.executed.length === delegatedBeforeExec + 1, String(hostShell.calls.executed.length))
+check('(a) 宿主执行器先 resolve 再 execute(request 有 sandboxPolicy + env.ENVD_CMD)', Boolean(hostShell.calls.resolved.length) && Boolean(hostShell.calls.resolved[0].sandboxPolicy) && Boolean(hostShell.calls.resolved[0].env && hostShell.calls.resolved[0].env.ENVD_CMD), JSON.stringify(hostShell.calls.resolved[0]).slice(0, 240))
+check('(a) ENVD_CMD 载荷解码 == 用户命令(命令不拼进命令行)', Boolean(delegatedSpec) && decodeBashPayload(delegatedSpec) === 'echo owned', JSON.stringify(delegatedSpec && delegatedSpec.env))
+check('(a) spec.sandboxPolicy 透传本会话策略(workspace-write)', Boolean(delegatedSpec && delegatedSpec.sandboxPolicy) && delegatedSpec.sandboxPolicy.mode === 'workspace-write', JSON.stringify(delegatedSpec && delegatedSpec.sandboxPolicy))
+check('(a) spec 带 workdir / timeoutMs', Boolean(delegatedSpec) && delegatedSpec.workdir === process.cwd() && typeof delegatedSpec.timeoutMs === 'number', JSON.stringify(delegatedSpec && { workdir: delegatedSpec.workdir, timeoutMs: delegatedSpec.timeoutMs }))
+check(
+  '(a) spec.command 把目标终端包起来(按执行器族 bash:引号包装 + exit $?)',
+  Boolean(delegatedSpec) && typeof delegatedSpec.command === 'string' && delegatedSpec.command.includes('; exit $?') && delegatedSpec.command.includes(fullSnap.shell.path),
+  String(delegatedSpec && delegatedSpec.command).slice(0, 220),
+)
+
+// (b) 围栏 runner 失败(命令根本没跑)→ ok:false
+hostShell.state.runnerFailed = true
+const runRunnerFailed = await fullTool.execute({ command: 'echo runner-failed', cwd: process.cwd() }, { signal: null, agent: lockedAgent })
+check(
+  '(b) runnerFailed → ok:false 且说清命令没执行',
+  runRunnerFailed.ok === false && runRunnerFailed.text.includes('围栏 runner 失败') && runRunnerFailed.text.includes('这条命令没有执行'),
+  String(runRunnerFailed.text).slice(0, 240),
+)
+hostShell.state.runnerFailed = false
+
+// (c) 策略拒绝文件操作 → 文本解释「文件操作被沙箱拒绝」(命令本身执行了)
+hostShell.state.denied = true
+const runDenied = await fullTool.execute({ command: 'echo touched', cwd: process.cwd() }, { signal: null, agent: lockedAgent })
+check('(c) denied → 文本含「文件操作被沙箱拒绝」', runDenied.text.includes('文件操作被沙箱拒绝'), String(runDenied.text).slice(0, 240))
+hostShell.state.denied = false
+
+// (d) 无围栏会话照常直跑(不走委托、自己 spawn)
+const freeBefore = hFull.subprocess.calls.length
 const freeRun = await fullTool.execute({ command: 'echo allowed', cwd: process.cwd() }, { signal: null, agent: freeAgent })
-const freeSpawns = hFull.subprocess.calls.slice(refuseBefore).filter((c) => (c.argv || []).join(' ').includes('allowed'))
-check('无围栏会话照常执行(假 subprocess)', freeRun.ok === true && freeRun.text.includes('[exit 0]'), String(freeRun.text).slice(0, 160))
-check('无围栏会话的 argv 按会话族语法生成', freeSpawns.length === 1 && invocationLooksRight(fullSnap.commandTool.family, freeSpawns[0].argv, 'echo allowed'), JSON.stringify(freeSpawns.map((c) => c.argv)))
-// 没有会话信息 = 取不到「本会话」策略 → 同样保守拒绝(§1.2)
+const freeSpawns = hFull.subprocess.calls.slice(freeBefore).filter((c) => (c.argv || []).join(' ').includes('allowed'))
+check('(d) 无围栏会话照常执行(假 subprocess)', freeRun.ok === true && freeRun.text.includes('[exit 0]'), String(freeRun.text).slice(0, 160))
+check('(d) 无围栏会话的 argv 按会话族语法生成', freeSpawns.length === 1 && invocationLooksRight(fullSnap.commandTool.family, freeSpawns[0].argv, 'echo allowed'), JSON.stringify(freeSpawns.map((c) => c.argv)))
+
+// (e) 没有会话信息 → 无法把本会话策略交给执行器 → 拒绝(不拿部署默认档冒充)
 const noAgentSpawns = hFull.subprocess.calls.length
 const noAgentRun = await fullTool.execute({ command: 'echo noagent', cwd: process.cwd() }, { signal: null })
-check('没有会话信息 → 保守拒绝(策略不可得)', noAgentRun.ok === false && noAgentRun.text.includes('围栏'), String(noAgentRun.text).slice(0, 160))
-check('没有会话信息时也不 spawn', !hFull.subprocess.calls.slice(noAgentSpawns).some((c) => (c.argv || []).join(' ').includes('noagent')))
-// 围栏会话的简报追加提示(按会话求值)
+check('(e) 没有会话信息 → 拒绝([sandbox] + 本会话信息缺失)', noAgentRun.ok === false && noAgentRun.text.startsWith('[sandbox]') && noAgentRun.text.includes('本会话信息缺失'), String(noAgentRun.text).slice(0, 240))
+check('(e) 没有会话信息时也不 spawn', !hFull.subprocess.calls.slice(noAgentSpawns).some((c) => (c.argv || []).join(' ').includes('noagent')))
+
+// (f) 简报:受限会话说「沙箱内执行」,无围栏会话不提沙箱限制
 const lockedBrief = hFull.state.brief.text({ scope: lockedAgent })
 const freeBrief = hFull.state.brief.text({ scope: freeAgent })
-check('围栏会话的简报:本会话被围栏 + 改用宿主 pwsh', lockedBrief.includes('本会话被围栏') && lockedBrief.includes('改用宿主'), lockedBrief.split('\n').find((l) => l.includes('命令工具')) || '')
-check('无围栏会话的简报没有那句围栏提示', !freeBrief.includes('本会话被围栏'), freeBrief.split('\n').find((l) => l.includes('命令工具')) || '')
-// 新会话的第一步可能早于下一轮 tick:scope 不在映射里也要按它自己的会话判围栏(不能答「不知道」)
+check('(f) 受限会话的简报:在沙箱内执行(不再说「会拒绝」)', lockedBrief.includes('会通过宿主执行器在沙箱内执行') && !lockedBrief.includes('会拒绝'), lockedBrief.split('\n').find((l) => l.includes('命令工具')) || '')
+check('(f) 无围栏会话的简报没有沙箱限制提示', !freeBrief.includes('受沙箱限制'), freeBrief.split('\n').find((l) => l.includes('命令工具')) || '')
+// 新会话的第一步可能早于下一轮 tick:scope 不在映射里也要按它自己的会话判沙箱
 const brandNew = hFull.makeAgent('agent-new', { key: 'l1' })
 const brandNewBrief = hFull.state.brief.text({ scope: brandNew })
-check('新会话首步(还没等到下一轮 tick)也按它自己的会话判围栏', brandNewBrief.includes('本会话被围栏'), brandNewBrief.split('\n').find((l) => l.includes('命令工具')) || '')
+check('(f) 新会话首步(还没等到下一轮 tick)也按它自己的会话判沙箱', brandNewBrief.includes('会通过宿主执行器在沙箱内执行'), brandNewBrief.split('\n').find((l) => l.includes('命令工具')) || '')
 hFull.dispose()
+
+// (g) 执行器不可委托(只有 sandboxMode):受限会话 → 拒绝,不 spawn
+const hNoDele = start({
+  agentIds: [
+    { id: 'agent-nl', session: { key: 'nl1' } },
+    { id: 'agent-nf', session: { key: 'nf1' } },
+  ],
+  shell: { sandboxMode: 'workspace-write' },
+  sandboxPolicy: fakeSandboxPolicy('workspace-write', { nl1: 'workspace-write', nf1: 'danger-full-access' }),
+})
+const ndTool = await (async () => {
+  await waitForBrief(hNoDele)
+  return waitCommandTool(hNoDele, (c) => c.registered === true)
+})()
+const ndToolDef = hNoDele.state.toolDefs.get('envd_shell')
+const ndLocked = hNoDele.state.agents.find((a) => a.id === 'agent-nl')
+const ndSubBefore = hNoDele.subprocess.calls.length
+const ndRun = ndToolDef ? await ndToolDef.execute({ command: 'echo nod', cwd: process.cwd() }, { signal: null, agent: ndLocked }) : null
+check(
+  '(g) 执行器只有 sandboxMode → 拒绝([sandbox] + 无法在沙箱内执行 + 宿主命令工具)',
+  Boolean(ndRun) &&
+    ndRun.ok === false &&
+    ndRun.text.startsWith('[sandbox]') &&
+    ndRun.text.includes('无法在沙箱内执行') &&
+    ndRun.text.includes('宿主命令工具') &&
+    ndRun.text.includes('没有可委托的沙箱执行器'),
+  String(ndRun && ndRun.text).slice(0, 260),
+)
+check('(g) 拒绝时不 spawn', hNoDele.subprocess.calls.length === ndSubBefore, String(hNoDele.subprocess.calls.length - ndSubBefore))
+hNoDele.dispose()
+
+// (h) 手动 cmd 目标终端 → 委托不支持该族 → 拒绝
+await post(h, { op: 'setShell', key: 'cmd' })
+const hCmdTarget = start({
+  agentIds: [
+    { id: 'agent-cl', session: { key: 'cl1' } },
+    { id: 'agent-cf', session: { key: 'cf1' } },
+  ],
+  shell: fakeSandboxedShell({ mode: 'workspace-write' }),
+  sandboxPolicy: fakeSandboxPolicy('workspace-write', { cl1: 'workspace-write', cf1: 'danger-full-access' }),
+})
+await (async () => {
+  await waitForBrief(hCmdTarget)
+  return waitCommandTool(hCmdTarget, (c) => c.registered === true)
+})()
+const cmdTool = hCmdTarget.state.toolDefs.get('envd_shell')
+const cmdLocked = hCmdTarget.state.agents.find((a) => a.id === 'agent-cl')
+const cmdSubBefore = hCmdTarget.subprocess.calls.length
+const cmdRun = cmdTool ? await cmdTool.execute({ command: 'echo cmd', cwd: process.cwd() }, { signal: null, agent: cmdLocked }) : null
+check(
+  '(h) 目标终端是 cmd → 拒绝委托(cmd/WSL/自定义终端不支持安全委托)',
+  Boolean(cmdRun) && cmdRun.ok === false && cmdRun.text.includes('无法在沙箱内执行') && cmdRun.text.includes('不支持安全委托执行'),
+  String(cmdRun && cmdRun.text).slice(0, 260),
+)
+check('(h) 目标终端族不支持时不 spawn', hCmdTarget.subprocess.calls.length === cmdSubBefore, String(hCmdTarget.subprocess.calls.length - cmdSubBefore))
+hCmdTarget.dispose()
+await resetState(h)
+
+// (i) 本会话策略不可得/非法 → 拒绝(不拿部署默认档冒充)
+const hBadPolicy = start({
+  agentIds: [{ id: 'agent-bp', session: { key: 'bp1' } }],
+  shell: fakeSandboxedShell({ mode: 'workspace-write' }),
+  sandboxPolicy: fakeSandboxPolicy('not-a-mode'),
+})
+await (async () => {
+  await waitForBrief(hBadPolicy)
+  return waitCommandTool(hBadPolicy, (c) => c.registered === true)
+})()
+const bpTool = hBadPolicy.state.toolDefs.get('envd_shell')
+const bpAgent = hBadPolicy.state.agents[0]
+const bpSubBefore = hBadPolicy.subprocess.calls.length
+const bpRun = bpTool ? await bpTool.execute({ command: 'echo bp', cwd: process.cwd() }, { signal: null, agent: bpAgent }) : null
+check(
+  '(i) 策略不可得/非法 → 拒绝(不拿部署默认档冒充)',
+  Boolean(bpRun) && bpRun.ok === false && bpRun.text.includes('无法在沙箱内执行') && bpRun.text.includes('策略不可得'),
+  String(bpRun && bpRun.text).slice(0, 260),
+)
+check('(i) 策略不可得时不 spawn', hBadPolicy.subprocess.calls.length === bpSubBefore, String(hBadPolicy.subprocess.calls.length - bpSubBefore))
+hBadPolicy.dispose()
 
 // ── (5) hostTools 识别:内置 + 启发式;文件/RPC 工具不误认 ──
 phase('§3.5 宿主工具识别(只用于展示)')
@@ -973,9 +1129,17 @@ check('hostTools[].group 每项都存在(空串 = cmd/wsl 等不参与两族)', 
 check(
   'sandbox 是 §1.4 的聚合形状(没有 scopes)',
   JSON.stringify(Object.keys(shapeSnap.sandbox).sort()) ===
-    JSON.stringify(['anyUnconfined', 'capable', 'confinedCount', 'defaultMode', 'policyKnown', 'present', 'sessionCount']),
+    JSON.stringify(['anyUnconfined', 'capable', 'confinedCount', 'defaultMode', 'delegatable', 'policyKnown', 'present', 'sessionCount']),
   JSON.stringify(Object.keys(shapeSnap.sandbox).sort()),
 )
+check(
+  'sandbox.delegatable 是布尔(没有 ctx.shell 时为 false)',
+  typeof shapeSnap.sandbox.delegatable === 'boolean' &&
+    typeof shapeSnap.commandTool.sandbox.delegatable === 'boolean' &&
+    shapeSnap.sandbox.delegatable === false,
+  JSON.stringify({ top: shapeSnap.sandbox.delegatable, ct: shapeSnap.commandTool.sandbox.delegatable }),
+)
+
 const statsKeys = Object.keys(shapeSnap.syncStats).sort()
 check(
   'syncStats 只剩 0.6 白名单的 11 个字段(旧 9 + restrictApplied/guardRefusals)',
@@ -1386,7 +1550,7 @@ phase('§5 两族(0.6)')
   h513.dispose()
 }
 
-// ── 5.14 围栏 bash 族会话:简报只讲 ops_bash、不再「优先 envd_shell」,围栏拒绝文案保留 ──
+// ── 5.14 受限 bash 族会话:能委托 → 简报说「在沙箱内执行」;不能委托 → 简报/拒绝改口径 ──
 {
   const h514 = start(
     {
@@ -1405,20 +1569,57 @@ phase('§5 两族(0.6)')
   const locked514 = agentById(h514, 'agent-514')
   const brief514 = String(h514.state.brief.text({ scope: locked514 }))
   const line514 = brief514.split('\n').find((l) => l.includes('命令工具')) || ''
-  check('5.14 围栏 bash 族简报含「本会话被围栏」与 ops_bash', line514.includes('本会话被围栏') && line514.includes('ops_bash'), line514)
+  check(
+    '5.14 受限 bash 族简报含「沙箱内执行」与 ops_bash,不含「会拒绝」',
+    line514.includes('会通过宿主执行器在沙箱内执行') && line514.includes('ops_bash') && !line514.includes('会拒绝'),
+    line514,
+  )
   check('5.14 不再出现旧文案「优先 envd_shell」/「不重复提供」', !brief514.includes('优先 `envd_shell`') && !brief514.includes('不重复提供'), line514)
   const tool514 = h514.state.toolDefs.get('envd_shell')
-  const refuse514 = tool514 ? await tool514.execute({ command: 'echo fenced', cwd: process.cwd() }, { signal: null, agent: locked514 }) : null
+  const before514 = h514.subprocess.calls.length
+  const delegated514 = tool514 ? await tool514.execute({ command: 'echo fenced', cwd: process.cwd() }, { signal: null, agent: locked514 }) : null
   check(
-    '5.14 envd_shell 的围栏拒绝文案保留([sandbox] + 围栏)',
-    Boolean(refuse514) && refuse514.ok === false && String(refuse514.text).includes('[sandbox]') && String(refuse514.text).includes('围栏'),
-    String(refuse514 && refuse514.text).slice(0, 200),
+    '5.14 受限会话委托宿主执行器(bash 族会话也走沙箱,不自己 spawn)',
+    Boolean(delegated514) &&
+      delegated514.ok === true &&
+      String(delegated514.text).startsWith('[sandbox] 委托宿主执行器执行(') &&
+      h514.subprocess.calls.length === before514,
+    String(delegated514 && delegated514.text).slice(0, 200),
   )
-  check('5.14 围栏拒绝文案指向 bash 族宿主工具(ops_bash)', String(refuse514 && refuse514.text).includes('ops_bash'), String(refuse514 && refuse514.text).slice(0, 220))
   const free514 = agentById(h514, 'agent-514-free')
   const run514 = tool514 ? await tool514.execute({ command: 'echo free', cwd: process.cwd() }, { signal: null, agent: free514 }) : null
   check('5.14 无围栏会话照常执行(同族终端)', Boolean(run514) && run514.ok === true, String(run514 && run514.text).slice(0, 120))
   h514.dispose()
+
+  // 同构但执行器没有 resolve/execute:只能拒绝,简报改「无法在沙箱内执行」
+  const h514b = start(
+    {
+      shippedTools: ['ops_bash', 'pwsh'],
+      agentIds: [
+        { id: 'agent-514b', session: { key: 'f514b' } },
+        { id: 'agent-514b-free', session: { key: 'f514b-free' } },
+      ],
+      shell: { sandboxMode: 'workspace-write' },
+      sandboxPolicy: fakeSandboxPolicy('workspace-write', { 'f514b-free': 'danger-full-access' }),
+    },
+    { syncIntervalMs: 25 },
+  )
+  await waitForBrief(h514b)
+  await waitCommandTool(h514b, (c) => c.registered === true, 9000)
+  const locked514b = agentById(h514b, 'agent-514b')
+  const line514b = String(h514b.state.brief.text({ scope: locked514b })).split('\n').find((l) => l.includes('命令工具')) || ''
+  check('5.14b 无法委托时简报含「无法在沙箱内执行」', line514b.includes('无法在沙箱内执行'), line514b)
+  const tool514b = h514b.state.toolDefs.get('envd_shell')
+  const run514b = tool514b ? await tool514b.execute({ command: 'echo no-delegate', cwd: process.cwd() }, { signal: null, agent: locked514b }) : null
+  check(
+    '5.14b 无法委托时拒绝([sandbox] + 无法在沙箱内执行 + 指向 ops_bash)',
+    Boolean(run514b) &&
+      run514b.ok === false &&
+      String(run514b.text).includes('无法在沙箱内执行') &&
+      String(run514b.text).includes('ops_bash'),
+    String(run514b && run514b.text).slice(0, 240),
+  )
+  h514b.dispose()
 }
 
 // ── 5.15 无 Git Bash 且有 ops_bash:envd_shell 未注册(no-family-terminal),遮挡仍生效 ──
