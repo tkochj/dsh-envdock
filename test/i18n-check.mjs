@@ -105,6 +105,7 @@ check('0.6.1 注入开关移进简报区(词条仍在,footer 不再重复)', zhB
 check('0.6.1 受限备注带主语「另有 N 个会话」', zhBlock.includes('另有 {n} 个会话受沙箱限制') && enBlock.includes('{n} other sessions are sandbox-limited'), 'zh=' + zhBlock.includes('另有 {n} 个会话受沙箱限制') + ' en=' + enBlock.includes('{n} other sessions are sandbox-limited'))
 check('0.6.2 沙箱委托的备注两条都在(会执行 / 不会执行)', zhBlock.includes("noteConfinedSandboxed: '另有 {n} 个会话受沙箱限制：envd_shell 会在沙箱内执行") && enBlock.includes('runs inside the sandbox') && zhBlock.includes("noteConfined: '另有 {n} 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令"), 'zh-sandboxed=' + zhBlock.includes('会在沙箱内执行'))
 check('0.6.2 面板代码按 delegatable 分流(缺字段走保守文案)', source.includes('confinedDelegatable') && source.includes("sandboxInfo.delegatable === true") && source.includes('t.noteConfinedSandboxed'))
+check('0.6.3「未隐藏」只在确实什么都没藏时说', zhBlock.includes("noteNoBashHost: '这个会话没有可用的 bash 命令工具") && enBlock.includes('no usable bash command tool') && source.includes('hiddenNames.length === 0') && source.includes('refuseOnlyNames.length === 0'))
 
 console.log('\n' + (failures.length ? failures.length + ' 项失败:' : '全部通过'))
 for (const f of failures) console.log('  · ' + f)

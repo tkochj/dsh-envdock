@@ -13,7 +13,7 @@ Windows 上做开发时，机器上往往并排躺着好几套 Node / Python / G
 
 0.6 的核心是**两族**：bash 族（宿主 `bash` / `sh` / `zsh` / `fish` / `ops_bash`）与 PowerShell 族（宿主 `pwsh` / `powershell`）。cmd 与自定义终端不参与自动选族，也不被遮挡。
 
-同时保证：**只增不减**仍是默认——EnvDock 不隐藏、不禁用任何已有工具，只**增补**一个用你终端/PATH 的命令入口（`envd_shell`）；注册条件不满足时只做简报与展示，绝不把用户锁在没有命令工具的状态里。**0.6 的唯一例外**是：bash 族会话里遮挡另一族的**内置** PowerShell 命令工具（`pwsh` / `powershell`）。例外有明确边界——只针对内置名、只在会话族是 bash 且该会话确实看得到 bash 族宿主工具时生效、开关 `blockOtherFamily` 可关闭；bash 族名字与启发式认出的第三方名字永不被遮挡。
+同时保证：**只增不减**仍是默认——EnvDock 不隐藏、不禁用任何已有工具，只**增补**一个用你终端/PATH 的命令入口（`envd_shell`）；注册条件不满足时只做简报与展示，绝不把用户锁在没有命令工具的状态里。**0.6 的唯一例外**是：bash 族会话里遮挡另一族的**内置** PowerShell 命令工具（`pwsh` / `powershell`）。例外有明确边界——只针对内置名、只在会话族是 bash 且该会话**有 bash 入口**（看得到 bash 族宿主工具、已遮过、或手动 bash 且 `envd_shell` 能跑）时生效、开关 `blockOtherFamily` 可关闭；bash 族名字与启发式认出的第三方名字永不被遮挡。
 
 ## 探测模型
 
@@ -110,7 +110,15 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 
 **手动族不可用 → 回退 auto 并警告**：`defaultShell` 指定的是 bash / PowerShell 族，但**该族没有可用终端**、且**所有会话的宿主工具里都没有该族工具**时，生效族回退成自动选族（会话按自动规则重判，`familySource` 变回 `auto`），并置 `familyFallback=true`。否则面板写着「bash 族」、实际连一个 bash 都跑不了，模型会照着简报写错语法。探测还没就绪时不判不可用（避免启动瞬间来回抖）；手动 `cmd` / `custom` 不参与这条规则（它们本来就不选族）。回退是**逐次对账重算**的：该族恢复可用（装上终端或出现该族宿主工具）后自动回到手动族，不需要改设置。回退后简报与面板都会说明原因。
 
-**遮挡（`blockOtherFamily` 默认开）**：三条同时成立才遮挡——开关开 + 会话族 bash + 该会话看得到 bash 族宿主工具。目标是内置 PowerShell 名 `pwsh` / `powershell`：
+**遮挡（`blockOtherFamily` 默认开）**：开关开 + 会话族 bash + **有 bash 入口**才遮挡。第三条是三选一：
+
+- ① 该会话看得到 bash 族宿主工具；或
+- ② 上次已经遮过（sticky 记忆）；或
+- ③ **手动选了 bash 且 `envd_shell` 在本会话能跑**（`manual + envdAvailable`，0.6.3 新增）。
+
+「能跑」= bash 族终端可用（本机 Git Bash）**且**本会话非沙箱受限，或受限但部署可委托宿主沙箱执行器（`sandbox.delegatable`）；注册失败（`skipReason='taken'` / `'error'`）时不算能跑。手动 bash 时以用户选择为准：`envd_shell` 本身就是 EnvDock 的 bash 入口，遮掉 PowerShell 不会让会话「没有任何命令工具」（例如 dsh-ops 关闭、宿主只有 `pwsh` 的机器）。
+
+目标是内置 PowerShell 名 `pwsh` / `powershell`：
 
 - 可 restrict 的（继承层）用 `tools.restrict({ deny })` 直接从工具表隐藏；`restrict` 只在 **agent 作用域**调用（根层调用会抛错），失败时不崩溃——`guard` 仍然兜住执行侧；
 - 发布在 agent 自有层、`restrict` 挡不掉的，只用 `guard` 在 dispatch 前拒绝执行（不 spawn）；
@@ -131,6 +139,7 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 - bash 族、已注册：`· 命令工具(bash 族): 宿主 ops_bash + envd_shell(EnvDock 增补,Git Bash,同语法)`，并写执行分工——需要你机器上的版本（node / pnpm / python / git）用 `envd_shell`，需要后台作业或沙箱提权参数用宿主工具。
 - PowerShell 族、手动选择：`· 命令工具(PowerShell 族,手动选择): …`；宿主 `pwsh` 与 bash 族工具并存时追加「两族同时可见，各按自己的语法写命令，不要混写」。
 - 遮挡生效：补一句 `PowerShell 族宿主工具已隐藏(pwsh),不要调用 pwsh`；只有 guard 挡不掉（自有层发布）时改成「(`pwsh`) 在本会话调用会被拒绝」。
+- 未遮挡（唯一情况）：手动 bash 且本会话没有可用的 bash 命令工具（没有 bash 族宿主工具、`envd_shell` 也不可用）→ 追加 `;本会话没有可用的 bash 命令工具(也没有 bash 宿主工具),EnvDock 未遮挡 PowerShell 族`。
 - 开关关闭（`blockOtherFamily=false`）：不遮挡；bash 族简报写 `PowerShell 族宿主工具未隐藏(pwsh),两族同时可见,各按自己的语法写命令,不要混写`。手动 PowerShell 且会话里有 `ops_bash`：不遮挡，简报写「两族同时可见，各按自己的语法写命令，不要混写」。
 - 手动族回退 auto：补一句 `;手动选择的族不可用(该族既没有终端、也没有按该族发布的宿主工具),已回退自动选族`。
 - 未注册：按 `skipReason` 写原因（`no-family-terminal` / `no-unconfined-session` / `taken` / 注册失败）；只说事实，不再有「与 X 同族，不重复提供」。
@@ -185,7 +194,7 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 2. **置顶「命令工具」卡**：
    - `终端` chips：`自动` / 各终端 / `+` 自定义终端（`+` 展开路径 + 名称 + 参数模板）。chips **只显示终端名，不带族小标**；`自动` 的悬停说明是「按会话自动选语法族（推荐）」。
    - `命令` 行：语法标签（`bash 语法` / `PowerShell 语法`；**手动选择时才带「· 手动」**，自动不带后缀）· `envd_shell`（没提供时写 `—`）· `其它：ops_bash · pwsh`（没有就写「没有其它命令工具」）· 右侧「详情」。
-   - 备注（最多两行，全白话）：没提供的原因 / 受沙箱限制（能委托：`另有 N 个会话受沙箱限制：envd_shell 会在沙箱内执行（文件写入可能被拒绝）`；不能委托：`…在那些会话里不会执行命令，请改用其它命令工具`）/ `已隐藏 pwsh（避免两套语法混用）` / `手动选了 PowerShell 语法：PowerShell 与 bash 工具都在，各按自己的语法写，别混用`。普通状态下没有备注。
+   - 备注（最多两行，全白话）：没提供的原因 / 受沙箱限制（能委托：`另有 N 个会话受沙箱限制：envd_shell 会在沙箱内执行（文件写入可能被拒绝）`；不能委托：`…在那些会话里不会执行命令，请改用其它命令工具`）/ `已隐藏 pwsh（避免两套语法混用）` / `这个会话没有可用的 bash 命令工具，未隐藏 PowerShell 工具`（仅当确实没有任何 bash 入口）/ `手动选了 PowerShell 语法：PowerShell 与 bash 工具都在，各按自己的语法写，别混用`。普通状态下没有备注。
    - 详情（默认收起）：见「详情与轮询」。
 3. **工具链**：一行一个工具（分组 / 名称 / 版本 / 路径可点复制 / 行尾「N 个版本 ▾」），版本管理器一行一个（激活版本带 ←），末尾「+ 自定义工具」入口；**环境检查收在工具链末尾一行**：健康时 `✓ 通过`，有问题时 `⚠ N 项` + 第一条标题，点开展开列表。
 4. **环境简报**：一行「已注入给 AI / 未注入」+ **行内注入开关** + 复制 + 展开；展开才显示简报正文。开关挪到这里之后，底部 footer 不再重复同一件事。
@@ -213,7 +222,8 @@ Windows 的 `py` 启动器也是一种身份：它既是 `python` 的别名（`e
 - **受沙箱限制**（两种，按 `commandTool.sandbox.delegatable`，旧载荷缺字段按不能委托）：能委托时 muted 一行 `另有 N 个会话受沙箱限制：envd_shell 会在沙箱内执行（文件写入可能被拒绝）`；不能委托时 warn 一行 `另有 N 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令，请改用其它命令工具`（补「另有」是为了不让人以为说的是当前会话）。
 - **手动选的语法不可用**：一行 `手动选的语法不可用（没有对应终端，也没有对应命令工具），已自动改回按会话选择`。
 - **两套语法同时可见**（手动 PowerShell + 会话里有 bash 工具）：一行 `手动选了 PowerShell 语法：PowerShell 与 bash 工具都在，各按自己的语法写，别混用`。
-- **隐藏生效**：一行 `已隐藏 pwsh（避免两套语法混用）`；开关关掉时写「PowerShell 的命令工具没有隐藏（开关已关）」；手动 bash 但会话看不到 bash 命令工具时写「这个会话没有 bash 命令工具，未隐藏 PowerShell 工具」。
+- **隐藏生效**：一行 `已隐藏 pwsh（避免两套语法混用）`；开关关掉时写「PowerShell 的命令工具没有隐藏（开关已关）」。
+- **未遮挡（只有一种情况）**：手动 bash 且本会话**没有任何可用的 bash 命令工具**（没有 bash 族宿主工具，且 `envd_shell` 不可用——没 bash 终端、或受限且不能委托、或注册失败）。简报写「本会话没有可用的 bash 命令工具(也没有 bash 宿主工具),EnvDock 未遮挡 PowerShell 族」；面板写「这个会话没有可用的 bash 命令工具，未隐藏 PowerShell 工具」，且只在 `hidden` / `refuseOnly` 都为空时出现（已隐藏 / 只拒绝时这条会与事实自相矛盾，直接不显示）。
 - **环境差异**不再占一行备注：这句解释挂到 `其它：…` 的悬停（`cmdHintHost`）里，普通状态备注为空；没提供命令工具时更不会说这句（那时让人「用 envd_shell」是假话）。
 - 备注是「一句人话 + 一个原因」，按上面的优先级截到两行；计数只出现在详情里。
 
@@ -248,7 +258,8 @@ node test/simulate.mjs --help   # 手动验证:起假宿主跑真实 index.js，
 
 关键断言（0.6 的硬不变量）：
 
-- **遮挡只针对另一族的内置名**：`restrict` 的 `deny` 集合恒为 `{ pwsh, powershell }` 的子集，只在「开关开 + 会话族 bash + 该会话看得到 bash 族宿主工具」时调用；bash 族名字与启发式认出的名字**永不出现**在 deny / guard 名单里。
+- **遮挡只针对另一族的内置名**：`restrict` 的 `deny` 集合恒为 `{ pwsh, powershell }` 的子集，只在「开关开 + 会话族 bash + 有 bash 入口（看得到 bash 族宿主工具 / 已遮过 sticky / 手动 bash 且 `envd_shell` 能跑）」时调用；bash 族名字与启发式认出的名字**永不出现**在 deny / guard 名单里。
+- **手动 bash 优先遮挡**（host-harness 5.16 拆成 a/b/c）：a) 手动 bash + 没有 bash 宿主工具 + `envd_shell` 能跑 → 仍 `deny {pwsh}`，简报说「已隐藏」而不是「未遮挡」；b) 手动 bash + 没有任何可用的 bash 命令工具（没 bash 终端 / 受限且不能委托 / 注册失败）→ 不遮挡，简报写「本会话没有可用的 bash 命令工具…未遮挡」；c) 已隐藏 / 只拒绝时面板**不再**出现「未隐藏」备注（`hidden` / `refuseOnly` 非空即不显示那一条）。
 - **「同族不重复提供」已删除**：`skipReason='same-family'` 在 API 与面板词条里都不再出现（断言不存在）。
 - **注册三条件各有用例**：无主族终端 → `no-family-terminal`；无执行器 → 注册；全部会话受限 + **不能委托** → `no-unconfined-session`；全部会话受限 + **能委托** → 注册（受限会话走沙箱内执行）；有会话无围栏 → 注册；名字被占 → `taken`。
 - **选族按会话并锁定**：会话首次判定后不再变；只有首次判成 PowerShell 族的 10 秒内允许升级一次；手动族覆盖自动族；`cmd` / `custom` 不被遮挡。
@@ -298,7 +309,8 @@ Host 半边**不 import 任何 `@deepseek-ai/*` 包**（本地目录安装是 li
 - **遮挡是唯一例外，且有代价**：bash 族会话看不到宿主的 **Windows 原生能力**——注册表、COM、`Get-*` 命令都只有 PowerShell 才有。出路是**手动选 PowerShell 族**（`defaultShell` 设成 `pwsh` / `powershell`）或**关掉 `blockOtherFamily`**；两条都在下一次对账 / 探测后生效，不需要改配置或重启（改状态文件本身有 API 写入口）。
 - **选族是单向锁定的**：会话首次判定后不再来回切；只有「首次判成 PowerShell 族」的 10 秒内允许升级到 bash 族一次。之后 dsh-ops 再晚挂 `ops_bash` 也不会改判——要改就手动选族。
 - **非 Windows 没有测试覆盖**：两族判定依赖 Windows 上常见的宿主命令工具名（`pwsh` / `powershell` / `ops_bash` …）。POSIX 上逻辑同构但没跑过；族是按名字认的，不区分真实 shell 二进制。
-- **遮挡是否触发取决于该会话的工具表**：只有宿主工具里确实有内置 `pwsh` / `powershell` 时才会遮挡；dsh-ops 已经把官方 `pwsh` 顶掉的部署里就看不到遮挡效果（只有 `ops_bash`）。两种情况都由测试夹具覆盖，现场以 `/envdock-api` 的 `hidden` / `refuseOnly` 与简报里「已隐藏 / 会被拒绝」那句为准。
+- **遮挡是否触发取决于「有没有 bash 入口」**：自动模式下要看该会话的宿主工具里有没有 bash 族（没有就不遮）；**手动选 bash 时以用户选择为准**——只要 `envd_shell` 在本会话能跑（bash 终端可用 + 非受限或受限可委托），即使宿主只有 `pwsh`、没有 `ops_bash`（比如 dsh-ops 关闭时）也会遮挡 PowerShell 内置名，模型仍用 `envd_shell`（bash）。不会留下死局：`envd_shell` 本身就是 bash 入口。
+- **仍然不遮挡的边界**：手动 bash 但**没有任何可用的 bash 命令工具**（没有 bash 族宿主工具，且 `envd_shell` 不可用——没 bash 终端、或受限且部署不能委托、或注册失败）；开关关掉也不遮挡；机器上没有内置 `pwsh` / `powershell` 时没有可遮的东西（看不出效果）。现场以 `/envdock-api` 的 `hidden` / `refuseOnly` 与简报里「已隐藏 / 未遮挡」那句为准。
 - 增补出来的 `envd_shell` 是**精简执行器**：单次前台、输出截断、支持 `cwd` / `timeoutMs`；没有后台作业、没有 tail 落盘文件、没有 `sandbox_permissions` 升级参数。要这些能力就用宿主自带的命令工具（它一直在）。
 - **委托依赖宿主执行器**：受限会话能不能跑，取决于宿主是否提供 `ctx.shell`（`resolve` / `execute` / `result`）与 `sandboxPolicy` 服务，且执行器语法族是 bash / PowerShell；缺一样就退回「拒绝 + 指路」，绝不自己 spawn。
 - **仍然拒绝的边界**：目标终端是 `cmd` / WSL / 自定义终端（只支持 bash / PowerShell 目标）；宿主执行器族是 cmd 或认不出；拿不到合法 `sandboxPolicy`（不拿部署默认档冒充）；命令太长（base64 载荷 > 30000）。

@@ -2,6 +2,21 @@
 
 本文件记录 EnvDock 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.3] - 2026-11-08
+
+> 手动选 bash 时以用户选择为准：只要 EnvDock 自己的 bash 入口 `envd_shell` 在本会话能跑，即使没有 bash 族宿主工具也遮挡 PowerShell 内置名。自动选族、粘性、重新探测、沙箱委托与注册条件都不变。
+
+### Changed
+
+- **遮挡触发条件扩展（手动 bash 优先）**：第三条「有 bash 入口」从「该会话看得到 bash 族宿主工具」扩展为三选一——① 看得到 bash 族宿主工具；② 上次已经遮过（sticky）；③ **手动选了 bash 且 `envd_shell` 在本会话能跑**（bash 终端可用，且本会话非受限或受限但可委托宿主沙箱执行；注册失败不算）。手动 bash + 宿主只有 `pwsh` 的机器（例如 dsh-ops 关闭时）现在会隐藏 `pwsh` / `powershell`，模型仍用 `envd_shell`（bash）。
+- **「未遮挡」只在确实没有可用 bash 命令工具时出现**：手动 bash 且没有 bash 族宿主工具、`envd_shell` 也不可用（没有 bash 终端 / 受限且不能委托 / 注册失败）。简报文案改为「本会话没有可用的 bash 命令工具(也没有 bash 宿主工具),EnvDock 未遮挡 PowerShell 族」；面板改为「这个会话没有可用的 bash 命令工具，未隐藏 PowerShell 工具」，且只在 `hidden` / `refuseOnly` 都为空时出现。
+- **其余口径不变**：自动选族、粘性记忆、重新探测重判、沙箱委托执行、注册三条件都不动。
+
+### Fixed
+
+- **「我手动选了 bash，面板却说没隐藏 PowerShell」**：以前手动 bash 但会话看不到 bash 宿主工具时不遮挡，用户的选择和面板结论打架；现在以用户选择为准，只要 `envd_shell` 能跑就遮挡。
+- **「未隐藏」备注与事实矛盾**：已隐藏 / 只拒绝时面板不再显示「未隐藏」备注；旧文案「没有 bash 命令工具」也改成「没有可用的 bash 命令工具」。
+
 ## [0.6.2] - 2026-11-08
 
 > 受限会话里 `envd_shell` 不再一律拒绝：恢复 0.4 的**沙箱委托执行**，把命令交给宿主的沙箱执行器 `ctx.shell` 在沙箱内执行。注册条件、API、简报与面板文案随之调整；安全边界不变——EnvDock 自己 spawn 的路径**永远不带** `sandboxPolicy`，只有 `ctx.shell` 能挂围栏。

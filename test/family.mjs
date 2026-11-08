@@ -332,6 +332,56 @@ check(
 check('内置 pwsh 仍然被挡(displayOnly 不影响内置)', maskLearned.hide.join(',') === 'pwsh' && maskLearned.refuse.join(',') === 'pwsh', JSON.stringify(maskLearned))
 const maskNoKnown = familyMask({ group: 'bash', blockOtherFamily: true, hostTools: [bashTool, pwshTool] })
 check('known 省略时从 hostTools 名字取候选', maskNoKnown.refuse.join(',') === 'pwsh', JSON.stringify(maskNoKnown))
+// 0.6.3:手动选 bash 且 envd_shell 在本会话确实能跑 → 即使没有 bash 宿主工具也遮挡
+const maskManualBash = familyMask({
+  group: 'bash',
+  blockOtherFamily: true,
+  manual: true,
+  envdAvailable: true,
+  hostTools: [pwshTool],
+  known: new Set(['pwsh']),
+})
+check(
+  '手动 bash + envdAvailable=true + 只有 PowerShell 宿主工具 → active、hide [pwsh]',
+  maskManualBash.active === true && maskManualBash.hide.join(',') === 'pwsh' && maskManualBash.refuse.join(',') === 'pwsh',
+  JSON.stringify(maskManualBash),
+)
+const maskManualBashUnavailable = familyMask({
+  group: 'bash',
+  blockOtherFamily: true,
+  manual: true,
+  envdAvailable: false,
+  hostTools: [pwshTool],
+  known: new Set(['pwsh']),
+})
+check(
+  '手动 bash 但 envdAvailable=false → inactive(不能遮成没有命令工具的死局)',
+  maskManualBashUnavailable.active === false && maskManualBashUnavailable.hide.length === 0,
+  JSON.stringify(maskManualBashUnavailable),
+)
+const maskAutoEnvAvailable = familyMask({
+  group: 'bash',
+  blockOtherFamily: true,
+  manual: false,
+  envdAvailable: true,
+  hostTools: [pwshTool],
+  known: new Set(['pwsh']),
+})
+check(
+  '自动族 + envdAvailable=true → inactive(自动族仍要求看得见 bash 宿主工具)',
+  maskAutoEnvAvailable.active === false,
+  JSON.stringify(maskAutoEnvAvailable),
+)
+const maskManualBashOff = familyMask({
+  group: 'bash',
+  blockOtherFamily: false,
+  manual: true,
+  envdAvailable: true,
+  hostTools: [pwshTool],
+  known: new Set(['pwsh']),
+})
+check('手动 bash + envdAvailable=true 但开关关闭 → inactive', maskManualBashOff.active === false, JSON.stringify(maskManualBashOff))
+
 const maskBashNames = familyMask({
   group: 'bash',
   blockOtherFamily: true,
@@ -460,7 +510,34 @@ const lineManualBashNoHost = familyBriefLine({
   bashHostAvailable: false,
   confined: false,
 })
-check('手动 bash 但会话没有 bash 宿主工具 → 含「未遮挡」', has(lineManualBashNoHost, '未遮挡'), lineManualBashNoHost)
+check(
+  '手动 bash 但会话没有 bash 宿主工具、也没遮挡 → 含「没有可用的 bash 命令工具」与「未遮挡」',
+  has(lineManualBashNoHost, '没有可用的 bash 命令工具') && has(lineManualBashNoHost, '未遮挡'),
+  lineManualBashNoHost,
+)
+
+// 0.6.3:手动 bash + 只有 PowerShell 宿主工具 + envd_shell 能跑 → 已隐藏,不再说「未遮挡」
+const lineManualBashHides = familyBriefLine({
+  family: 'bash',
+  familySource: 'manual',
+  shellLabel: 'Git Bash',
+  terminalAvailable: true,
+  registered: true,
+  skipReason: null,
+  hostTools: [pwshTool],
+  hidden: ['pwsh'],
+  refused: ['pwsh'],
+  displayOnly: [],
+  mixed: false,
+  blockOtherFamily: true,
+  bashHostAvailable: false,
+  confined: false,
+})
+check(
+  '手动 bash + hidden=[pwsh] → 含「已隐藏」,不含「未遮挡」/「没有可用的 bash 命令工具」',
+  has(lineManualBashHides, '已隐藏') && !has(lineManualBashHides, '未遮挡') && !has(lineManualBashHides, '没有可用的 bash 命令工具'),
+  lineManualBashHides,
+)
 
 // 受限会话:delegate=true → 命令会在宿主沙箱内执行;delegate=false → 无法在沙箱内执行
 const lineConfinedBashDelegate = familyBriefLine({

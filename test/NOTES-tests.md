@@ -311,7 +311,7 @@ node test/simulate.mjs --json                                   # 单行机器�
 | 13 | 振荡 | 稳定后连续 10 次对账 restrict 调用 ≤1 次、deny/hidden 不漂移 |
 | 14 | 受限 bash 族会话 | 简报「沙箱内执行」+ ops_bash、不含「会拒绝」/旧「优先 envd_shell」;执行走**委托宿主执行器**(不自己 spawn);无法委托的同构 fixture(5.14b)简报「无法在沙箱内执行」、执行被拒绝且指向 ops_bash |
 | 15 | 无 Git Bash + ops_bash | `skipReason='no-family-terminal'`、envd_shell 未注册、会话族仍 bash、遮挡仍生效、简报「未找到」 |
-| 16 | 手动 bash 但会话没有 bash 族工具 | 不遮挡(0 次/hide 空)、guard 放行、简报警告「未遮挡」 |
+| 16a/16b/16c | 手动 bash + 会话没有 bash 宿主工具 | 0.6.3:手动选择优先 —— `envd_shell` 能跑(有 bash 终端 + 非受限或可委托)时仍遮挡 pwsh(16a/16c2);没有 bash 终端 → familyFallback 回 auto 不遮挡(16b);受限且不能委托 → 不遮挡 + 简报「没有可用的 bash 命令工具」(16c) |
 | 17 | 手动 bash 但该族**既没有终端、也没有宿主工具** | 回退 auto:`familySource='auto'`、API 顶层与 `commandTool` 都 `familyFallback=true`、生效族按自动规则重判(powershell);简报追加「手动选择的族不可用……已回退自动选族」;注册该族宿主工具后**下一轮对账**自动回到 `manual`(`familyFallback=false`,不用重新探测) |
 
 > 用例 17(与 15 同一套环境技巧)靠 `withPath` + `makeStubBin` 造「该族没有终端」:先在真实 PATH 下把默认终端写成 bash,
@@ -433,3 +433,59 @@ node test/simulate.mjs --host-tools ops_bash,pwsh --shell bash                  
 - (i) 用「policy 服务存在但返回非法 mode」造策略不可得;「policy 服务缺失」在 §3.3 里单独覆盖(此时不可委托、不注册)。
 - `runnerFailed`/`denied` 直接改夹具 shell 的 `state`,同一 fixture 内连续断言,记得用完复位(用例已复位)。
 
+
+---
+
+## 14. 0.6.3:手动选择优先(`envdAvailable`)
+
+> 用户报的矛盾:手动选了 Git Bash(bash 族),但宿主工具只有 `pwsh`。按 0.6 的规则「必须看得见
+> bash 族**宿主**工具才遮挡」,pwsh 不被遮,备注于是写着「本会话没有 bash 命令工具,未遮挡 PowerShell
+> 工具」——「我明明选了 bash,你却不藏 PowerShell」。
+>
+> 修法:**手动选择优先**。手动 bash 且 EnvDock 自己的 bash 入口(`envd_shell`)在本会话确实能跑时,
+> 即使没有 bash 宿主工具也遮挡 pwsh(不会留下「没有命令工具」的死局)。
+
+### 14.1 实现要点(供测试对照)
+
+- `familyMask` 新增可选入参 `manual:boolean` / `envdAvailable:boolean`:
+  `active = 开关开 && group==='bash' && (hostTools.some(bash) || sticky===true || (manual===true && envdAvailable===true))`。
+  `hide/refuse/displayOnly` 的候选口径不变(仍只针对内置 pwsh/powershell,bash 族名字永不进)。
+- `reconcileFamilies`:`manualBash = source==='manual' && group==='bash'`;
+  `envdAvailable = shellOk && runnable`:
+  - `shellOk` = bash 终端可用(`resolveShell(state, cache,'bash').path`)或已注册且 `activeShell` 是 bash,
+    但注册失败(`skipReason` 为 `taken`/`error`)时不算可用;
+  - `runnable` = 本会话非受限,或受限但 `canDelegate(ctx)`(0.6.2 的沙箱委托可用)。
+- brief 的「未遮挡」句只在 `manual && !bashHostAvailable && hidden.length===0 && refused.length===0`
+  时出现,文案:「本会话没有可用的 bash 命令工具(也没有 bash 宿主工具),EnvDock 未遮挡 PowerShell 族」。
+
+### 14.2 `test/host-harness.mjs` §5.16 拆成 a / b / c
+
+| 用例 | 场景 | 断言 |
+| --- | --- | --- |
+| 5.16a(主用例) | 手动 bash + 宿主只有 `pwsh` + 本机有 Git Bash | 会话族 bash/manual、`hidden:['pwsh']`、该 agent deny `{pwsh}`、guard 拒绝 pwsh、`envd_shell` 仍注册、简报含「已隐藏」且不含「未遮挡」/「没有可用的 bash 命令工具」 |
+| 5.16b | 手动 bash + 机器**没有** bash 终端(§5.17 同款 `withPath`+`makeStubBin` 桩环境) | `familyFallback=true`、族回 powershell/auto、`hidden` 空(不遮挡)、简报含「手动选择的族不可用…已回退自动选族」、不出现「未遮挡」 |
+| 5.16c | 手动 bash + 有 Git Bash + 会话受限且**不能委托**(`shell:{sandboxMode}` 无 resolve/execute) | `envdAvailable=false` → 不遮挡(hidden 空 / 无 deny / 0 次 restrict)、guard 不拒绝、简报「没有可用的 bash 命令工具」 |
+| 5.16c2 | 同构但**能委托**(`fakeSandboxedShell`+policy) | 受限会话里 `envdAvailable=true` → 恢复遮挡:`hidden:['pwsh']`、deny `{pwsh}` |
+
+### 14.3 `test/family.mjs`
+
+- `familyMask` 新增 4 条:
+  1. `manual:true, envdAvailable:true`,hostTools 只有 powershell → `active=true`、`hide=['pwsh']`、`refuse=['pwsh']`;
+  2. `envdAvailable:false` 同输入 → `inactive`(不遮成死局);
+  3. `manual:false, envdAvailable:true`(自动族)→ `inactive`(自动族仍要求看得见 bash 宿主工具);
+  4. `manual:true, envdAvailable:true` 但 `blockOtherFamily:false` → `inactive`。
+- `familyBriefLine`:
+  - 手动 bash + 无 bash 宿主工具 + `hidden` 空 → 含「没有可用的 bash 命令工具」与「未遮挡」(新文案);
+  - 手动 bash + 无 bash 宿主工具 + `hidden=['pwsh']` → 含「已隐藏」、**不含**「未遮挡」/「没有可用的 bash 命令工具」。
+
+### 14.4 结果(本机)
+
+- `node test/family.mjs` → **97/97**
+- `node test/host-harness.mjs` → **332/332**、exit 0、0 SKIP(上一轮 320 → +12)
+
+### 14.5 已知边界
+
+- 5.16a/c/c2 都要求本机有 bash 族终端(否则 `setShell bash` 就 400 → 整组 `SKIP`);
+  5.16b 要求桩环境里探测不到 bash 终端(否则 `SKIP`),与 §5.17 同口径。
+- `envdAvailable` 的「可委托」判定发生在 reconcile;策略/执行器能力变化后要等下一轮对账才反映
+  (用例用 `waitCommandTool`/短 `sleep` 等它落地)。

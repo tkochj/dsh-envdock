@@ -1660,32 +1660,110 @@ phase('§5 两族(0.6)')
   await freshDetection(h)
 }
 
-// ── 5.16 会话没有 bash 族工具却手动选 bash:不遮挡该会话,简报有警告 ──
+// ── 5.16 手动选 bash 且 envd_shell 在本会话能跑 → 即使没有 bash 宿主工具也遮挡 PowerShell 族 ──
+// 0.6.3 修的就是用户报的那个矛盾:「我明明选了 Git Bash,你却不藏 PowerPoint」——
+// 手动选择优先,只要 EnvDock 自己的 bash 入口确实可用(有 bash 终端 + 非受限或可委托)。
 {
   await resetState(h)
+  await freshDetection(h)
   const base516 = (await callApi(h)).json
   const bash516 = (base516.terminals || []).find((t) => t.family === 'bash')
   if (!bash516) {
-    skip('5.16 手动 bash 但会话没有 bash 族工具 → 不遮挡 + 警告', '本机没有 bash 族终端')
+    skip('5.16a 手动 bash + 只有 pwsh 宿主工具 → 仍遮挡', '本机没有 bash 族终端')
   } else {
+    // 5.16a(主用例):手动 bash + 宿主只有 pwsh + 本机有 Git Bash → 手动选择优先,遮挡 pwsh
     await post(h, { op: 'setShell', key: bash516.key })
-    const h516 = start({ shippedTools: ['pwsh'], agentIds: ['agent-516'] }, { syncIntervalMs: 25 })
-    await waitForBrief(h516)
-    const s516 = recordFamilySnap('5.16', await waitCommandTool(h516, (c) => c.familySource === 'manual' && c.family === 'bash', 9000))
-    const agent516 = agentById(h516, 'agent-516')
-    check('5.16 手动 bash → family=bash / familySource=manual', s516.commandTool.family === 'bash' && s516.commandTool.familySource === 'manual', JSON.stringify({ family: s516.commandTool.family, source: s516.commandTool.familySource }))
-    check(
-      '5.16 该会话没有 bash 族工具 → 不遮挡(hidden 空 / deny 空 / restrict 0 次)',
-      (s516.commandTool.hidden || []).length === 0 && h516.stats().restrictCalls === 0 && Object.keys(h516.stats().activeDenies).length === 0,
-      JSON.stringify({ hidden: s516.commandTool.hidden, attempts: h516.stats().restrictAttempts }),
+    const h516a = start({ shippedTools: ['pwsh'], agentIds: ['agent-516a'] }, { syncIntervalMs: 25 })
+    await waitForBrief(h516a)
+    const s516a = recordFamilySnap('5.16a', await waitCommandTool(h516a, (c) => (c.hidden || []).includes('pwsh'), 9000))
+    const agent516a = agentById(h516a, 'agent-516a')
+    check('5.16a 手动 bash + 没有 bash 宿主工具 → 会话族仍是 bash/manual', s516a.commandTool.family === 'bash' && s516a.commandTool.familySource === 'manual', JSON.stringify({ family: s516a.commandTool.family, source: s516a.commandTool.familySource }))
+    check('5.16a 本会话确实没有 bash 族宿主工具(只有 pwsh)', (s516a.commandTool.hostTools || []).every((tool) => tool.family !== 'bash'), JSON.stringify(s516a.commandTool.hostTools))
+    check('5.16a 手动选择优先 → hidden=[pwsh](envd_shell 在本会话能跑)', JSON.stringify(s516a.commandTool.hidden) === '["pwsh"]', JSON.stringify({ hidden: s516a.commandTool.hidden, hostTools: s516a.commandTool.hostTools }))
+    check('5.16a 该 agent 的 deny 正好 {pwsh}', JSON.stringify(h516a.stats().activeDenies['agent-516a'] || []) === '["pwsh"]', JSON.stringify(h516a.stats().activeDenies))
+    check('5.16a guard 拒绝 pwsh(执行侧也挡住)', typeof h516a.guardReason('pwsh', agent516a) === 'string', String(h516a.guardReason('pwsh', agent516a)))
+    check('5.16a envd_shell 仍注册(遮挡后本会话仍有命令工具,不是死局)', s516a.commandTool.registered === true && s516a.commandTool.skipReason === null, JSON.stringify(s516a.commandTool))
+    const line516a = String(h516a.state.brief.text({ scope: agent516a })).split('\n').find((l) => l.includes('命令工具')) || ''
+    check('5.16a 简报含「已隐藏」,不含「未遮挡」/「没有可用的 bash 命令工具」', line516a.includes('已隐藏') && !line516a.includes('未遮挡') && !line516a.includes('没有可用的 bash 命令工具'), line516a)
+    h516a.dispose()
+    await resetState(h)
+
+    // 5.16b:手动 bash 但机器上没有 bash 终端 → familyFallback 回 auto,不遮挡
+    const h516b = start({ shippedTools: ['pwsh'], agentIds: ['agent-516b'] }, { syncIntervalMs: 25 })
+    const stub516b = makeStubBin(['git.exe', 'pwsh.exe'])
+    try {
+      await waitForBrief(h516b)
+      await post(h, { op: 'setShell', key: bash516.key })
+      const s516b = await withPath(
+        () => false,
+        async () => {
+          process.env.PATH = stub516b
+          await freshDetection(h516b)
+          return pollSnapshot(h516b, (snap) => Boolean(snap && snap.commandTool) && snap.commandTool.familyFallback === true, 9000)
+        },
+      )
+      recordFamilySnap('5.16b', s516b)
+      if (hasTerminalFamily(s516b, 'bash')) {
+        skip('5.16b 手动 bash + 没有 bash 终端 → 回退 auto、不遮挡', '桩环境里仍探测到 bash 终端(固定路径兜底)')
+      } else {
+        check('5.16b 没有 bash 终端 → familyFallback=true 且不遮挡(hidden 空)', s516b.commandTool.familyFallback === true && (s516b.commandTool.hidden || []).length === 0, JSON.stringify({ fallback: s516b.commandTool.familyFallback, hidden: s516b.commandTool.hidden }))
+        check('5.16b 回退后会话族按自动重判 → powershell/auto', s516b.commandTool.family === 'powershell' && s516b.commandTool.familySource === 'auto', JSON.stringify({ family: s516b.commandTool.family, source: s516b.commandTool.familySource }))
+        const agent516b = agentById(h516b, 'agent-516b')
+        const line516b = String(h516b.state.brief.text({ scope: agent516b })).split('\n').find((l) => l.includes('命令工具')) || ''
+        check('5.16b 简报含「手动选择的族不可用…已回退自动选族」', line516b.includes('手动选择的族不可用') && line516b.includes('已回退自动选族'), line516b)
+        check('5.16b 回退分支不再出现「未遮挡」矛盾文案', !line516b.includes('未遮挡'), line516b)
+      }
+    } finally {
+      h516b.dispose()
+      await resetState(h)
+      await freshDetection(h)
+    }
+
+    // 5.16c:手动 bash + 会话受限 → 能委托才遮挡,不能委托就不遮挡
+    await post(h, { op: 'setShell', key: bash516.key })
+    const h516c = start(
+      {
+        shippedTools: ['pwsh'],
+        agentIds: [{ id: 'agent-516c', session: { key: 'c516' } }],
+        // 只有 sandboxMode、没有 resolve/execute:受限会话里 envd_shell 跑不了 → envdAvailable=false
+        shell: { sandboxMode: 'workspace-write' },
+        sandboxPolicy: fakeSandboxPolicy('workspace-write'),
+      },
+      { syncIntervalMs: 25 },
     )
-    check('5.16 guard 不拒绝 pwsh', h516.guardReason('pwsh', agent516) === undefined, String(h516.guardReason('pwsh', agent516)))
-    const line516 = String(h516.state.brief.text({ scope: agent516 })).split('\n').find((l) => l.includes('命令工具')) || ''
-    check('5.16 简报有警告「未遮挡」', line516.includes('未遮挡'), line516)
-    h516.dispose()
+    await waitForBrief(h516c)
+    const s516c = recordFamilySnap('5.16c', await waitCommandTool(h516c, (c) => c.family === 'bash' && c.familySource === 'manual', 9000))
+    await sleep(150) // 多跑两轮对账,排除「恰好还没算到」
+    const agent516c = agentById(h516c, 'agent-516c')
+    const line516c = String(h516c.state.brief.text({ scope: agent516c })).split('\n').find((l) => l.includes('命令工具')) || ''
+    check(
+      '5.16c 受限且不能委托 → envdAvailable=false,不遮挡(hidden 空 / 无 deny / 0 次 restrict)',
+      (s516c.commandTool.hidden || []).length === 0 && h516c.stats().restrictCalls === 0 && Object.keys(h516c.stats().activeDenies).length === 0,
+      JSON.stringify({ hidden: s516c.commandTool.hidden, attempts: h516c.stats().restrictAttempts }),
+    )
+    check('5.16c guard 不拒绝 pwsh(没遮挡就没有执行侧拒绝)', h516c.guardReason('pwsh', agent516c) === undefined, String(h516c.guardReason('pwsh', agent516c)))
+    check('5.16c 简报说明「没有可用的 bash 命令工具」', line516c.includes('没有可用的 bash 命令工具'), line516c)
+    h516c.dispose()
+
+    // 同构但可委托(0.6.2 的沙箱委托):受限会话里 envd_shell 能跑 → 恢复遮挡
+    const h516c2 = start(
+      {
+        shippedTools: ['pwsh'],
+        agentIds: [{ id: 'agent-516c2', session: { key: 'c5162' } }],
+        shell: fakeSandboxedShell({ mode: 'workspace-write' }),
+        sandboxPolicy: fakeSandboxPolicy('workspace-write'),
+      },
+      { syncIntervalMs: 25 },
+    )
+    await waitForBrief(h516c2)
+    const s516c2 = recordFamilySnap('5.16c2', await waitCommandTool(h516c2, (c) => (c.hidden || []).includes('pwsh'), 9000))
+    check('5.16c2 受限但可委托(envdAvailable=true)→ 手动 bash 仍遮挡 pwsh', JSON.stringify(s516c2.commandTool.hidden) === '["pwsh"]' && s516c2.commandTool.registered === true, JSON.stringify({ hidden: s516c2.commandTool.hidden, registered: s516c2.commandTool.registered }))
+    check('5.16c2 该 agent 的 deny 正好 {pwsh}', JSON.stringify(h516c2.stats().activeDenies['agent-516c2'] || []) === '["pwsh"]', JSON.stringify(h516c2.stats().activeDenies))
+    h516c2.dispose()
     await resetState(h)
   }
 }
+
 
 // ── 5.17 手动族不可用 → 回退 auto + 警告(familyFallback);重新可用后自动恢复 ──
 {

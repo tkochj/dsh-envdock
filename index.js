@@ -753,7 +753,8 @@ export function resolveSessionFamily(input) {
 /**
  * 一个会话的遮挡/拒绝目标集合。纯函数。
  *
- * active = 开关开 + 会话族 bash + (该会话看得到 bash 族宿主工具,或上次已经遮过 —— sticky)。
+ * active = 开关开 + 会话族 bash + (该会话看得到 bash 族宿主工具,或上次已经遮过 —— sticky,
+ * 或手动选了 bash 且 envd_shell 在本会话能跑 —— manual + envdAvailable)。
  * sticky 是「记忆」:op_bash 之类 bash 族工具消失后,已经遮挡的 pwsh 不立刻放回来,
  * 直到主人在面板上「重新探测」(会话族与遮挡一起重判),避免工具表在会话里反复闪。
  *   hide       可见且可 restrict 的内置 PowerShell 名(继承层;tools.restrict 能挡掉)
@@ -767,7 +768,11 @@ export function familyMask(input) {
   const active =
     spec.blockOtherFamily !== false &&
     spec.group === FAMILY_BASH &&
-    (hostTools.some((tool) => tool && tool.family === FAMILY_BASH) || spec.sticky === true)
+    (hostTools.some((tool) => tool && tool.family === FAMILY_BASH) ||
+      spec.sticky === true ||
+      // 手动选了 bash 语法 + EnvDock 自己的 bash 入口(envd_shell)在本会话确实能跑:
+      // 用户的选择是明确的,遮掉另一族不会留下「没有命令工具」的死局。
+      (spec.manual === true && spec.envdAvailable === true))
   const known = new Set()
   if (spec.known && typeof spec.known[Symbol.iterator] === 'function') for (const name of spec.known) known.add(String(name))
   for (const tool of hostTools) if (tool && tool.name) known.add(String(tool.name))
@@ -839,7 +844,9 @@ export function familyBriefLine(spec) {
     if (hidden.length) line += ';PowerShell 族宿主工具已隐藏(' + listed(hidden) + '),不要调用 ' + hidden[0]
     else if (refused.length) line += ';PowerShell 族宿主工具(`' + refused[0] + '`)在本会话调用会被拒绝'
     if (!blockOtherFamily && hostPwsh.length) line += ';PowerShell 族宿主工具未隐藏(' + listed(hostPwsh) + '),两族同时可见,各按自己的语法写命令,不要混写'
-    if (manual && !bashHostAvailable) line += ';本会话看不到 bash 族宿主工具,EnvDock 未遮挡 PowerShell 族'
+    if (manual && !bashHostAvailable && !hidden.length && !refused.length) {
+      line += ';本会话没有可用的 bash 命令工具(也没有 bash 宿主工具),EnvDock 未遮挡 PowerShell 族'
+    }
     if (displayOnly.length) line += ';另见只展示、未遮挡的 ' + listed(displayOnly)
   } else if (family === FAMILY_POWERSHELL) {
     const bits = []
@@ -3174,10 +3181,34 @@ export function apply(ctx, config) {
         // 会话族 bash 且看得到 bash 族宿主工具 → 目标集合;否则为空(不遮挡)。
         // sticky:已经遮过就保持(工具表暂时缺 bash 族工具时不来回闪),直到重新探测/开关关闭。
         const sticky = previous ? previous.masked === true : false
+        // 手动选 bash 但会话里没有 bash 宿主工具时:只要 EnvDock 自己的 bash 入口
+        // (envd_shell)在本会话真能跑,遮挡就不会留下死局 —— 用户的选择优先。
+        const manualBash = source === 'manual' && group === FAMILY_BASH
+        let envdAvailable = false
+        if (manualBash) {
+          const bashTerminal = cache.value ? resolveShell(state, cache.value, FAMILY_BASH) : null
+          // 注册失败(taken/error)时 envd_shell 不可用,不能拿「终端在」当借口去遮挡。
+          const registrationBlocked = rt.skipReason === 'taken' || rt.skipReason === 'error'
+          const shellOk = Boolean(
+            !registrationBlocked &&
+              ((bashTerminal && bashTerminal.path) ||
+                (rt.registered && (activeShell.current ? activeShell.current.family === FAMILY_BASH : true))),
+          )
+          let runnable = true
+          try {
+            const gate = typeof gateFor === 'function' ? gateFor(agent) : null
+            if (gate && gate.confined) runnable = canDelegate(ctx) === true
+          } catch {
+            runnable = canDelegate(ctx) === true
+          }
+          envdAvailable = shellOk && runnable
+        }
         const mask = familyMask({
           group,
           blockOtherFamily,
           sticky,
+          manual: manualBash,
+          envdAvailable,
           hostTools: facts.hostTools,
           known: facts.known,
           restrictable: facts.restrictable,

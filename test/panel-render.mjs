@@ -462,7 +462,7 @@ const COPY = {
   fenceSandboxed: (n) => '另有 ' + String(n) + ' 个会话受沙箱限制：envd_shell 会在沙箱内执行（文件写入可能被拒绝）',
   hiddenPwsh: (names) => '已隐藏 ' + names + '（避免两套语法混用）',
   notBlocked: 'PowerShell 的命令工具没有隐藏（开关已关）',
-  noBashHost: '这个会话没有 bash 命令工具，未隐藏 PowerShell 工具',
+  noBashHost: '这个会话没有可用的 bash 命令工具，未隐藏 PowerShell 工具',
   familyFallback: '手动选的语法不可用（没有对应终端，也没有对应命令工具），已自动改回按会话选择',
   mixedNote: '手动选了 PowerShell 语法：PowerShell 与 bash 工具都在，各按自己的语法写，别混用',
   famBash: 'bash 语法',
@@ -1232,19 +1232,31 @@ check('29 语法标签:无族时命令行与 chip 都不显示语法信息', !fa
   check('29 语法标签:无族时命令行其余部分照常', textOf(ownTool(famNone.tree)) === 'envd_shell' && textOf(hostNode(famNone.tree)) === COPY.hostNone, JSON.stringify({ own: textOf(ownTool(famNone.tree)), host: textOf(hostNode(famNone.tree)) }))
 }
 
-// ───────────────────────────────── 30) 手动 bash 但会话没有 bash 族工具:未隐藏 ──
+// ───────────────────────────────── 30) 手动 bash + 没有任何 bash 入口:只有真没隐藏时才说「未隐藏」 ──
+// 0.6.3:手动 bash 优先遮挡 —— 能遮挡时 pwsh 已被隐藏,此时说「未隐藏」会自相矛盾(用户报的 bug)。
 {
-  const manualBashNoHost = await mountPanel(
+  const manualBashPayload = (over) =>
     payload({
       family: 'bash',
       familySource: 'manual',
       state: { defaultShell: 'bash', options: { injectBrief: false, allowLan: false, blockOtherFamily: true }, customTools: [] },
-      commandTool: commandTool({ family: 'bash', familySource: 'manual', hostTools: PWSH_HOST_TOOLS, hidden: [] }),
-    }),
-  )
-  check('30 手动 bash 无 bash 工具:语法标签仍是 bash 语法 · 手动', famBadgeText(manualBashNoHost.tree) === COPY.famBash + ' · ' + COPY.manual, famBadgeText(manualBashNoHost.tree))
-  check('30 手动 bash 无 bash 工具:备注说「未隐藏」', noteTexts(manualBashNoHost.tree)[0] === COPY.noBashHost, JSON.stringify(noteTexts(manualBashNoHost.tree)))
-  check('30 手动 bash 无 bash 工具:没有名字被划掉(真的没挡)', hiddenChips(manualBashNoHost.tree).length === 0 && textOf(hostNode(manualBashNoHost.tree)) === COPY.hostPrefix + 'pwsh', textOf(hostNode(manualBashNoHost.tree)))
+      commandTool: commandTool(Object.assign({ family: 'bash', familySource: 'manual', hostTools: PWSH_HOST_TOOLS }, over)),
+    })
+  // 真的什么都没藏(pwsh 没被隐藏、也没有只能拒绝的名字)→ 说「未隐藏」
+  const manualBashNoHost = await mountPanel(manualBashPayload({ hidden: [], refuseOnly: [] }))
+  check('30 手动 bash 无 bash 入口:语法标签仍是 bash 语法 · 手动', famBadgeText(manualBashNoHost.tree) === COPY.famBash + ' · ' + COPY.manual, famBadgeText(manualBashNoHost.tree))
+  check('30 手动 bash 无 bash 入口:真没隐藏时备注说「未隐藏」', noteTexts(manualBashNoHost.tree)[0] === COPY.noBashHost, JSON.stringify(noteTexts(manualBashNoHost.tree)))
+  check('30 手动 bash 无 bash 入口:文案说「没有可用的 bash 命令工具」(不再和 envd_shell 矛盾)', noteTexts(manualBashNoHost.tree)[0].includes('没有可用的 bash 命令工具'), JSON.stringify(noteTexts(manualBashNoHost.tree)))
+  check('30 手动 bash 无 bash 入口:没有名字被划掉(真的没挡)', hiddenChips(manualBashNoHost.tree).length === 0 && textOf(hostNode(manualBashNoHost.tree)) === COPY.hostPrefix + 'pwsh', textOf(hostNode(manualBashNoHost.tree)))
+  // 回归(用户报的 bug):manual bash + 载荷 hidden:['pwsh'] → pwsh 已隐藏,绝不能再冒「未隐藏」
+  const manualBashHidden = await mountPanel(manualBashPayload({ hidden: ['pwsh'], refuseOnly: [] }))
+  check('30 回归:manual bash 且 pwsh 已隐藏时不出「未隐藏」备注', !noteTexts(manualBashHidden.tree).some((text) => text.includes('未隐藏 PowerShell 工具')), JSON.stringify(noteTexts(manualBashHidden.tree)))
+  check('30 回归:该场景改成如实说「已隐藏 pwsh」', noteTexts(manualBashHidden.tree).some((text) => text.includes('已隐藏 pwsh')), JSON.stringify(noteTexts(manualBashHidden.tree)))
+  // 只能拒绝(agent 自有层,restrict 挡不掉)时也不说「未隐藏」
+  const manualBashRefused = await mountPanel(manualBashPayload({ hidden: [], refuseOnly: ['pwsh'] }))
+  check('30 回归:manual bash 但有只能拒绝的名字时也不出「未隐藏」', !noteTexts(manualBashRefused.tree).some((text) => text.includes('未隐藏 PowerShell 工具')), JSON.stringify(noteTexts(manualBashRefused.tree)))
+  // 三种都只占一行,不超过两行
+  check('30 回归:「未隐藏」那条无论出不出都不超过两行', noteNodes(manualBashNoHost.tree).length <= 2 && noteNodes(manualBashHidden.tree).length <= 2 && noteNodes(manualBashRefused.tree).length <= 2)
 }
 
 // ───────────────────────────────── 31) 只展示 / 会被拒:详情点名,永不隐藏 ──

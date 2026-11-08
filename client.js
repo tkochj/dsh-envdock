@@ -92,10 +92,10 @@ window.__ModuleLoader__.load({
         skipNoUnconfined: '没有不受沙箱限制的会话，暂时不会提供 envd_shell',
         skipTaken: '和别的插件重名了，暂时不提供 envd_shell',
         skipError: '没能提供命令工具（注册失败）',
-        // 备注:隐藏/混用 / 未提供原因 / 沙箱限制 / 环境差异(最多两行)
+        // 备注:隐藏/未隐藏 / 混用 / 未提供原因 / 沙箱限制 / 语法回退(最多两行;环境差异在「其它」title 里)
         noteHiddenPwsh: '已隐藏 {names}（避免两套语法混用）',
         noteNotBlocked: 'PowerShell 的命令工具没有隐藏（开关已关）',
-        noteNoBashHost: '这个会话没有 bash 命令工具，未隐藏 PowerShell 工具',
+        noteNoBashHost: '这个会话没有可用的 bash 命令工具，未隐藏 PowerShell 工具',
         noteFamilyFallback: '手动选的语法不可用（没有对应终端，也没有对应命令工具），已自动改回按会话选择',
         noteMixed: '手动选了 PowerShell 语法：PowerShell 与 bash 工具都在，各按自己的语法写，别混用',
         noteConfined: '另有 {n} 个会话受沙箱限制：envd_shell 在那些会话里不会执行命令，请改用其它命令工具',
@@ -201,7 +201,7 @@ window.__ModuleLoader__.load({
         skipError: 'Could not provide the command tool (registration failed)',
         noteHiddenPwsh: 'Hid {names} (to avoid mixing the two syntaxes)',
         noteNotBlocked: 'PowerShell command tools are not hidden (the switch is off)',
-        noteNoBashHost: 'This session has no bash command tool, so PowerShell tools were not hidden',
+        noteNoBashHost: 'This session has no usable bash command tool, so PowerShell tools were not hidden',
         noteFamilyFallback: 'The manually picked syntax is unavailable (no matching terminal or command tool); switched back to per-session selection',
         noteMixed: 'PowerShell syntax was picked manually: both PowerShell and bash tools are available; write each command in its own syntax, do not mix them',
         noteConfined: '{n} other sessions are sandbox-limited: envd_shell will not run there; use another command tool',
@@ -862,8 +862,17 @@ window.__ModuleLoader__.load({
         notes.push({ tone: 'muted', text: fmt(t.noteHiddenPwsh, { names: hiddenNames.join(', ') }) })
       }
       if (family === 'bash' && !mixed && !blockOtherFamily && pwshHostNames.length) notes.push({ tone: 'muted', text: t.noteNotBlocked })
-      // 手动选了 bash 语法、会话里却看不到 bash 命令工具:隐藏条件不成立,说清「没有隐藏」。
-      if (family === 'bash' && familySource === 'manual' && bashHostNames.length === 0) notes.push({ tone: 'muted', text: t.noteNoBashHost })
+      // 手动选了 bash 语法、会话里又没有任何 bash 入口 → 0.6.3 起手动 bash 优先遮挡:
+      // 只有「确实什么都没藏」时才说「未隐藏」;已隐藏/只拒绝时这条备注会自相矛盾,直接不出现。
+      if (
+        family === 'bash' &&
+        familySource === 'manual' &&
+        bashHostNames.length === 0 &&
+        hiddenNames.length === 0 &&
+        refuseOnlyNames.length === 0
+      ) {
+        notes.push({ tone: 'muted', text: t.noteNoBashHost })
+      }
       const shownNotes = notes.slice(0, 2)
       const badgeTitle = shownNotes.length ? shownNotes.map((note) => note.text).join(' · ') : undefined
 
