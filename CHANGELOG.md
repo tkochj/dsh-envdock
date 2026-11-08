@@ -2,6 +2,43 @@
 
 本文件记录 EnvDock 的重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-11-08
+
+> **破坏性变更**：EnvDock 不再遮挡、不禁用、不接管任何工具，只做「探测 + 简报 + 面板 + 可选增补 `envd_shell`」。删除 `shellTakeover` / `sandboxTakeover` 两个选项与全部逐会话接管事实；旧状态文件里的这两个字段会被忽略。
+
+### Added
+
+- **辅助展示模型（assist model）**：EnvDock 只**增补**一个固定名字的 `envd_shell`（用你配置的默认终端与 PATH），**永不隐藏、永不禁用**别人的工具；面板与简报如实列出模型手上有哪些命令工具、各自的环境是什么、该优先用哪个。规格见 `docs/notes/assist-model.md`。
+- **`envd_shell` 注册四条件**：① 默认终端解析出可用可执行文件；② 宿主已识别的命令工具里没有与它同族的；③ 沙箱允许（没有执行器 / 执行器不围栏直接注册，有执行器时要求至少一个会话 `danger-full-access`）；④ 名字未被占用且注册不报错。不注册时 `commandTool.skipReason` 给出 `same-family` / `no-unconfined-session` / `taken` / `error`，面板一行备注说清原因；注册失败按 30 秒退避，`tools/change` 时立即重试。
+- **围栏会话直接拒绝执行**：`envd_shell` 每一单按本会话有效策略复检，`confined`（含策略不可知）时返回 `[sandbox] 本会话被宿主沙箱围栏(<mode>);EnvDock 的 envd_shell 不执行命令` 并请模型改用宿主工具——不 spawn、不委托。
+- **简报三套模板 + 围栏追加**：注册成功写「`envd_shell`（增补，用你的终端）+ 宿主 `<工具>`（家族）；二者都可用，优先 `envd_shell`……需要宿主语义时再用宿主工具」；同族写「`<宿主工具>`（与默认终端同族，EnvDock 不重复提供）」；其它未注册原因写「用宿主的 `<工具>`」+ 一句原因；本会话被围栏时追加「`envd_shell` 在本会话被围栏，会被拒绝，请用宿主工具」。
+- **`/envdock-api` 新 `commandTool` 形状**：`{ name, registered, visible, skipReason, shell{label,family,version,path}, refuseWhenConfined, hostTools[{name,family,learned}], sandbox{...} }`；`sandbox` 收敛为聚合值 `{ present, capable, defaultMode, policyKnown, sessionCount, confinedCount, anyUnconfined }`。`syncStats` 收敛为 9 个字段：`ticks / lastAt / intervalMs / detections / lastDetectMs / hostToolScans / registerTries / lastError / lastErrorAt`。
+- **面板三态 + 详情**：头部唯一 badge 三态（绿「增补就绪」/ 灰「只展示」/ 黄「围栏」）；命令行 `envd_shell`（未注册显示 `—`）· `宿主 ops_bash · pwsh`（没有就写「未识别到宿主命令工具」）；最多两行备注（未注册原因 / N 个会话被围栏 / 环境差异提示）；「详情」展开 `扫描 N 次 · 最近 Nms · 注册尝试 N` + 宿主工具 chips（`learned` 带 ✦）+ 最近错误。
+- **测试重写**：`panel-render` 按新 DOM 重写（**266 条断言**，覆盖三态 badge、命令行与「—」、备注、详情、无逐会话表 / 无接管 chips，以及既有的轮询去重 / 复制兜底 / 无数据用例）；`host-harness` 重写为 **209 条断言**（注册四条件、围栏拒绝且不 spawn、宿主工具识别、API 新形状、旧字段忽略，并断言 `restrict` 调用次数为 0）；`test/simulate.mjs` 参数随模型改写（`--executor` / `--policy` / `--shell-sandbox` …，移除 `--unrestrictable` / `--takeover` / `--delegate`）。
+
+### Changed
+
+- **不遮挡成为硬不变量**：不再调用 `tools.restrict`、不注册 `tools.guard` / `tools/pre-execute`；注册表动作只剩「注册 `envd_shell`」与「拆自己那一份」。测试把「`restrict` 调用 0 次」钉成断言。
+- 宿主命令工具改为**只用于展示**：每个 tick 逐 agent 枚举 `tools.definitions` 取并集（名字有界 ≤64、排序稳定：内置顺序优先、其余按名字），`learned` 的语义改为「按描述 / 参数启发式认出来的（不是内置名单）」。识别不影响模型调用方式，也不参与任何遮挡。
+- 注册 / 拆除只由**状态变化**驱动（终端变了、宿主工具变了、沙箱状态变了）；5 秒检查周期只做「重新枚举宿主工具 + 复核注册条件」，`tools/change` 用 40ms 合并定时器触发轻量重扫，稳态 tick 零注册表动作。
+- 简报不再出现「已接管 / 让路 / 沙箱下接管」字样，也不再有「本会话策略未知」这类接管期结论；只说当前哪些工具可用、优先用哪个。
+- 面板再减一轮：删除「会话」/「设置」两个按钮、逐会话表、状态胶囊与 `kind` 推导；常显只保留一句状态结论 + 一句命令工具清单，其余进「详情」。
+
+### Removed
+
+- **遮挡与接管全链**（index.js 4623 → 3023 行，净删 1600 行）：`restrict` 调用、`denyScopes` / `liftDenies` / `maskFor` / takeover `plan` / `publishScopeFacts` / `scopesSettled` / `badNames` / `hardNames` / `missNames` / `lostDenies` / `quickYield` / `denyKey` / `appliedSig*`、`shellCandidates` / `collectShellNames`、`tools.guard` 与 `shellRefusal`、`tools/pre-execute`。
+- **委托执行链**：`delegatedInvocation` / `runDelegated` / 全部 `delegate*` 计数与包装器、`executorFamily`（含 `ENVD_CMD` base64 通道与 PowerShell 包装串）。
+- **逐会话事实**：`commandTool.scopes` / `kind` / `hostName` / `denies` / `hostOnlyScopes` / `sandboxHiddenScopes` / `scopeAnomalies`、`sandbox.scopes` 与 `sandboxGate` 的逐会话部分；`syncStats` 里的 deny / delegate / guard / steady / yield 等计数。
+- **两个选项**：`shellTakeover`（自动 / 总是接管 / 只给简报）与 `sandboxTakeover`（委托执行 / 直接拒绝），连同默认值、归一化与 `setOption` 白名单；旧状态文件里出现时忽略（不报错、不迁移）。
+- **面板**（client.js 1552 → 1208 行）：接管模式 / 沙箱下接管 chips、逐会话表与同终局会话合并、状态胶囊 `.envd-statuschip`、异常 / 让路 / 工具并存渲染；相关词条一并删除（`i18n-check` 仍要求中英成对）。
+
+### Fixed
+
+- **过渡期旧版 API 不再显示假事实**：client.js 热更新、宿主 index.js 还没重启时，旧载荷没有 `registered` / `hostTools`。面板改为识别旧形状：用旧的 `visible` 推断是否注册、用旧 `hostName` 填宿主工具，并显示一条「接口是旧版构建，重启 dsh 后可显示命令工具信息」，不再把不知道的事说成「`—` / 未识别到」。
+- 不再有「同一会话两个命令工具」被当成故障、也不再有「挡不掉的名字 30 秒重试 / 每 30 秒刷红」这类运维噪音：不遮挡就不存在这些状态。
+- 面板不再把「注册失败 / 同名被占」说成「已接管」或「让路」：只展示宿主工具并给一行原因。
+- `envd_shell` 在围栏会话里的行为从「被直接藏起来、模型看不见」变成「注册在、但每一单明确拒绝并指路宿主工具」，模型不会再猜「工具是不是坏了」，简报也会提前说明。
+
 ## [0.4.0] - 2026-11-08
 
 ### Added
