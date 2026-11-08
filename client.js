@@ -11,13 +11,13 @@
  *
  * 设计取向:**一屏说四件事**。
  *   1. 这台机器默认用哪个终端(可直接切换);
- *   2. 模型现在手里的命令工具是什么、接管成没成(一行状态 + 一行备注);
+ *   2. 模型手里的命令工具是什么(EnvDock 增补 / 宿主),一句话 + 最多两行备注;
  *   3. 装了哪些工具链(每个工具一行,点路径即复制);
  *   4. 有没有问题(没问题只说一句「通过」,有问题一行摘要可展开)。
  *
  * 三条硬规则:
- *   · 常显区不放计数:计数只在展开后出现,或作为一句人话(「3 个会话」);
- *   · 只有「状态」配胶囊:终端选择、模式选择用 chip,状态用 statuschip/badge;
+ *   · 常显区不放计数:计数只在「详情」里出现,常显区只留一句人话;
+ *   · 只有「状态」配胶囊:终端选择用 chip,状态用 badge(三态);
  *   · 异常必须一行说完并说清原因:不许出现「⚠ 出错了」然后让用户去别处找。
  * 样式只用 --dsw-* theme token,浅色/深色都由 token 决定,不硬编码颜色。
  */
@@ -39,7 +39,7 @@ window.__ModuleLoader__.load({
         loadFailedHint: '/envdock-api 没响应，试试重启 dsh 或重装 EnvDock。',
         updatedAt: '更新于',
         retry: '重试',
-        // ── 头部 / 接管卡 ──
+        // ── 头部 / 命令工具 ──
         terminal: '终端',
         autoShell: '自动',
         customShell: '自定义终端',
@@ -56,80 +56,32 @@ window.__ModuleLoader__.load({
         dismiss: '知道了',
         actionFailed: '操作失败',
         command: '命令',
-        statusTakeover: '接管中',
-        statusMixed: '{n} 个会话用宿主工具',
-        statusConflict: '工具并存',
-        statusHost: '未接管',
-        statusSandbox: '沙箱',
-        statusYield: '让路',
-        statusAnomaly: '{n} 个会话异常',
-        statusNoTool: '无命令工具',
-        noCommandTool: '没探测到命令工具',
-        noneLabel: '（无）',
-        reuseByOther: '由其它插件提供',
-        sessions: '会话',
-        nSessions: '{n} 个会话',
-        nDirect: '{n} 直连',
-        nHost: '{n} 未接管',
-        nYield: '{n} 让路',
-        nSandbox: '{n} 沙箱',
-        sessionsEmpty: '当前无会话',
-        sessionKindTakeover: '直连',
-        sessionKindHost: '未接管',
-        sessionKindYield: '让路',
-        sessionKindSandbox: '沙箱',
-        sessionKindUnknown: '未知',
-        sessionNoTool: '无命令工具',
-        scopeAnomalyInvisible: '看不到命令工具',
-        scopeAnomalyLeak: '宿主 {tools} 仍可见',
-        scopeAnomalyFlagged: '对账异常',
-        scopeConfined: '围栏',
-        scopeHidden: '已挡 {names}',
-        scopePolicyUnknown: '策略未知',
-        noteLegacy: '接口是旧版构建，逐会话信息不可用；重启 dsh 后可显示',
-        noteBroken: 'envd_shell 不可见，已遮挡 {names}',
-        noteBrokenNoDeny: 'envd_shell 不可见，而且没有任何遮挡生效；重启 dsh 或重装 EnvDock 试试',
-        noteUnrestrictable: '宿主工具 {names} 挡不掉，已让路',
-        noteConflict: '宿主工具 {names} 在会话层注册，无法遮挡',
-        noteUnrestrictableHint: '这些工具注册在会话自己的层里，restrict 只过滤继承面；EnvDock 收起 envd_shell，保证一个会话只有一个命令工具。想改用 EnvDock 的终端接管，请在 dsh-ops 的设置里关掉它的 Publish Bash',
-        noteBlocked: '{n} 个会话看不到 envd_shell，未遮挡宿主工具',
-        noteLostDenies: '无主遮挡：{names} 已被挡住但撤销句柄丢失，重启 dsh 才能恢复',
-        notePolicyUnknown: '沙箱策略未知，按有围栏保守处理',
-        noteSandbox: '{n} 个会话被围栏，保留宿主工具',
-        noteLastError: '最近错误',
-        recognized: '已识别宿主工具',
-        recognizedNone: '未识别到宿主工具',
-        learnedTag: '自动识别',
-        settings: '设置',
-        modeLabel: '接管模式',
-        takeoverAuto: '自动',
-        takeoverOn: '总是接管',
-        takeoverOff: '只给简报',
-        sandboxTakeover: '沙箱下接管',
-        sandboxDelegate: '委托执行',
-        sandboxRefuse: '直接拒绝',
-        sandboxDelegateHint: '围栏会话默认不接管（EnvDock 藏起 envd_shell，模型用宿主工具）。委托执行：万一执行层放行了 envd_shell，命令也只经带围栏的宿主执行器跑，绝不自己 spawn；直接拒绝：连这条兜底也关掉。',
+        // badge 三态:整个面板唯一的状态结论
+        statusAdditive: '增补就绪',
+        statusDisplayOnly: '只展示',
+        statusConfined: '围栏',
+        // 命令行
+        hostPrefix: '宿主',
+        hostToolsNone: '未识别到宿主命令工具',
+        noteLegacyApi: '接口是旧版构建，重启 dsh 后可显示命令工具信息',
+        cmdHintEnvDock: 'EnvDock 增补的命令工具：用你的终端与 PATH',
+        cmdHintHost: '宿主命令工具：环境与 PATH 由宿主决定',
+        // 未注册原因(skipReason)
+        skipSameFamily: '与 {tool} 同族，EnvDock 不重复提供',
+        skipNoUnconfined: '没有无围栏会话，暂不注册',
+        skipTaken: '与其它插件同名，未注册',
+        skipError: '注册失败，未注册',
+        // 备注:未注册原因 / 围栏提示 / 环境差异(最多两行)
+        noteConfined: '{n} 个会话被围栏：envd_shell 会拒绝，请用宿主工具',
+        envHint: '宿主工具的环境/PATH 未必等于你的；需要你的终端时用 envd_shell',
+        // 详情
         diag: '详情',
-        diagHealthy: '对账正常',
-        steady: '稳态',
-        executor: '执行器',
-        executorPlatform: '平台默认',
-        syncRegister: '注册',
-        syncDispose: '拆除',
-        syncDeny: '遮挡',
-        syncDrops: '释放',
-        syncLostDenies: '无主遮挡',
-        syncTicks: 'tick',
-        syncDelegate: '委托',
-        syncDelegateTries: '委托尝试',
-        syncDelegateFailures: '委托失败',
-        syncDelegateRefusals: '委托拒绝',
-        syncDelegateRunnerFailures: 'runner 失败',
-        syncDelegateAborts: '委托取消',
-        syncGuardDenials: '守卫拒绝',
-        syncYieldTicks: '让路轮次',
-        syncDetections: '探测',
-        syncGuardMissing: '拒绝守卫未注册',
+        hostTools: '宿主工具',
+        learnedTag: '自动识别',
+        noteLastError: '最近错误',
+        dScan: '扫描 {n} 次',
+        dLastScan: '最近 {n}ms',
+        dRegisterTries: '注册尝试 {n}',
         // ── 工具链 ──
         tools: '工具链',
         toolCount: '{n} 个工具',
@@ -192,80 +144,28 @@ window.__ModuleLoader__.load({
         dismiss: 'Dismiss',
         actionFailed: 'Action failed',
         command: 'Command',
-        statusTakeover: 'Takeover',
-        statusMixed: '{n} sessions use the host tool',
-        statusConflict: 'Tool clash',
-        statusHost: 'Host tool',
-        statusSandbox: 'Sandboxed',
-        statusYield: 'Yielding',
-        statusAnomaly: '{n} broken',
-        statusNoTool: 'No tool',
-        noCommandTool: 'No command tool detected',
-        noneLabel: '(none)',
-        reuseByOther: 'Provided by another plugin',
-        sessions: 'Sessions',
-        nSessions: '{n} sessions',
-        nDirect: '{n} direct',
-        nHost: '{n} host',
-        nYield: '{n} yielded',
-        nSandbox: '{n} sandboxed',
-        sessionsEmpty: 'No sessions yet',
-        sessionKindTakeover: 'direct',
-        sessionKindHost: 'host',
-        sessionKindYield: 'yielded',
-        sessionKindSandbox: 'sandboxed',
-        sessionKindUnknown: 'unknown',
-        sessionNoTool: 'no tool',
-        scopeAnomalyInvisible: 'no command tool',
-        scopeAnomalyLeak: 'host {tools} still visible',
-        scopeAnomalyFlagged: 'reconcile anomaly',
-        scopeConfined: 'confined',
-        scopeHidden: 'hid {names}',
-        scopePolicyUnknown: 'policy unknown',
-        noteLegacy: 'Old API build; per-session facts need a dsh restart',
-        noteBroken: 'envd_shell is invisible; hid {names}',
-        noteBrokenNoDeny: 'envd_shell is invisible and no restriction took effect; restart dsh or reinstall EnvDock',
-        noteUnrestrictable: 'Cannot hide host {names}; yielding',
-        noteConflict: 'Host {names} is registered in the session layer; cannot be hidden',
-        noteUnrestrictableHint: 'These tools live in the session own layer, which restrict cannot filter; EnvDock hides envd_shell so each session keeps exactly one command tool. To use the EnvDock terminal instead, turn off Publish Bash in the dsh-ops settings',
-        noteBlocked: '{n} sessions cannot see envd_shell; host tools left visible',
-        noteLostDenies: 'Orphan restriction: {names} is hidden but the disposer was lost; restart dsh to restore',
-        notePolicyUnknown: 'Sandbox policy unknown; treated as confined',
-        noteSandbox: '{n} sessions confined; host tools kept',
-        noteLastError: 'Last error',
-        recognized: 'Recognized host tools',
-        recognizedNone: 'No host tool recognized',
-        learnedTag: 'auto-detected',
-        settings: 'Settings',
-        modeLabel: 'Takeover mode',
-        takeoverAuto: 'Auto',
-        takeoverOn: 'Always',
-        takeoverOff: 'Brief only',
-        sandboxTakeover: 'Under sandbox',
-        sandboxDelegate: 'Delegate',
-        sandboxRefuse: 'Refuse',
-        sandboxDelegateHint: 'Confined sessions keep the host tool by default (EnvDock hides envd_shell). Delegate: if the executor ever admits envd_shell, commands still run only through the confined host executor, never a direct spawn. Refuse: turn that fallback off as well.',
+        // badge: the panel's single status conclusion
+        statusAdditive: 'Additive',
+        statusDisplayOnly: 'Display only',
+        statusConfined: 'Confined',
+        hostPrefix: 'host',
+        hostToolsNone: 'No host command tool recognized',
+        noteLegacyApi: 'Old API build; restart dsh to see command-tool facts',
+        cmdHintEnvDock: 'EnvDock additive command tool: runs with your terminal and PATH',
+        cmdHintHost: 'Host command tool: environment and PATH come from the host',
+        skipSameFamily: 'Same family as {tool}; EnvDock does not duplicate it',
+        skipNoUnconfined: 'No unconfined session; not registered',
+        skipTaken: 'Name taken by another plugin; not registered',
+        skipError: 'Registration failed; not registered',
+        noteConfined: '{n} sessions are confined: envd_shell will refuse; use the host tool',
+        envHint: 'The host tool environment/PATH may differ from yours; use envd_shell for your terminal',
         diag: 'Details',
-        diagHealthy: 'reconcile healthy',
-        steady: 'steady',
-        executor: 'executor',
-        executorPlatform: 'platform default',
-        syncRegister: 'registered',
-        syncDispose: 'disposed',
-        syncDeny: 'denied',
-        syncDrops: 'lifted',
-        syncLostDenies: 'orphan denies',
-        syncTicks: 'ticks',
-        syncDelegate: 'delegated',
-        syncDelegateTries: 'delegate tries',
-        syncDelegateFailures: 'delegate failures',
-        syncDelegateRefusals: 'delegate refusals',
-        syncDelegateRunnerFailures: 'runner failures',
-        syncDelegateAborts: 'delegate aborts',
-        syncGuardDenials: 'guard denials',
-        syncYieldTicks: 'yield ticks',
-        syncDetections: 'scans',
-        syncGuardMissing: 'deny guard not registered',
+        hostTools: 'Host tools',
+        learnedTag: 'auto-detected',
+        noteLastError: 'Last error',
+        dScan: 'scans: {n}',
+        dLastScan: 'last: {n}ms',
+        dRegisterTries: 'register tries: {n}',
         tools: 'Toolchains',
         toolCount: '{n} tools',
         noTools: 'No node / python / git on PATH. Install one, then rescan.',
@@ -304,7 +204,7 @@ window.__ModuleLoader__.load({
     }
 
     // ───────────────────────────────────── 样式 ──
-    // 只用 --dsw-* theme token;分节靠一条细线,只有接管卡带边框。
+    // 只用 --dsw-* theme token;分节靠一条细线,只有命令卡带边框。
     const CSS = `
 .envd-root{display:flex;flex-direction:column;height:100%;min-height:0;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-base);font-size:13px;line-height:1.5}
 .envd-scroll{overflow:auto;display:flex;flex-direction:column;gap:18px;padding:18px 24px 34px;max-width:820px;width:100%;margin:0 auto;box-sizing:border-box;min-height:0}
@@ -319,13 +219,12 @@ window.__ModuleLoader__.load({
 .envd-headline{font-size:12.5px;color:var(--dsw-alias-label-secondary);white-space:nowrap;min-width:0;max-width:100%;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis}
 .envd-headline b{color:var(--dsw-alias-label-primary);font-weight:600}
 
-/* badge / statuschip:整个面板只有「状态」用胶囊 */
-.envd-badge,.envd-statuschip{display:inline-flex;align-items:center;gap:6px;height:20px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:650;white-space:nowrap;flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
-.envd-badge .dot,.envd-statuschip .dot{width:5px;height:5px;border-radius:50%;background:currentColor;flex:none}
-.envd-badge.ok,.envd-statuschip.ok{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 14%,transparent)}
-.envd-badge.warn,.envd-statuschip.warn{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 14%,transparent)}
-.envd-badge.bad,.envd-statuschip.bad{color:var(--dsw-alias-state-error-primary);background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 14%,transparent)}
-.envd-badge.muted,.envd-statuschip.muted{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2)}
+/* badge:整个面板只有「状态」用胶囊(三态:增补就绪 / 只展示 / 围栏) */
+.envd-badge{display:inline-flex;align-items:center;gap:6px;height:20px;padding:0 8px;border-radius:999px;font-size:11px;font-weight:650;white-space:nowrap;flex:none;max-width:100%;overflow:hidden;text-overflow:ellipsis;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary)}
+.envd-badge .dot{width:5px;height:5px;border-radius:50%;background:currentColor;flex:none}
+.envd-badge.ok{color:var(--dsw-alias-state-success-primary);background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 14%,transparent)}
+.envd-badge.warn{color:var(--dsw-alias-state-warn-primary);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary) 14%,transparent)}
+.envd-badge.muted{color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-bg-layer-2)}
 
 /* 按钮 */
 .envd-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;height:28px;padding:0 11px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:transparent;color:var(--dsw-alias-label-primary);font-size:12px;font-weight:500;font-family:inherit;cursor:pointer;white-space:nowrap;flex:none;transition:background .12s ease,border-color .12s ease,color .12s ease}
@@ -337,7 +236,7 @@ window.__ModuleLoader__.load({
 .envd-btn.ghost{height:24px;padding:0 7px;border-color:transparent;color:var(--dsw-alias-label-secondary);font-size:11.5px;font-weight:500;border-radius:7px}
 .envd-btn.ghost:hover{background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);border-color:transparent}
 
-/* 接管卡:整个面板唯一带边框的块(置顶主信息,值得一个框) */
+/* 命令卡:整个面板唯一带边框的块(置顶主信息,值得一个框) */
 .envd-card{display:flex;flex-direction:column;gap:10px;border:1px solid var(--dsw-alias-border-l1);border-radius:12px;background:var(--dsw-alias-bg-layer-1);padding:12px 14px;min-width:0}
 .envd-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .envd-tag{font-size:11px;color:var(--dsw-alias-label-secondary);font-weight:500;flex:none;min-width:34px}
@@ -354,7 +253,6 @@ window.__ModuleLoader__.load({
 .envd-chip:hover{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-primary)}
 .envd-chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
 .envd-chip.on{border-color:color-mix(in srgb,var(--dsw-alias-brand-primary) 55%,transparent);color:var(--dsw-alias-brand-primary);background:color-mix(in srgb,var(--dsw-alias-brand-primary) 10%,transparent);font-weight:600}
-.envd-chips-sm .envd-chip{height:22px;padding:0 8px;font-size:11px;border-radius:6px}
 
 /* 一行备注:常显区最多一行,不套盒子 */
 .envd-notes{display:flex;flex-direction:column;gap:2px;min-width:0}
@@ -363,35 +261,20 @@ window.__ModuleLoader__.load({
 .envd-note.warn{color:var(--dsw-alias-state-warn-primary)}
 .envd-note.bad{color:var(--dsw-alias-state-error-primary)}
 
-/* 逐会话:一行一个,异常行染色 */
-.envd-sessions{display:flex;flex-direction:column;gap:2px;min-width:0;border-top:1px solid var(--dsw-alias-border-l1);padding-top:8px}
-.envd-srow{display:flex;align-items:center;gap:8px;font-size:11.5px;min-width:0;flex-wrap:wrap;padding:1px 0}
-.envd-srow.bad{color:var(--dsw-alias-state-error-primary)}
-.envd-sdot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--dsw-alias-label-secondary)}
-.envd-sdot.ok{background:var(--dsw-alias-state-success-primary)}
-.envd-sdot.warn{background:var(--dsw-alias-state-warn-primary)}
-.envd-sdot.idle{background:var(--dsw-alias-state-idle-primary)}
-.envd-sdot.bad{background:var(--dsw-alias-state-error-primary)}
-.envd-sid{font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace}
-.envd-skind{color:var(--dsw-alias-label-secondary)}
-.envd-stool{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Cascadia Mono",monospace;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;max-width:100%}
-.envd-srow.bad .envd-skind,.envd-srow.bad .envd-stool{color:inherit}
-.envd-sreason{margin-left:auto;font-size:11px;font-weight:600;white-space:nowrap;flex:0 1 auto;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+/* 命令行:自己的工具名 + 宿主工具列表(长名字靠省略,不截数据) */
+.envd-cmdrow{flex-wrap:wrap}
+.envd-sep{color:var(--dsw-alias-label-secondary);flex:none}
+.envd-host{font-size:11.5px;color:var(--dsw-alias-label-secondary);min-width:0;flex:0 1 auto;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums}
 
-/* 已识别宿主工具 */
-.envd-shelltools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+/* 宿主工具 chips:只在「详情」里出现 */
 .envd-diag-shelltools{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
 .envd-shellchip{display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-2);font-size:11px;color:var(--dsw-alias-label-secondary);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .envd-shellchip .envd-mono{color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
-.envd-learned{color:var(--dsw-alias-brand-primary);font-weight:700}
 
-/* 详情:默认折叠 */
-.envd-diag-sum{font-size:11.5px;color:var(--dsw-alias-label-secondary);min-width:0;word-break:break-word}
-.envd-diag-sum.danger{color:var(--dsw-alias-state-error-primary);font-weight:600}
+/* 详情:默认折叠,展开只有「扫描计数 + 宿主工具 chips + 最近错误」 */
 .envd-diag-detail{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--dsw-alias-label-secondary);align-items:center;min-width:0;border-top:1px solid var(--dsw-alias-border-l1);padding-top:8px}
-.envd-diag-detail .w{color:var(--dsw-alias-state-warn-primary);min-width:0;word-break:break-word}
+.envd-diag-stat{font-variant-numeric:tabular-nums;min-width:0;word-break:break-word}
 .envd-diag-detail .e{color:var(--dsw-alias-state-error-primary);min-width:0;word-break:break-word}
-.envd-legacy{font-size:11.5px;color:var(--dsw-alias-state-warn-primary);line-height:1.5}
 
 /* 分节:没有卡片框,只有标题 + 一条细线 */
 .envd-sec{display:flex;flex-direction:column;gap:10px}
@@ -491,7 +374,7 @@ window.__ModuleLoader__.load({
     const POLL_MS = 15000
     // 轮询去重时忽略的易变键:宿主每个 tick 都会推进它们,拿它们参与比较等于「永远有新变化」,
     // 去重就白做了(生产里每 15s 都会 setData 重渲染一次)。
-    const VOLATILE_STATS_KEYS = ['ticks', 'steadyTicks', 'steadySinceAt', 'lastAt', 'lastErrorAt', 'now', 'updatedAt']
+    const VOLATILE_STATS_KEYS = ['ticks', 'lastAt', 'lastErrorAt', 'now', 'updatedAt']
     const signatureOf = (value) => {
       if (!value || typeof value !== 'object') return JSON.stringify(value)
       const copy = Object.assign({}, value)
@@ -571,65 +454,9 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ───────────────────────────────────── 纯函数:接管事实 ──
-    /**
-     * 把一个会话的终局翻成一句话的原因。返回 [] = 这个会话没问题。
-     *
-     * 「有问题」只有三种:模型拿不到任何命令工具、接管了但宿主工具仍可见、
-     * 对账自己标了 anomaly。别的(宿主接管 / 让路 / 沙箱)都是设计内的终局。
-     */
-    function scopeReasons(sc, t) {
-      const out = []
-      if (!sc || typeof sc !== 'object') return out
-      if (!sc.tool || sc.visible === false) out.push(t.scopeAnomalyInvisible)
-      if (sc.kind === 'takeover' && Array.isArray(sc.hostTools) && sc.hostTools.length) out.push(fmtText(t.scopeAnomalyLeak, { tools: sc.hostTools.join(', ') }))
-      if (Array.isArray(sc.leaked) && sc.leaked.length) out.push(fmtText(t.scopeAnomalyLeak, { tools: sc.leaked.join(', ') }))
-      if (!out.length && sc.anomaly === true) out.push(t.scopeAnomalyFlagged)
-      return out
-    }
-    const isBadScope = (sc, t) => scopeReasons(sc, t).length > 0 || (sc && sc.anomaly === true)
-
-    /**
-     * 会话 id 的短显示。
-     *
-     * dsh 的会话 id 是 `session-<uuid>`:直接 slice(0,8) 每一行都是 "session-",
-     * 逐会话表就分不清谁是谁了。先去掉这个固定前缀,再截 8 位;完整 id 放 title。
-     */
-    function shortId(id) {
-      const raw = String(id || '?')
-      return (raw.startsWith('session-') ? raw.slice('session-'.length) : raw).slice(0, 8) || '?'
-    }
-
     /** 极简模板:只替换 {key}。 */
     function fmtText(tpl, vars) {
       return String(tpl || '').replace(/\{(\w+)\}/g, (whole, key) => (vars && vars[key] !== undefined ? String(vars[key]) : whole))
-    }
-
-    /**
-     * 会话终局 → 短词。
-     *
-     * `kind==='host'` 只说明「模型用宿主工具」,不说明原因;确定被围栏(或策略不可知)
-     * 时它就是沙箱让路。聚合怎么算,逐会话行就怎么算 —— 同屏不许出现「沙箱 + 未接管」。
-     */
-    function scopeKindText(sc, t) {
-      const kind = sc && sc.kind
-      if (kind === 'host' || kind === 'sandbox-host') {
-        return sc.confined === false ? t.sessionKindHost : t.sessionKindSandbox
-      }
-      return (
-        {
-          takeover: t.sessionKindTakeover,
-          host: t.sessionKindHost,
-          yield: t.sessionKindYield,
-          'sandbox-host': t.sessionKindSandbox,
-        }[kind] || t.sessionKindUnknown
-      )
-    }
-
-    /** 终局 → 会话点颜色。 */
-    function scopeTone(sc, t) {
-      if (isBadScope(sc, t)) return 'bad'
-      return sc.kind === 'takeover' ? 'ok' : sc.kind === 'host' ? 'idle' : 'warn'
     }
 
     // ───────────────────────────────────── 主面板 ──
@@ -647,10 +474,6 @@ window.__ModuleLoader__.load({
       const [shellFormOpen, setShellFormOpen] = useState(false)
       const [briefOpen, setBriefOpen] = useState(false)
       const [healthOpen, setHealthOpen] = useState(false)
-      // 逐会话表的开关是三态:undefined = 跟随「有异常就自动展开」,true/false = 用户显式选择。
-      // 只用一个布尔会在「异常自动展开」时让「收起」变成死按钮(点了没反应)。
-      const [sessionsUser, setSessionsUser] = useState(undefined)
-      const [settingsOpen, setSettingsOpen] = useState(false)
       const [diagOpen, setDiagOpen] = useState(false)
       const [openVersions, setOpenVersions] = useState({})
       const [toolPath, setToolPath] = useState('')
@@ -826,183 +649,89 @@ window.__ModuleLoader__.load({
       const managers = (data && (data.versionManagers || data.managers)) || []
       const state = (data && data.state) || { options: {}, customTools: [] }
       const options = state.options || {}
-      // shellTakeover 只认这三个值;别的(旧值 / 脏值)一律归一成 auto,免得 chip 全都点不亮
-      const takeoverMode = options.shellTakeover === 'takeover' || options.shellTakeover === 'off' ? options.shellTakeover : 'auto'
-      // 沙箱下接管:只有 delegate / refuse 两个值,脏值按默认 delegate
-      const sandboxTakeoverMode = options.sandboxTakeover === 'refuse' ? 'refuse' : 'delegate'
       const shell = (data && data.shell) || {}
       const platform = (data && data.platform) || null
       const pathInfo = (data && data.pathInfo) || null
       const missingPaths = pathInfo ? Number(pathInfo.missingCount) || (Array.isArray(pathInfo.missing) ? pathInfo.missing.length : 0) || 0 : 0
       const fmt = fmtText
 
+      // ── 命令工具事实:只增不减,面板只回答三件事 ──
+      // 1) envd_shell 注册且可见吗;2) 宿主有哪些命令工具;3) 有没有会话被围栏。
+      // 没有逐会话事实,也不推导「终局」:注册失败就是没注册,面板只摆宿主工具。
       const ct = data && data.commandTool && typeof data.commandTool === 'object' ? data.commandTool : null
       const stats = data && data.syncStats && typeof data.syncStats === 'object' ? data.syncStats : null
-      // 新旧判据必须是「字段在不在」:新服务端零会话给 scopes: [],当旧版会误判。
-      const hasScopeField = Boolean(ct && Array.isArray(ct.scopes))
-      const scopes = hasScopeField ? ct.scopes.filter((sc) => sc && typeof sc === 'object') : []
-      const hasScopes = scopes.length > 0
-      const badScopes = scopes.filter((sc) => isBadScope(sc, t))
-      const nonTakeover = scopes.filter((sc) => sc.kind !== 'takeover')
-      const kindCount = { takeover: 0, host: 0, yield: 0, 'sandbox-host': 0 }
-      for (const sc of scopes) if (kindCount[sc.kind] !== undefined) kindCount[sc.kind] += 1
+      // 过渡期:client.js 是热更新的,而宿主进程里的 index.js 要重启 dsh 才换。
+      // 旧形状没有 registered / hostTools,直接读会显示成「— / 未识别到」——那是假话。
+      // 旧形状的 visible 正好等于「注册了且全局可见」,hostName 补宿主工具。
+      const legacyApi = Boolean(ct) && typeof ct.registered !== 'boolean'
+      const registered = legacyApi ? Boolean(ct && ct.visible === true) : Boolean(ct && ct.registered === true)
+      const visible = Boolean(ct && ct.visible === true)
+      const ready = registered && visible
+      const skipReason = ct && typeof ct.skipReason === 'string' ? ct.skipReason : ''
+      const ownText = registered ? String((ct && ct.name) || 'envd_shell') : '—'
 
-      const unrestrictable = stats && Array.isArray(stats.unrestrictable) ? stats.unrestrictable.filter(Boolean).map(String) : []
-      const blockedScopes = stats && Array.isArray(stats.blockedScopes) ? stats.blockedScopes.filter(Boolean).map(String) : []
-      const confinedCount = scopes.filter((sc) => sc.confined === true).length
-      const denies = ct && Array.isArray(ct.denies) ? ct.denies.filter(Boolean).map(String) : []
-      const sandboxInfo = data && data.sandbox && typeof data.sandbox === 'object' ? data.sandbox : null
-      const policyUnknown = Boolean(sandboxInfo && sandboxInfo.policyKnown === false) || Boolean(ct && ct.sandbox === true && !hasScopeField && ct.sandboxPolicyKnown === false)
-      const runtimeShellTools = (stats && Array.isArray(stats.runtimeShellTools) ? stats.runtimeShellTools : [])
+      // 宿主命令工具:排序由宿主负责(内置顺序优先,其余按名字),面板只做去重与兜底。
+      // 旧形状只给一个 hostName(没有宿主工具列表),过渡期就展示它。
+      const legacyHostTools = legacyApi && ct && ct.hostName ? [{ name: String(ct.hostName), family: '', learned: false }] : []
+      const hostTools = (legacyApi ? legacyHostTools : ct && Array.isArray(ct.hostTools) ? ct.hostTools : [])
         .map((item) =>
           typeof item === 'string'
             ? { name: item, family: '', learned: false }
-            : { name: item && item.name ? String(item.name) : '', family: item && item.family ? String(item.family) : '', learned: Boolean(item && item.learned) },
+            : {
+                name: item && item.name ? String(item.name) : '',
+                family: item && item.family ? String(item.family) : '',
+                learned: Boolean(item && item.learned),
+              },
         )
         .filter((item) => item.name)
-      const lastError = stats && typeof stats.lastError === 'string' ? stats.lastError.trim() : ''
+      const hostNames = []
+      for (const item of hostTools) if (!hostNames.includes(item.name)) hostNames.push(item.name)
+      const hostText = hostNames.length ? t.hostPrefix + ' ' + hostNames.join(' · ') : t.hostToolsNone
 
-      // 一个终局词:异常 > 混合 > 全宿主管家 > 沙箱 > 让路 > 接管。这是整个面板唯一的状态结论。
-      const kind = !ct
-        ? 'none'
-        : ct.reuse === true
-          ? 'reuse'
-          : badScopes.length
-            ? 'anomaly'
-            : hasScopes
-              ? !nonTakeover.length
-                ? 'takeover'
-                : nonTakeover.length === scopes.length
-                  ? nonTakeover.every((sc) => sc.kind === 'host')
-                    ? // 全部用宿主工具 + 没有一个是「确定无围栏」= 沙箱部署(EnvDock 压根没注册),
-                      // 说「沙箱」比说「未接管」更接近事实:模型用的是宿主那个带围栏的工具。
-                      // 策略不可知(confined===null)也算沙箱:保守方向与执行层一致。
-                      scopes.every((sc) => sc.confined !== false)
-                      ? 'sandbox'
-                      : 'host'
-                    : nonTakeover.every((sc) => sc.kind === 'sandbox-host')
-                      ? 'sandbox'
-                      : 'yield'
-                  : 'mixed'
-              : ct.visible === false
-                ? ct.sandbox === true
-                  ? 'sandbox'
-                  : // 既没围栏、工具又不可见:模型可能一个命令工具都没有,这是真故障
-                    'broken'
-                : // 旧版接口看不到逐会话终局:宿主工具挡不掉时,两个命令工具就是并存,
-                  // 不能谎报「接管中」,也不能说成「让路」(EnvDock 的工具还看得见)。
-                  unrestrictable.length && ct.takeover === true
-                  ? ct.visible === true
-                    ? 'conflict'
-                    : 'yield'
-                  : ct.takeover === true
-                    ? 'takeover'
-                    : 'host'
-      const statusText =
-        {
-          takeover: t.statusTakeover,
-          mixed: fmt(t.statusMixed, { n: nonTakeover.length }),
-          conflict: t.statusConflict,
-          host: t.statusHost,
-          sandbox: t.statusSandbox,
-          yield: t.statusYield,
-          anomaly: fmt(t.statusAnomaly, { n: badScopes.length }),
-          none: t.statusNoTool,
-          broken: t.statusNoTool,
-          reuse: t.reuseByOther,
-        }[kind] || t.statusNoTool
-      const statusTone = kind === 'anomaly' || kind === 'broken' ? 'bad' : kind === 'mixed' || kind === 'conflict' || kind === 'yield' ? 'warn' : kind === 'takeover' ? 'ok' : 'muted'
+      // 沙箱聚合:只用来回答「有没有会话被围栏」。
+      const sandboxInfo = (ct && ct.sandbox && typeof ct.sandbox === 'object' ? ct.sandbox : null) || (data && data.sandbox && typeof data.sandbox === 'object' ? data.sandbox : null) || {}
+      const confinedCount = Math.max(0, Number(sandboxInfo.confinedCount) || 0)
+      const confined = confinedCount > 0
 
-      // 模型手里的命令工具名字:接管时是 envd_shell,让路时是宿主的;并存时两个都列。
-      const toolNames = hasScopes
-        ? [...new Set(scopes.map((sc) => (sc.tool ? String(sc.tool) : '')).filter(Boolean))]
-        : kind === 'conflict' && ct && ct.name
-          ? [String(ct.name)].concat(unrestrictable)
-          : kind === 'yield' && unrestrictable.length
-            ? unrestrictable.slice()
-            : ct && ct.name
-              ? [String(ct.name)]
-              : []
-      const toolText = toolNames.length ? toolNames.join(' · ') : ''
+      // badge 三态(整个面板唯一的状态结论):
+      //   没注册 → 只展示;注册了且可见 → 有会话被围栏就是「围栏」,否则「增补就绪」。
+      const badgeTone = ready ? (confined ? 'warn' : 'ok') : 'muted'
+      const badgeText = ready ? (confined ? t.statusConfined : t.statusAdditive) : t.statusDisplayOnly
 
-      // 会话计数:一句人话,不是五个数字。
-      const sessionBits = []
-      if (hasScopes) {
-        if (kindCount.takeover) sessionBits.push(fmt(t.nDirect, { n: kindCount.takeover }))
-        if (kindCount.host) sessionBits.push(fmt(t.nHost, { n: kindCount.host }))
-        if (kindCount.yield) sessionBits.push(fmt(t.nYield, { n: kindCount.yield }))
-        if (kindCount['sandbox-host']) sessionBits.push(fmt(t.nSandbox, { n: kindCount['sandbox-host'] }))
-      }
-      // 分解只在「终局不止一种」时才加:3 个会话都是直连,写「3 个会话」就够了,
-      // 「3 个会话 · 3 直连」是同一句话说两遍。
-      const distinctKinds = new Set(scopes.map((sc) => String(sc.kind || '')))
-      const sessionsText = hasScopes
-        ? [fmt(t.nSessions, { n: scopes.length })].concat(distinctKinds.size > 1 ? sessionBits : []).filter(Boolean).join(' · ')
-        : hasScopeField
-          ? t.sessionsEmpty
-          : ''
-
-      // 常显备注:只放「用户需要知道的事实」,每条一句话。
+      // 备注最多两行,按优先级取:未注册原因 → 围栏 → 环境差异。
+      // 环境差异只在 envd_shell 真的可用时说:没注册时让人「用 envd_shell」是句假话;
+      // 围栏提醒同理 —— 没注册就无工具可拒,只剩一句原因。
       const notes = []
-      if (kind === 'broken') {
-        notes.push(
-          denies.length
-            ? { tone: 'bad', text: fmt(t.noteBroken, { names: denies.join(', ') }) }
-            : { tone: 'bad', text: t.noteBrokenNoDeny },
-        )
-      }
-      if (ct && !hasScopeField) notes.push({ tone: 'warn', text: t.noteLegacy })
-      if (unrestrictable.length) {
-        // 新接口:只有真让路的会话才说「已让路」;旧接口:并存的才说「并存」。
-        const yielded = hasScopes ? nonTakeover.some((sc) => sc.kind === 'yield') : ct && ct.visible === false
-        if (yielded) notes.push({ tone: 'warn', text: fmt(t.noteUnrestrictable, { names: unrestrictable.join(', ') }), title: t.noteUnrestrictableHint })
-        else notes.push({ tone: 'warn', text: fmt(t.noteConflict, { names: unrestrictable.join(', ') }), title: t.noteUnrestrictableHint })
-      }
-      if (blockedScopes.length) notes.push({ tone: 'warn', text: fmt(t.noteBlocked, { n: blockedScopes.length }) })
-      const lostDenies = stats && Array.isArray(stats.lostDenies) ? stats.lostDenies.filter(Boolean).map(String) : []
-      if (lostDenies.length) notes.push({ tone: 'warn', text: fmt(t.noteLostDenies, { names: lostDenies.join(', ') }) })
-      if (ct && ct.sandbox === true && hasScopeField && confinedCount > 0) notes.push({ tone: 'muted', text: fmt(t.noteSandbox, { n: confinedCount }) })
-      if (policyUnknown) notes.push({ tone: 'muted', text: t.notePolicyUnknown })
-      if (lastError) notes.push({ tone: 'bad', text: t.noteLastError + ': ' + (lastError.length > 140 ? lastError.slice(0, 140) + '…' : lastError) })
-
-      // 详情:一行摘要 + 展开后的计数。默认不占地方。
-      // 摘要只说「硬故障」(异常会话 / 最近错误);常显备注已经说过的事实不再重复一遍。
-      const diagSummary = (() => {
-        const parts = []
-        if (badScopes.length) parts.push(fmt(t.statusAnomaly, { n: badScopes.length }))
-        if (lastError) parts.push(t.noteLastError)
-        if (!parts.length) parts.push(t.diagHealthy)
-        return parts.join(' · ')
-      })()
-      const diagTitleText = (() => {
-        if (!stats) return ''
-        const n = (v) => {
-          const x = Number(v)
-          return Number.isFinite(x) ? x : 0
+      if (legacyApi) notes.push({ tone: 'warn', text: t.noteLegacyApi })
+      if (!ready && !legacyApi) {
+        if (skipReason === 'same-family') {
+          // 与默认终端同族:点出是同族里哪个宿主工具,而不是含糊说「宿主工具」。
+          const family = String((ct && ct.shell && ct.shell.family) || shell.family || '')
+          const same = family ? hostTools.find((item) => item.family === family) : null
+          const named = same ? same.name : hostNames[0] || '—'
+          notes.push({ tone: 'muted', text: fmt(t.skipSameFamily, { tool: named }) })
+        } else if (skipReason === 'no-unconfined-session') {
+          notes.push({ tone: 'muted', text: t.skipNoUnconfined })
+        } else if (skipReason === 'taken') {
+          notes.push({ tone: 'muted', text: t.skipTaken })
+        } else if (skipReason) {
+          notes.push({ tone: 'warn', text: t.skipError })
         }
-        const steady = stats.steadyNow === true && !stats.lastError && !unrestrictable.length && !blockedScopes.length
-        const base = [
-          t.syncRegister + ' ' + n(stats.registers) + '/' + n(stats.registerTries),
-          t.syncDispose + ' ' + n(stats.disposes),
-          t.syncDeny + ' ' + n(stats.denyApplies),
-          t.syncDrops + ' ' + n(stats.denyDrops),
-          t.syncTicks + ' ' + n(stats.ticks),
-        ]
-        const extra = [
-          t.syncDelegate + ' ' + n(stats.delegateCalls) + '/' + n(stats.delegateTries),
-          t.syncDelegateFailures + ' ' + n(stats.delegateFailures),
-          t.syncDelegateRefusals + ' ' + n(stats.delegateRefusals),
-          t.syncDelegateRunnerFailures + ' ' + n(stats.delegateRunnerFailures),
-          t.syncDelegateAborts + ' ' + n(stats.delegateAborts),
-          t.syncGuardDenials + ' ' + n(stats.guardDenials),
-          t.syncYieldTicks + ' ' + n(stats.yieldTicks),
-          t.syncLostDenies + ' ' + (Array.isArray(stats.lostDenies) ? stats.lostDenies.length : 0),
-        ]
-        if (stats.executorFamily) extra.push(t.executor + ' ' + String(stats.executorFamily) + (stats.executorFamilySource === 'platform' ? '(' + t.executorPlatform + ')' : ''))
-        if (n(stats.detections) > 0) extra.push(t.syncDetections + ' ' + n(stats.detections) + '/' + n(stats.lastDetectMs) + 'ms')
-        if (stats.guardReady === false) base.push(t.syncGuardMissing)
-        return base.concat(extra, steady ? [t.steady] : []).filter(Boolean).join(' · ')
-      })()
+      }
+      if (ready && confined) notes.push({ tone: 'warn', text: fmt(t.noteConfined, { n: confinedCount }) })
+      if (ready) notes.push({ tone: 'muted', text: t.envHint })
+      const shownNotes = notes.slice(0, 2)
+      const badgeTitle = shownNotes.length ? shownNotes.map((note) => note.text).join(' · ') : undefined
+
+      // 详情:扫描计数 + 宿主工具 chips + 最近错误。计数只读 syncStats 的白名单字段。
+      const statNum = (value) => {
+        const n = Number(value)
+        return Number.isFinite(n) && n > 0 ? Math.round(n) : 0
+      }
+      const countText = stats
+        ? [fmt(t.dScan, { n: statNum(stats.detections) }), fmt(t.dLastScan, { n: statNum(stats.lastDetectMs) }), fmt(t.dRegisterTries, { n: statNum(stats.registerTries) })].join(' · ')
+        : ''
+      const lastError = stats && typeof stats.lastError === 'string' ? stats.lastError.trim() : ''
 
       // ── 小零件 ──
       const badge = (tone, text, extra) => h('span', Object.assign({ className: 'envd-badge ' + tone }, extra || {}), h('span', { className: 'dot' }), text)
@@ -1015,6 +744,38 @@ window.__ModuleLoader__.load({
         )
       const field = (label, klass, input) => h('label', { className: 'envd-f ' + (klass || '') }, h('span', { className: 'envd-label' }, label), input)
       const ghostAdd = (text, onClick) => h('button', { className: 'envd-btn ghost', onClick, style: { alignSelf: 'flex-start' } }, '+ ' + text)
+
+      // ── 详情:扫描计数 + 宿主工具 chips + 最近错误(默认折叠) ──
+      const diagBlock = diagOpen
+        ? h(
+            'div',
+            { className: 'envd-diag-detail' },
+            h('span', { className: 'envd-diag-stat', key: 'dstat' }, countText || t.never),
+            h(
+              'span',
+              { className: 'envd-diag-shelltools', key: 'dtools' },
+              t.hostTools + ': ',
+              hostTools.length
+                ? hostTools.map((item) =>
+                    h(
+                      'span',
+                      {
+                        key: 'ht-' + item.name,
+                        className: 'envd-shellchip',
+                        title: [item.name, item.family, item.learned ? t.learnedTag : ''].filter(Boolean).join(' · '),
+                      },
+                      h('span', { className: 'envd-mono' }, item.name),
+                      item.family ? ' · ' + item.family : '',
+                      item.learned ? ' ✦' : '',
+                    ),
+                  )
+                : h('span', { key: 'ht-none', className: 'envd-sub' }, t.hostToolsNone),
+            ),
+            lastError
+              ? h('span', { className: 'e', key: 'derr' }, t.noteLastError + ': ' + (lastError.length > 140 ? lastError.slice(0, 140) + '…' : lastError))
+              : null,
+          )
+        : null
 
       // ── 终端选择:面板的主操作,常显 ──
       const shellChips = h(
@@ -1072,108 +833,6 @@ window.__ModuleLoader__.load({
               ),
               h('button', { className: 'envd-btn ghost', onClick: () => setShellFormOpen(false) }, t.collapse),
             ),
-          )
-        : null
-
-      // ── 接管设置:默认收起,不跟状态抢地方 ──
-      const modeChips = h(
-        'div',
-        { className: 'envd-chips envd-chips-sm', role: 'group', 'aria-label': t.modeLabel },
-        [
-          ['auto', t.takeoverAuto],
-          ['takeover', t.takeoverOn],
-          ['off', t.takeoverOff],
-        ].map((pair) =>
-          h('button', { key: pair[0], className: 'envd-chip' + (takeoverMode === pair[0] ? ' on' : ''), 'aria-pressed': takeoverMode === pair[0], onClick: () => post({ op: 'setOption', shellTakeover: pair[0] }) }, pair[1]),
-        ),
-      )
-      const sandboxChips = h(
-        'div',
-        { className: 'envd-chips envd-chips-sm', role: 'group', 'aria-label': t.sandboxTakeover, title: t.sandboxDelegateHint },
-        [
-          ['delegate', t.sandboxDelegate],
-          ['refuse', t.sandboxRefuse],
-        ].map((pair) =>
-          h('button', { key: pair[0], className: 'envd-chip' + (sandboxTakeoverMode === pair[0] ? ' on' : ''), 'aria-pressed': sandboxTakeoverMode === pair[0], onClick: () => post({ op: 'setOption', sandboxTakeover: pair[0] }) }, pair[1]),
-        ),
-      )
-      const settingsBlock = settingsOpen
-        ? h(
-            'div',
-            { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-            h('div', { className: 'envd-row' }, h('span', { className: 'envd-tag' }, t.modeLabel), modeChips),
-            h('div', { className: 'envd-row' }, h('span', { className: 'envd-tag' }, t.sandboxTakeover), sandboxChips),
-          )
-        : null
-
-      // ── 逐会话:异常一定展开;正常默认收起 ──
-      const scopeRows = scopes.length ? (badScopes.length ? badScopes.concat(scopes.filter((sc) => !isBadScope(sc, t))) : scopes) : []
-      const showSessions = hasScopes && (sessionsUser === undefined ? badScopes.length > 0 : sessionsUser)
-      // 同终局 + 同原因 + 同工具的会话合并成一行(多 id 并列):
-      // 3 个会话都「直连 + 宿主 ops_bash 仍可见」时,逐行重复同一句话只是噪音。
-      const sessionGroups = []
-      if (showSessions) {
-        const byKey = new Map()
-        for (const sc of scopeRows) {
-          const reasons = scopeReasons(sc, t)
-          const bad = reasons.length > 0 || sc.anomaly === true
-          const confinedTone = sc.confined === true ? 'y' : sc.confined === false ? 'n' : '?'
-          const key = (bad ? 'bad|' : 'ok|') + String(sc.kind || '') + '|' + String(sc.tool || '') + '|' + confinedTone + '|' + reasons.join('·')
-          if (!byKey.has(key)) byKey.set(key, { bad, kind: sc.kind, tool: sc.tool, confined: sc.confined, reasons, ids: [], hidden: [] })
-          const group = byKey.get(key)
-          group.ids.push(String(sc.id || '?'))
-          if (Array.isArray(sc.hidden)) for (const name of sc.hidden) if (name) group.hidden.push(String(name))
-        }
-        sessionGroups.push(...byKey.values())
-      }
-      const sessionList = sessionGroups.length
-        ? h(
-            'div',
-            { className: 'envd-sessions' },
-            sessionGroups.map((group, index) => {
-              const shownIds = group.ids.slice(0, 4).map(shortId)
-              const more = group.ids.length - shownIds.length
-              const idsText = shownIds.join(' · ') + (more > 0 ? ' +' + more : '')
-              const title = [group.ids.join('\n'), group.hidden.length ? fmt(t.scopeHidden, { names: group.hidden.join(', ') }) : ''].filter(Boolean).join('\n')
-              return h(
-                'div',
-                { className: 'envd-srow' + (group.bad ? ' bad' : ''), key: 'sg-' + index, 'data-kind': String(group.kind || 'unknown'), title },
-                h('span', { className: 'envd-sdot ' + (group.bad ? 'bad' : group.kind === 'takeover' ? 'ok' : group.kind === 'host' ? 'idle' : 'warn') }),
-                h('span', { className: 'envd-sid' }, idsText),
-                h('span', { className: 'envd-skind' }, scopeKindText({ kind: group.kind, confined: group.confined }, t)),
-                h('span', { className: 'envd-stool' }, group.tool ? String(group.tool) : t.sessionNoTool),
-                group.reasons.length ? h('span', { className: 'envd-sreason' }, group.reasons.join(' · ')) : null,
-              )
-            }),
-          )
-        : null
-
-      // ── 已识别宿主工具:学习的结果,一行说完 ──
-      // 学习结果只在「详情」里展示:常显区已经有工具名与备注,再摆一行 chips 就是重复。
-      const recognizedTools = runtimeShellTools
-
-      const diagBlock = diagOpen
-        ? h(
-            'div',
-            { className: 'envd-diag-detail' },
-            h('span', { key: 'dgc', title: diagTitleText }, diagTitleText || diagSummary),
-            ...notes.map((note, i) => h('span', { key: 'dg' + i, className: note.tone === 'bad' ? 'e' : 'w' }, note.text)),
-            recognizedTools.length
-              ? h(
-                  'span',
-                  { key: 'dgr', className: 'envd-diag-shelltools' },
-                  t.recognized + ': ',
-                  recognizedTools.map((item) =>
-                    h(
-                      'span',
-                      { key: 'rs' + item.name, className: 'envd-shellchip', title: item.name + (item.family ? ' · ' + item.family : '') + (item.learned ? ' · ' + t.learnedTag : '') },
-                      h('span', { className: 'envd-mono' }, item.name),
-                      item.family ? ' · ' + item.family : '',
-                      item.learned ? ' ✦' : '',
-                    ),
-                  ),
-                )
-              : null,
           )
         : null
 
@@ -1353,7 +1012,7 @@ window.__ModuleLoader__.load({
               shell.version ? ' v' + shell.version : '',
             )
           : h('span', { className: 'envd-headline' }, t.loading),
-        data ? badge(statusTone, statusText, { title: [toolText, hasScopes ? fmt(t.nSessions, { n: scopes.length }) : '', ...notes.map((n) => n.text)].filter(Boolean).join('\n') }) : null,
+        data ? badge(badgeTone, badgeText, { title: badgeTitle }) : null,
         h('span', { className: 'envd-grow' }),
         h('button', { className: 'envd-btn primary', disabled: busy, onClick: () => post({ op: 'refresh' }) }, busy ? t.detecting : t.refresh),
       )
@@ -1402,40 +1061,37 @@ window.__ModuleLoader__.load({
           body.push(h('div', { className: 'envd-err', key: 'nosub' }, h('span', { className: 'h' }, t.subprocessOff)))
         }
 
-        // ── 接管卡:终端选择 + 一句状态 + 备注 + (设置 | 会话 | 详情) ──
+        // ── 命令卡:终端选择 + 命令工具一行 + 最多两行备注 + 详情 ──
         body.push(
           h(
             'section',
-            { className: 'envd-card', key: 'takeover' },
+            { className: 'envd-card', key: 'command' },
             h('div', { className: 'envd-row' }, h('span', { className: 'envd-tag' }, t.terminal), shellChips),
             shellForm,
             h(
               'div',
-              { className: 'envd-row' },
+              { className: 'envd-row envd-cmdrow' },
               h('span', { className: 'envd-tag' }, t.command),
-              toolText ? h('span', { className: 'envd-tool', title: toolText }, toolText) : null,
-              sessionsText ? h('span', { className: 'envd-sub' }, sessionsText) : null,
+              h('span', { className: 'envd-tool', title: t.cmdHintEnvDock }, ownText),
+              h('span', { className: 'envd-sep' }, '·'),
+              h('span', { className: 'envd-host', title: t.cmdHintHost }, hostText),
               h('span', { className: 'envd-grow' }),
-              hasScopes ? h('button', { className: 'envd-btn ghost', 'aria-expanded': showSessions, onClick: () => setSessionsUser(!showSessions) }, showSessions ? t.collapse : t.sessions) : null,
-              h('button', { className: 'envd-btn ghost', 'aria-expanded': settingsOpen, onClick: () => setSettingsOpen((v) => !v) }, t.settings),
-              h('button', { className: 'envd-btn ghost', 'aria-expanded': diagOpen, title: diagSummary, onClick: () => setDiagOpen((v) => !v) }, t.diag),
+              h('button', { className: 'envd-btn ghost', 'aria-expanded': diagOpen, title: countText || t.never, onClick: () => setDiagOpen((v) => !v) }, t.diag),
             ),
-            notes.length
+            shownNotes.length
               ? h(
                   'div',
                   { className: 'envd-notes' },
-                  notes.map((note, index) =>
+                  shownNotes.map((note, index) =>
                     h(
                       'div',
-                      { className: 'envd-note' + (note.tone && note.tone !== 'muted' ? ' ' + note.tone : ''), key: 'note' + index, title: note.title },
-                      h('span', { className: 'ic' }, note.tone === 'bad' ? '⛔' : note.tone === 'warn' ? '⚠' : '·'),
+                      { className: 'envd-note' + (note.tone && note.tone !== 'muted' ? ' ' + note.tone : ''), key: 'note' + index },
+                      h('span', { className: 'ic' }, note.tone === 'warn' ? '⚠' : '·'),
                       h('span', {}, note.text),
                     ),
                   ),
                 )
               : null,
-            settingsBlock,
-            sessionList,
             diagBlock,
           ),
         )
